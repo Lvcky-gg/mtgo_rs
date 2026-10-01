@@ -12,9 +12,18 @@ use crate::{
 
 /// An explicit action inside card hovers; selection clicks retain their meaning.
 pub fn offer_card_enlargement(ui: &mut Ui, name: &str) {
+    offer_printing_enlargement(ui, name, None);
+}
+
+pub fn offer_printing_enlargement(ui: &mut Ui, name: &str, printing: Option<&str>) {
     if ui.button("Enlarge card").clicked() {
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(egui::Id::new("enlarged-card"), name.to_owned()));
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("enlarged-card"),
+                printing.map_or_else(|| name.to_owned(), |id| format!("scryfall:{id}")),
+            );
+            data.insert_temp(egui::Id::new("enlarged-card-title"), name.to_owned());
+        });
     }
 }
 
@@ -25,7 +34,11 @@ pub fn show_enlarged_card(ui: &mut Ui, art: &mut CardArt) {
         return;
     };
     let mut open = true;
-    egui::Window::new(&name)
+    let title = ui
+        .ctx()
+        .data(|data| data.get_temp::<String>(egui::Id::new("enlarged-card-title")))
+        .unwrap_or_else(|| name.clone());
+    egui::Window::new(&title)
         .id(key)
         .open(&mut open)
         .resizable(true)

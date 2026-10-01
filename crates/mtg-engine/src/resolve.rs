@@ -714,15 +714,7 @@ pub fn resolve(
                     let pay = enter_choice(state, cards, rc, new_id)?;
                     entered(state, cards, log, new_id, cause, pay);
                     if *tapped {
-                        apply::apply(
-                            state,
-                            cause,
-                            Event::TapChanged {
-                                object: new_id,
-                                tapped: true,
-                            },
-                            log,
-                        );
+                        apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
                     }
                 }
                 moved.push(Target::Object(new_id));
@@ -1254,15 +1246,7 @@ pub fn resolve(
                     continue;
                 };
                 entered(state, cards, log, new_id, cause, None);
-                apply::apply(
-                    state,
-                    cause,
-                    Event::TapChanged {
-                        object: new_id,
-                        tapped: true,
-                    },
-                    log,
-                );
+                apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
                 // Still attacking only if combat is still on.
                 if let Some(defender) = defender
                     && state.step.is_combat()
@@ -2955,8 +2939,7 @@ pub(crate) fn entered(
     let Some(obj) = state.objects.get(&id) else {
         return;
     };
-    // A face-down permanent has no replacement effects to apply (CR 708.2).
-    if obj.zone.zone != Zone::Battlefield || obj.face_down {
+    if obj.zone.zone != Zone::Battlefield {
         return;
     }
     let Some(face) = cards.face(obj.card, obj.face) else {
@@ -2964,164 +2947,162 @@ pub(crate) fn entered(
     };
     let mut events = Vec::new();
     let mut haste = false;
-    // "You control enchanted creature" (layer 2), recorded on the permanent.
-    if face.abilities.iter().any(|a| {
-        matches!(
-            &a.kind,
-            mtg_ir::AbilityKind::Static {
-                what: Selector::All { filter, .. },
-                modification: mtg_ir::effect::Modification::Control(Selector::You),
-                condition: None,
-            } if filter_is_attached(filter)
-        )
-    }) {
-        events.push(Event::ControlsHost { object: id });
-    }
-    // CR 726.2 — a daybound permanent arriving with neither day nor night makes it day;
-    // at night it enters with its night face up (CR 702.145c).
-    if day_bound(cards, obj) {
-        match state.day {
-            None => events.push(Event::DayNight { day: true }),
-            Some(false) if obj.face == 0 => events.push(Event::Transformed {
-                object: id,
-                face: 1,
-            }),
-            _ => {}
+    // Face-down objects have no own abilities, but other permanents' replacement
+    // effects still apply to them (CR 708.2 and 614.12).
+    if !obj.face_down {
+        // "You control enchanted creature" (layer 2), recorded on the permanent.
+        if face.abilities.iter().any(|a| {
+            matches!(
+                &a.kind,
+                mtg_ir::AbilityKind::Static {
+                    what: Selector::All { filter, .. },
+                    modification: mtg_ir::effect::Modification::Control(Selector::You),
+                    condition: None,
+                } if filter_is_attached(filter)
+            )
+        }) {
+            events.push(Event::ControlsHost { object: id });
         }
-    }
-    // CR 714.3a — a Saga enters with a lore counter.
-    if let Some(lore) = face.abilities.iter().find_map(|a| match a.kind {
-        mtg_ir::AbilityKind::Saga { lore, .. } => Some(lore),
-        _ => None,
-    }) {
-        events.push(Event::CountersChanged {
-            object: id,
-            kind: lore,
-            delta: 1,
-        });
-    }
-    if let Some(loyalty) = face.loyalty.filter(|n| *n > 0)
-        && face.card_types.contains(&mtg_core::CardType::Planeswalker)
-    {
-        events.push(Event::CountersChanged {
-            object: id,
-            kind: mtg_core::CounterKind::Loyalty,
-            delta: loyalty,
-        });
-    }
-    for ability in &face.abilities {
-        let mtg_ir::AbilityKind::ReplacementEffect(r) = &ability.kind else {
-            continue;
-        };
-        if !matches!(
-            &r.matches,
-            mtg_ir::EventPattern::Enters {
-                who: mtg_ir::ObjectFilter::IsSelf
-            }
-        ) {
-            continue;
-        }
-        match &r.kind {
-            R::EntersTapped => events.push(Event::TapChanged {
-                object: id,
-                tapped: true,
-            }),
-            R::EntersTappedUnless { condition } => {
-                // Checked as it enters, from its own point of view ("other lands").
-                let holds = with_ctx(state, cards, &ResolveCtx::new(id, obj.controller), |ctx| {
-                    eval::condition(ctx, condition)
-                })
-                .unwrap_or(false);
-                if !holds {
-                    events.push(Event::TapChanged {
-                        object: id,
-                        tapped: true,
-                    });
-                }
-            }
-            // Paying is only possible with that much life (CR 119.4); without an answer,
-            // or unable to pay, it enters tapped.
-            R::EntersTappedUnlessPaysLife { amount } => {
-                let life = state.player(obj.controller).life;
-                if yes && life >= *amount as i32 {
-                    events.push(Event::LifeChanged {
-                        player: obj.controller,
-                        delta: -(*amount as i32),
-                    });
-                } else {
-                    events.push(Event::TapChanged {
-                        object: id,
-                        tapped: true,
-                    });
-                }
-            }
-            R::EntersWithCounterIfChosen if yes => {
-                events.push(Event::CountersChanged {
+        // CR 726.2 — a daybound permanent arriving with neither day nor night makes it day;
+        // at night it enters with its night face up (CR 702.145c).
+        if day_bound(cards, obj) {
+            match state.day {
+                None => events.push(Event::DayNight { day: true }),
+                Some(false) if obj.face == 0 => events.push(Event::Transformed {
                     object: id,
-                    kind: mtg_core::CounterKind::PlusOnePlusOne,
-                    delta: 1,
-                });
+                    face: 1,
+                }),
+                _ => {}
             }
-            R::EntersChoosing(choice) => {
-                // The answer picks one of the options; none given, the first.
-                let options = entry_options(cards, *choice);
-                let picked = match &answer {
-                    Some(Answer::Modes(m)) => m.first().copied().unwrap_or(0) as usize,
-                    _ => 0,
-                };
-                if let Some((_, color, subtype)) = options.get(picked).or_else(|| options.first()) {
-                    events.push(Event::ChoiceMade {
-                        object: id,
-                        color: *color,
-                        subtype: *subtype,
-                    });
+        }
+        // CR 714.3a — a Saga enters with a lore counter.
+        if let Some(lore) = face.abilities.iter().find_map(|a| match a.kind {
+            mtg_ir::AbilityKind::Saga { lore, .. } => Some(lore),
+            _ => None,
+        }) {
+            events.push(Event::CountersChanged {
+                object: id,
+                kind: lore,
+                delta: 1,
+            });
+        }
+        if let Some(loyalty) = face.loyalty.filter(|n| *n > 0)
+            && face.card_types.contains(&mtg_core::CardType::Planeswalker)
+        {
+            events.push(Event::CountersChanged {
+                object: id,
+                kind: mtg_core::CounterKind::Loyalty,
+                delta: loyalty,
+            });
+        }
+        for ability in &face.abilities {
+            let mtg_ir::AbilityKind::ReplacementEffect(r) = &ability.kind else {
+                continue;
+            };
+            if !matches!(
+                &r.matches,
+                mtg_ir::EventPattern::Enters {
+                    who: mtg_ir::ObjectFilter::IsSelf
                 }
+            ) {
+                continue;
             }
-            R::EntersWithCounterOrHaste => {
-                if yes {
+            match &r.kind {
+                R::EntersTapped => events.push(Event::EnteredTapped { object: id }),
+                R::EntersTappedUnless { condition } => {
+                    // Checked as it enters, from its own point of view ("other lands").
+                    let holds =
+                        with_ctx(state, cards, &ResolveCtx::new(id, obj.controller), |ctx| {
+                            eval::condition(ctx, condition)
+                        })
+                        .unwrap_or(false);
+                    if !holds {
+                        events.push(Event::EnteredTapped { object: id });
+                    }
+                }
+                // Paying is only possible with that much life (CR 119.4); without an answer,
+                // or unable to pay, it enters tapped.
+                R::EntersTappedUnlessPaysLife { amount } => {
+                    let life = state.player(obj.controller).life;
+                    if yes && life >= *amount as i32 {
+                        events.push(Event::LifeChanged {
+                            player: obj.controller,
+                            delta: -(*amount as i32),
+                        });
+                    } else {
+                        events.push(Event::EnteredTapped { object: id });
+                    }
+                }
+                R::EntersWithCounterIfChosen if yes => {
                     events.push(Event::CountersChanged {
                         object: id,
                         kind: mtg_core::CounterKind::PlusOnePlusOne,
                         delta: 1,
                     });
-                } else {
-                    haste = true;
                 }
-            }
-            R::EntersWithCounters {
-                condition: Some(c), ..
-            } if !with_ctx(state, cards, &ResolveCtx::new(id, obj.controller), |ctx| {
-                eval::condition(ctx, c)
-            })
-            .unwrap_or(false) => {}
-            R::EntersWithCounters { kind, amount, .. } => {
-                let n = match amount {
-                    mtg_ir::Value::Fixed(n) => *n,
-                    // "enters with X counters": the X it was cast with.
-                    mtg_ir::Value::X => obj.cast_x as i32,
-                    // Sunburst, converge, "for each creature you control": from the
-                    // entering permanent's point of view.
-                    other => {
-                        let mut rc = ResolveCtx::new(id, obj.controller);
-                        rc.x = obj.cast_x;
-                        with_ctx(state, cards, &rc, |ctx| eval::value(ctx, other)).unwrap_or(0)
+                R::EntersChoosing(choice) => {
+                    // The answer picks one of the options; none given, the first.
+                    let options = entry_options(cards, *choice);
+                    let picked = match &answer {
+                        Some(Answer::Modes(m)) => m.first().copied().unwrap_or(0) as usize,
+                        _ => 0,
+                    };
+                    if let Some((_, color, subtype)) =
+                        options.get(picked).or_else(|| options.first())
+                    {
+                        events.push(Event::ChoiceMade {
+                            object: id,
+                            color: *color,
+                            subtype: *subtype,
+                        });
                     }
-                };
-                if n > 0 {
-                    events.push(Event::CountersChanged {
-                        object: id,
-                        kind: *kind,
-                        delta: n,
-                    });
                 }
+                R::EntersWithCounterOrHaste => {
+                    if yes {
+                        events.push(Event::CountersChanged {
+                            object: id,
+                            kind: mtg_core::CounterKind::PlusOnePlusOne,
+                            delta: 1,
+                        });
+                    } else {
+                        haste = true;
+                    }
+                }
+                R::EntersWithCounters {
+                    condition: Some(c), ..
+                } if !with_ctx(state, cards, &ResolveCtx::new(id, obj.controller), |ctx| {
+                    eval::condition(ctx, c)
+                })
+                .unwrap_or(false) => {}
+                R::EntersWithCounters { kind, amount, .. } => {
+                    let n = match amount {
+                        mtg_ir::Value::Fixed(n) => *n,
+                        // "enters with X counters": the X it was cast with.
+                        mtg_ir::Value::X => obj.cast_x as i32,
+                        // Sunburst, converge, "for each creature you control": from the
+                        // entering permanent's point of view.
+                        other => {
+                            let mut rc = ResolveCtx::new(id, obj.controller);
+                            rc.x = obj.cast_x;
+                            with_ctx(state, cards, &rc, |ctx| eval::value(ctx, other)).unwrap_or(0)
+                        }
+                    };
+                    if n > 0 {
+                        events.push(Event::CountersChanged {
+                            object: id,
+                            kind: *kind,
+                            delta: n,
+                        });
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
     // Other permanents' "… enter tapped" (CR 614.1c), from each one's point of view.
     if !events
         .iter()
-        .any(|e| matches!(e, Event::TapChanged { tapped: true, .. }))
+        .any(|e| matches!(e, Event::EnteredTapped { .. }))
     {
         let others: Vec<ObjectId> = state
             .battlefield()
@@ -3149,10 +3130,7 @@ pub(crate) fn entered(
             })
         });
         if tapped {
-            events.push(Event::TapChanged {
-                object: id,
-                tapped: true,
-            });
+            events.push(Event::EnteredTapped { object: id });
         }
     }
     for e in events {

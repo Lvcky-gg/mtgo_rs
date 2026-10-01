@@ -100,6 +100,99 @@ fn eligible_attackers(
 // ---- who may attack ----------------------------------------------------
 
 #[test]
+fn a_single_blocked_trampler_can_choose_to_overassign_instead_of_hitting_the_player() {
+    let mut state = board();
+    let attacker = ready(&mut state, TRAMPLER, P0);
+    let blocker = ready(&mut state, DUMMY, P1);
+    let cards = TestCards::default();
+    let mut engine = Engine::new(state);
+    let mut chose = false;
+    for _ in 0..6000 {
+        if engine.state.step == Step::PostcombatMain {
+            break;
+        }
+        let Progress::NeedsChoice(choice) = engine.advance(&cards) else {
+            continue;
+        };
+        let answer = match &choice.kind {
+            ChoiceKind::DeclareAttackers { .. } => Answer::Objects(vec![attacker]),
+            ChoiceKind::DeclareBlockers { .. } => Answer::Blocks(vec![(blocker, attacker)]),
+            ChoiceKind::AssignCombatDamage { among, total, .. } => {
+                assert_eq!(among, &vec![blocker]);
+                chose = true;
+                Answer::DamageAssignment(vec![(blocker, *total)])
+            }
+            _ => choice.default.clone().unwrap_or(Answer::Pass),
+        };
+        engine.answer(&cards, choice.id, answer).unwrap();
+    }
+    assert!(chose);
+    assert_eq!(engine.state.step, Step::PostcombatMain);
+    assert_eq!(engine.state.player(P1).life, 20);
+}
+
+#[test]
+fn trample_still_reaches_the_defender_when_all_blockers_leave() {
+    let mut state = board();
+    let attacker = ready(&mut state, TRAMPLER, P0);
+    state.combat.was_blocked.insert(attacker);
+    let assignment = mtg_engine::combat::assign_attacker_damage(
+        &state,
+        &TestCards::default(),
+        attacker,
+        mtg_core::Target::Player(P1),
+    )
+    .unwrap();
+    assert_eq!(assignment.to, vec![(mtg_core::Target::Player(P1), 4)]);
+}
+
+#[test]
+fn changing_first_strike_between_damage_steps_uses_the_first_steps_history() {
+    for gained in [false, true] {
+        let mut state = board();
+        let attacker = ready(&mut state, if gained { DUMMY } else { FIRST_STRIKER }, P0);
+        let other = gained.then(|| ready(&mut state, FIRST_STRIKER, P0));
+        let cards = TestCards::default();
+        let mut engine = Engine::new(state);
+        let mut changed = false;
+        for _ in 0..6000 {
+            if engine.state.step == Step::PostcombatMain {
+                break;
+            }
+            let Progress::NeedsChoice(choice) = engine.advance(&cards) else {
+                continue;
+            };
+            if !changed
+                && engine.state.step == Step::FirstStrikeCombatDamage
+                && matches!(choice.kind, ChoiceKind::Priority { .. })
+            {
+                // Changing the printed fixture simulates gaining/losing the keyword
+                // after first-strike damage. The rule depends on its earlier history.
+                engine.state.objects.get_mut(&attacker).unwrap().card =
+                    if gained { FIRST_STRIKER } else { DUMMY };
+                engine.state.bump();
+                changed = true;
+            }
+            let answer = match &choice.kind {
+                ChoiceKind::DeclareAttackers { .. } => {
+                    Answer::Objects(std::iter::once(attacker).chain(other).collect())
+                }
+                ChoiceKind::DeclareBlockers { .. } => Answer::Blocks(Vec::new()),
+                _ => choice.default.clone().unwrap_or(Answer::Pass),
+            };
+            engine.answer(&cards, choice.id, answer).unwrap();
+        }
+        assert!(changed);
+        assert_eq!(engine.state.step, Step::PostcombatMain);
+        assert_eq!(
+            engine.state.player(P1).life,
+            if gained { 18 } else { 19 },
+            "gained={gained}: changing first strike must not skip or repeat damage"
+        );
+    }
+}
+
+#[test]
 fn declaring_an_attacker_taps_it() {
     let mut state = board();
     let a = ready(&mut state, DUMMY, P0);
@@ -540,7 +633,7 @@ fn custom_trample_damage_sends_only_valid_excess_to_the_defender() {
 }
 
 #[test]
-fn forced_damage_detection_handles_large_combined_lethal_thresholds() {
+fn multiple_blockers_allow_a_choice_even_with_large_lethal_thresholds() {
     let mut state = board();
     let attacker = ready(&mut state, BIG, P0);
     let blockers: Vec<_> = (0..3)
@@ -556,7 +649,7 @@ fn forced_damage_detection_handles_large_combined_lethal_thresholds() {
         })
         .collect();
     state.combat.blocks.insert(attacker, blockers);
-    assert!(mtg_engine::combat::assignment_is_forced(
+    assert!(!mtg_engine::combat::assignment_is_forced(
         &state,
         &TestCards::default(),
         attacker
@@ -619,6 +712,10 @@ fn lethal_damage_does_not_wrap_large_marked_damage() {
             mtg_engine::combat::lethal_damage(&state, &cards, victim, false),
             2_u32.saturating_sub(marked)
         );
+        assert_eq!(
+            mtg_engine::combat::lethal_damage(&state, &cards, victim, true),
+            2_u32.saturating_sub(marked).min(1)
+        );
     }
 }
 
@@ -653,7 +750,6 @@ fn custom_damage_rejects_invalid_rows_without_consuming_the_question() {
                     vec![(attacker, 6)],
                     vec![(first, u32::MAX), (second, u32::MAX)],
                     vec![(first, 5)],
-                    vec![(second, 6)],
                 ] {
                     assert!(
                         engine
@@ -666,7 +762,7 @@ fn custom_damage_rejects_invalid_rows_without_consuming_the_question() {
                     assert_eq!(retry.id, choice.id);
                 }
                 checked = true;
-                Answer::DamageAssignment(vec![(first, 6)])
+                Answer::DamageAssignment(vec![(second, 6)])
             }
             _ => choice.default.clone().unwrap_or(Answer::Pass),
         };
@@ -761,9 +857,7 @@ fn a_single_blocker_needs_no_ordering_prompt() {
 }
 
 #[test]
-fn two_blockers_do_need_an_ordering_prompt() {
-    // CR 509.2 — the attacking player orders them, because damage assignment
-    // depends on it.
+fn two_blockers_do_not_need_an_obsolete_ordering_prompt() {
     let mut state = board();
     let a = ready(&mut state, BIG, P0);
     let b1 = ready(&mut state, DUMMY, P1);
@@ -780,17 +874,16 @@ fn two_blockers_do_need_an_ordering_prompt() {
         },
     );
 
-    let prompt = seen
-        .iter()
-        .find(|c| matches!(c.kind, ChoiceKind::OrderBlockers { .. }))
-        .expect("should be asked to order two blockers");
-    assert_eq!(prompt.who, P0, "the attacking player orders them");
+    assert!(
+        !seen
+            .iter()
+            .any(|c| matches!(c.kind, ChoiceKind::OrderBlockers { .. }))
+    );
 }
 
 #[test]
-fn damage_assignment_is_not_asked_when_it_is_forced() {
-    // A 4/4 into two 2/2 blockers has exactly enough for both: no spare damage, so
-    // no decision. Same principle as the trigger ordering analysis.
+fn damage_assignment_is_asked_even_without_spare_damage() {
+    // CR 510.1c permits 4/0, 3/1, 2/2, 1/3, or 0/4 against two 2/2s.
     let mut state = board();
     let a = ready(&mut state, TRAMPLER, P0); // 4/4
     let b1 = ready(&mut state, DUMMY, P1); // 2/2
@@ -808,10 +901,9 @@ fn damage_assignment_is_not_asked_when_it_is_forced() {
     );
 
     assert!(
-        !seen
-            .iter()
+        seen.iter()
             .any(|c| matches!(c.kind, ChoiceKind::AssignCombatDamage { .. })),
-        "4 power against two 2-toughness blockers is forced, got {seen:#?}"
+        "4 power against two blockers allows a division, got {seen:#?}"
     );
 }
 

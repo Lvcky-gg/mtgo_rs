@@ -17,9 +17,7 @@ use mtg_store::{CardQuery, Section, Store};
 
 use crate::{art::CardArt, widgets};
 
-const GOOD: Color32 = Color32::from_rgb(120, 190, 130);
-const WARN: Color32 = Color32::from_rgb(220, 140, 90);
-const ACCENT: Color32 = Color32::from_rgb(118, 168, 220);
+use crate::theme::{GOLD as ACCENT, GOOD, WARN};
 
 /// Formats the "legal in" filter offers, by Scryfall's key.
 const LEGALITY_FORMATS: [(&str, &str); 8] = [
@@ -274,6 +272,8 @@ pub struct Draft {
     pub commander: Option<u32>,
     /// Display details for every card in the deck.
     pub cards: BTreeMap<u32, DraftCard>,
+    /// Artwork preference for each oracle identity; rules and counts stay oracle based.
+    pub printings: BTreeMap<u32, String>,
     /// Changed since last saved.
     pub dirty: bool,
     undo: Vec<DeckContents>,
@@ -284,6 +284,7 @@ pub struct Draft {
 /// Editing history changes deck composition; text fields retain their own undo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DeckContents {
+    printings: BTreeMap<u32, String>,
     main: BTreeMap<u32, u32>,
     side: BTreeMap<u32, u32>,
     commander: Option<u32>,
@@ -412,6 +413,11 @@ impl Draft {
                 }
             }
         }
+        draft.printings = store
+            .deck_printings(id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .collect();
         draft.saved = Some((draft.name.trim().to_string(), draft.contents()));
         Ok(draft)
     }
@@ -528,10 +534,24 @@ impl Draft {
 
     fn contents(&self) -> DeckContents {
         DeckContents {
+            printings: self.printings.clone(),
             main: self.main.clone(),
             side: self.side.clone(),
             commander: self.commander,
         }
+    }
+
+    pub fn set_printing(&mut self, oracle: u32, printing: Option<String>) {
+        if self.printings.get(&oracle) == printing.as_ref() {
+            return;
+        }
+        self.remember();
+        if let Some(id) = printing {
+            self.printings.insert(oracle, id);
+        } else {
+            self.printings.remove(&oracle);
+        }
+        self.refresh_dirty();
     }
 
     fn remember(&mut self) {
@@ -543,6 +563,7 @@ impl Draft {
     }
 
     fn restore(&mut self, contents: DeckContents) {
+        self.printings = contents.printings;
         self.main = contents.main;
         self.side = contents.side;
         self.commander = contents.commander;
@@ -647,7 +668,17 @@ impl Draft {
         entries.extend(self.side.iter().map(|(o, n)| (*o, *n, Section::Sideboard)));
         entries.extend(self.commander.map(|o| (o, 1, Section::Commander)));
         let id = store
-            .put_deck_replacing(self.id, &name, None, &entries)
+            .put_deck_with_printings(
+                self.id,
+                &name,
+                None,
+                &entries,
+                &self
+                    .printings
+                    .iter()
+                    .map(|(o, p)| (*o, p.clone()))
+                    .collect::<Vec<_>>(),
+            )
             .map_err(|e| e.to_string())?;
         self.id = Some(id);
         self.name = name;
@@ -685,7 +716,7 @@ impl Draft {
             store
                 .card(*o)
                 .map_err(|error| format!("Could not read card #{o}: {error}"))?
-                .map(|c| CardKey::Oracle(c.oracle_uuid, None))
+                .map(|c| CardKey::Oracle(c.oracle_uuid, self.printings.get(o).cloned()))
                 .ok_or_else(|| {
                     format!(
                         "{} (card #{o}) is missing from the database",
@@ -759,6 +790,7 @@ pub struct Builder {
     status: Option<(String, bool)>,
     confirm_close: bool,
     support: BTreeMap<u32, CardSupport>,
+    printing_picker: Option<crate::printings::Picker>,
 }
 
 impl Builder {
@@ -787,6 +819,7 @@ impl Builder {
             status: None,
             confirm_close: false,
             support: BTreeMap::new(),
+            printing_picker: None,
         }
     }
 
@@ -796,7 +829,7 @@ impl Builder {
             self.confirm_close = false;
         }
         let mut action = BuilderAction::Nothing;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if self.confirm_close {
                 ui.label(RichText::new("Unsaved changes —").color(WARN));
                 if ui.button("Discard").clicked() {
@@ -922,7 +955,34 @@ impl Builder {
     }
 
     /// The search half: filters, then a page of results as cards.
+    fn choose_printing(&mut self, ui: &Ui, store: &Store, oracle: u32) {
+        if let Ok(Some(card)) = store.card(oracle) {
+            self.printing_picker = Some(crate::printings::Picker::start(
+                ui.ctx().clone(),
+                oracle,
+                card.oracle_uuid,
+                card.name,
+            ));
+        }
+    }
+
     pub fn search(&mut self, ui: &mut Ui, store: &Store, art: &mut CardArt) {
+        if let Some(picker) = &mut self.printing_picker {
+            let (open, selection) = picker.show(
+                ui.ctx(),
+                art,
+                self.draft.printings.get(&picker.oracle).map(String::as_str),
+            );
+            if let Some(printing) = selection {
+                self.draft.set_printing(picker.oracle, printing);
+            }
+            if !open {
+                self.printing_picker = None;
+            }
+        }
+        ui.heading("Card gallery");
+        ui.label(RichText::new("Find the next card for your deck.").color(crate::theme::MUTED));
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.query.text)
@@ -1067,12 +1127,13 @@ impl Builder {
         egui::ScrollArea::vertical()
             .id_salt("results")
             .show(ui, |ui| {
-                let spacing = ui.spacing().item_spacing.x;
+                let spacing = 18.0;
                 let columns = ((ui.available_width() + spacing) / (TILE.x + spacing))
                     .floor()
                     .max(1.0) as usize;
                 egui::Grid::new("card-gallery")
                     .num_columns(columns)
+                    .spacing(Vec2::new(spacing, spacing))
                     .show(ui, |ui| {
                         for (index, (oracle, name)) in results.into_iter().enumerate() {
                             let support = self
@@ -1082,11 +1143,25 @@ impl Builder {
                                 .clone();
                             ui.vertical(|ui| {
                                 ui.set_width(TILE.x);
-                                let response =
-                                    card_tile(ui, art, &name, TILE, self.count_of(oracle));
+                                let response = card_tile_with_art(
+                                    ui,
+                                    art,
+                                    &name,
+                                    &self.draft.printings.get(&oracle).map_or_else(
+                                        || name.clone(),
+                                        |id| format!("scryfall:{id}"),
+                                    ),
+                                    TILE,
+                                    self.count_of(oracle),
+                                );
                                 let response = response.on_hover_ui(|ui| {
                                     if let Some(card) = DraftCard::load(store, oracle) {
-                                        card_preview(ui, art, &card);
+                                        card_preview_printing(
+                                            ui,
+                                            art,
+                                            &card,
+                                            self.draft.printings.get(&oracle).map(String::as_str),
+                                        );
                                     }
                                     support.explain(ui);
                                 });
@@ -1095,6 +1170,10 @@ impl Builder {
                                     self.problems = None;
                                 }
                                 response.context_menu(|ui| {
+                                    if ui.button("Choose printing").clicked() {
+                                        self.choose_printing(ui, store, oracle);
+                                        ui.close();
+                                    }
                                     if ui.button("Add to sideboard").clicked() {
                                         self.draft.add(store, oracle, true);
                                         self.problems = None;
@@ -1107,6 +1186,13 @@ impl Builder {
                                         ui.close();
                                     }
                                 });
+                                let name_response = ui.add(
+                                    egui::Label::new(RichText::new(&name).size(12.0)).truncate(),
+                                );
+                                self.hover_card(name_response, store, art, oracle);
+                                if ui.small_button("Choose printing").clicked() {
+                                    self.choose_printing(ui, store, oracle);
+                                }
                                 if !support.ready() {
                                     ui.label(RichText::new("Rules incomplete").color(WARN).small())
                                         .on_hover_ui(|ui| support.explain(ui));
@@ -1292,7 +1378,18 @@ impl Builder {
                 ui.label(RichText::new("!").color(WARN))
                     .on_hover_ui(|ui| self.support[&oracle].explain(ui));
             }
+            if ui
+                .small_button("Art")
+                .on_hover_text("Choose printing")
+                .clicked()
+            {
+                self.choose_printing(ui, store, oracle);
+            }
             response.context_menu(|ui| {
+                if ui.button("Choose printing").clicked() {
+                    self.choose_printing(ui, store, oracle);
+                    ui.close();
+                }
                 let (label, to_side) = if side {
                     ("Move one to main deck", false)
                 } else {
@@ -1341,7 +1438,12 @@ impl Builder {
                 .cloned()
                 .or_else(|| DraftCard::load(store, oracle));
             if let Some(card) = card {
-                card_preview(ui, art, &card);
+                card_preview_printing(
+                    ui,
+                    art,
+                    &card,
+                    self.draft.printings.get(&oracle).map(String::as_str),
+                );
             }
             if let Some(support) = self.support.get(&oracle) {
                 support.explain(ui);
@@ -1432,7 +1534,12 @@ impl Builder {
                 ui.horizontal_wrapped(|ui| {
                     for (index, oracle) in sample.hand.clone().into_iter().enumerate() {
                         let name = self.draft.name_of(oracle).to_string();
-                        let response = card_tile(ui, art, &name, TILE * 0.9, 0);
+                        let artwork = self
+                            .draft
+                            .printings
+                            .get(&oracle)
+                            .map_or_else(|| name.clone(), |id| format!("scryfall:{id}"));
+                        let response = card_tile_with_art(ui, art, &name, &artwork, TILE * 0.9, 0);
                         if let Some(position) = sample.bottom.iter().position(|i| *i == index) {
                             ui.painter().rect_stroke(
                                 response.rect,
@@ -1459,7 +1566,12 @@ impl Builder {
                         }
                         response.on_hover_ui(|ui| {
                             if let Some(card) = self.draft.cards.get(&oracle) {
-                                card_preview(ui, art, card);
+                                card_preview_printing(
+                                    ui,
+                                    art,
+                                    card,
+                                    self.draft.printings.get(&oracle).map(String::as_str),
+                                );
                             }
                         });
                     }
@@ -1547,10 +1659,22 @@ impl Builder {
 
 /// A card as a tile: its image when it has arrived, its name on a panel until then, and a
 /// badge with how many the deck has.
-fn card_tile(ui: &mut Ui, art: &mut CardArt, name: &str, size: Vec2, count: u64) -> egui::Response {
+fn card_tile_with_art(
+    ui: &mut Ui,
+    art: &mut CardArt,
+    name: &str,
+    artwork: &str,
+    size: Vec2,
+    count: u64,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter();
-    match art.get(ui.ctx(), name) {
+    painter.rect_filled(
+        rect.translate(Vec2::new(2.0, 4.0)),
+        8.0,
+        Color32::from_black_alpha(90),
+    );
+    match art.get(ui.ctx(), artwork) {
         Some(texture) => {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.add(
@@ -1560,7 +1684,7 @@ fn card_tile(ui: &mut Ui, art: &mut CardArt, name: &str, size: Vec2, count: u64)
         }
         None => {
             // Until the image arrives: the name, wrapped to the tile.
-            painter.rect_filled(rect, 6.0, Color32::from_rgb(38, 40, 46));
+            painter.rect_filled(rect, 6.0, crate::theme::SURFACE);
             let galley = painter.layout(
                 name.to_string(),
                 egui::FontId::proportional(12.0),
@@ -1574,6 +1698,12 @@ fn card_tile(ui: &mut Ui, art: &mut CardArt, name: &str, size: Vec2, count: u64)
             );
         }
     }
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, crate::theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
     if response.hovered() {
         painter.rect_stroke(
             rect,
@@ -1596,13 +1726,14 @@ fn card_tile(ui: &mut Ui, art: &mut CardArt, name: &str, size: Vec2, count: u64)
             Color32::BLACK,
         );
     }
-    response
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The card large, with its type line — what hovering anywhere in the builder shows.
-fn card_preview(ui: &mut Ui, art: &mut CardArt, card: &DraftCard) {
-    widgets::offer_card_enlargement(ui, &card.name);
-    match art.get(ui.ctx(), &card.name) {
+fn card_preview_printing(ui: &mut Ui, art: &mut CardArt, card: &DraftCard, printing: Option<&str>) {
+    widgets::offer_printing_enlargement(ui, &card.name, printing);
+    let artwork = printing.map_or_else(|| card.name.clone(), |id| format!("scryfall:{id}"));
+    match art.get(ui.ctx(), &artwork) {
         Some(texture) => {
             ui.add(
                 egui::Image::new(texture)
@@ -2420,6 +2551,64 @@ mod tests {
             .0;
         let loaded = Draft::load(&store, again).unwrap();
         assert_eq!((loaded.main, loaded.side), (d.main, d.side));
+    }
+
+    #[test]
+    fn selected_printings_survive_save_rename_history_and_portable_decks() {
+        let (mut store, [land, bear, _]) = store();
+        let mut draft = Draft::new("Artwork");
+        draft.add(&store, bear, false);
+        draft.add(&store, bear, true);
+        draft.set_commander(&store, Some(land));
+        let old_id = draft.save(&mut store).unwrap();
+        store.put_deck("Other deck", None, &[]).unwrap();
+        let printing = "12345678-1234-1234-1234-123456789abc".to_owned();
+        draft.set_printing(bear, Some(printing.clone()));
+        assert!(draft.dirty);
+        assert!(draft.undo());
+        assert!(!draft.dirty);
+        assert!(!draft.printings.contains_key(&bear));
+        assert!(draft.redo());
+        draft.set_printing(land, Some(printing.clone()));
+        draft.name = "Renamed artwork".into();
+        let id = draft.save(&mut store).unwrap();
+        assert!(store.deck(old_id).unwrap().is_none());
+        assert!(store.deck_printings(old_id).unwrap().is_empty());
+        let loaded = Draft::load(&store, id).unwrap();
+        assert!(!loaded.dirty);
+        assert_eq!(loaded.printings, draft.printings);
+        let spec = loaded.spec(&store).unwrap();
+        assert_eq!(
+            crate::decks::deck_spec(Some(&store), crate::decks::DeckId::Stored(id)).unwrap(),
+            spec
+        );
+        assert_eq!(
+            spec.main[0].0,
+            CardKey::Oracle("u1".into(), Some(printing.clone()))
+        );
+        assert_eq!(spec.side[0].0, spec.main[0].0);
+        let subtypes = store.subtypes().unwrap();
+        let source = BuilderSource {
+            store: &store,
+            subtypes,
+        };
+        let game_cards = GameCards::build([&spec], &source).unwrap();
+        let texts = crate::cards_text::CardTexts::for_match(&game_cards);
+        let card_id = game_cards.id(&spec.main[0].0).unwrap();
+        assert_eq!(
+            texts.get(card_id).unwrap().printing.as_ref(),
+            Some(&printing)
+        );
+        assert_eq!(
+            texts.get(card_id).unwrap().artwork(),
+            format!("scryfall:{printing}")
+        );
+        assert_eq!(
+            spec.commander,
+            Some(CardKey::Oracle("u0".into(), Some(printing)))
+        );
+        store.delete_deck(id).unwrap();
+        assert!(store.deck_printings(id).unwrap().is_empty());
     }
 
     #[test]

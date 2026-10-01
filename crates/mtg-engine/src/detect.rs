@@ -396,26 +396,11 @@ fn candidate_abilities(
 ) -> Vec<(ObjectId, u8, AbilityId, Trigger)> {
     let mut out = Vec::new();
 
-    // For ZoneChange events, only check the departing object for "leaves" triggers
-    // and the arriving object for arrival triggers. This skips scanning all objects.
-    let objects_to_check: Vec<ObjectId> = match event {
-        Event::ZoneChange {
-            object, new_object, ..
-        } => {
-            // Departing object (for leaves/dies triggers) and arriving object (for any triggers)
-            let mut to_check = vec![*new_object];
-            if to_check.last() != Some(object) {
-                to_check.insert(0, *object);
-            }
-            to_check
-        }
-        _ => state.objects.keys().copied().collect(),
-    };
-
-    for obj_id in objects_to_check {
-        let Some(obj) = state.objects.get(&obj_id) else {
-            continue;
-        };
+    // Every observer can trigger on another object's zone change (CR 603.2).
+    // Checking only the arriving/departing card loses landfall, evolve, and deaths
+    // witnessed by permanents that remain on the battlefield.
+    for obj in state.objects.values() {
+        let obj_id = obj.id;
         // Look back to the battlefield face for leaves/dies triggers (CR 603.10).
         // Keep the new identity as source so self-return effects retain their existing
         // zone-change semantics, but snapshot the face supplying the ability.

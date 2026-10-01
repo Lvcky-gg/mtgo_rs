@@ -624,3 +624,19 @@ tests, the headless bot test, the new draw/discard regression, and scoped Clippy
 pass. Broad compiled suite has 10 trigger-related failures (419 pass, 15 ignored);
 concurrent detection edits preserved. Handoff:
 `docs/sessions/2026-10-01-card-choice-previews.md`.
+
+Gameplay audit against the September 25 Comprehensive Rules fixes missed zone-change
+observers, face-down creatures ignoring external tapped-entry effects, false tap
+triggers on entry, obsolete combat assignment ordering, trample after blockers leave,
+and first-strike history between damage steps. Basic instant/sorcery timing checks
+pass. Workspace: 1,186 passed, zero failed, 38 ignored; final added combat and shock
+land regressions also pass separately. Library/binary Clippy passes; all-target
+Clippy reports existing test lints. Handoff:
+`docs/sessions/2026-10-01-gameplay-rules-audit.md`.
+
+Follow-up rules audit fixes cleanup priority when SBAs or triggers occur, repeating
+cleanup after responses before ending the turn. Also adds cancellation of opposing
++1/+1 and -1/-1 counters as an SBA, preserving pre-SBA death information. Regressions
+reproduced both issues. Final workspace: 1,193 passed, zero failed, 38 ignored;
+scoped engine/rules and compiled oracle Clippy and diff checks pass. Handoff:
+`docs/sessions/2026-10-01-cleanup-and-counter-audit.md`.

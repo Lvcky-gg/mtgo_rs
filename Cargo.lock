@@ -1753,6 +1753,8 @@ dependencies = [
  "mtg-session",
  "mtg-store",
  "resvg",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
  "ureq",
 ]

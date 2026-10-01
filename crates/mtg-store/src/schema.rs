@@ -9,7 +9,7 @@
 use crate::{Result, Store, StoreError};
 
 /// The schema version this build writes and understands.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 const MIGRATIONS: &[&str] = &[
     // v1 — cards, decks, preferences.
@@ -149,6 +149,15 @@ const MIGRATIONS: &[&str] = &[
     -- Create index for efficient lookup when selecting a specific printing.
     CREATE INDEX faces_scryfall_id ON faces (scryfall_id);
     "#,
+    // v8 — artwork preferences belong to a deck, independent of oracle rules.
+    r#"
+    CREATE TABLE deck_printings (
+        deck INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+        oracle INTEGER NOT NULL,
+        printing TEXT NOT NULL,
+        PRIMARY KEY (deck, oracle)
+    );
+    "#,
 ];
 
 /// Apply any migrations the file has not seen.
@@ -192,6 +201,7 @@ mod tests {
         // Drop the v7 faces table and recreate it as v5 (without scryfall_id column)
         store.conn.execute_batch(r#"
             DROP TABLE IF EXISTS faces;
+            DROP TABLE IF EXISTS deck_printings;
             CREATE TABLE faces (
                 oracle      INTEGER NOT NULL REFERENCES cards(oracle) ON DELETE CASCADE,
                 face_index  INTEGER NOT NULL,

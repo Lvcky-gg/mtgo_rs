@@ -63,6 +63,18 @@ impl Store {
         format: Option<&str>,
         entries: &[(u32, u32, Section)],
     ) -> Result<i64> {
+        self.put_deck_with_printings(previous_id, name, format, entries, &[])
+    }
+
+    /// Atomically save composition and selected artwork, including deck renames.
+    pub fn put_deck_with_printings(
+        &mut self,
+        previous_id: Option<i64>,
+        name: &str,
+        format: Option<&str>,
+        entries: &[(u32, u32, Section)],
+        printings: &[(u32, String)],
+    ) -> Result<i64> {
         let tx = self.conn.transaction()?;
 
         // Replacing by name is what re-pasting an edited list should mean. Entries go
@@ -84,8 +96,23 @@ impl Store {
             )?;
         }
 
+        for (oracle, printing) in printings {
+            tx.execute(
+                "INSERT INTO deck_printings (deck, oracle, printing) VALUES (?1, ?2, ?3)",
+                params![id, oracle, printing],
+            )?;
+        }
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn deck_printings(&self, id: i64) -> Result<Vec<(u32, String)>> {
+        let mut query = self.conn.prepare(
+            "SELECT oracle, printing FROM deck_printings WHERE deck = ?1 ORDER BY oracle",
+        )?;
+        Ok(query
+            .query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn deck(&self, id: i64) -> Result<Option<DeckRow>> {

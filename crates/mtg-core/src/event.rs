@@ -166,6 +166,10 @@ pub enum Event {
         object: ObjectId,
         tapped: bool,
     },
+    /// Initial tapped status on entry, not a tap action (CR 603.2e).
+    EnteredTapped {
+        object: ObjectId,
+    },
     /// Damage dealt to a permanent, recorded once even if it has several types.
     /// Its recipient kind determines the consequences (CR 120.3).
     DamageMarked {

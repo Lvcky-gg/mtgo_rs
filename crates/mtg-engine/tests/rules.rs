@@ -34,6 +34,159 @@ fn in_graveyard(engine: &Engine, owner: mtg_core::PlayerId) -> usize {
 // ---- state-based actions ------------------------------------------------
 
 #[test]
+fn opposing_power_toughness_counters_cancel_before_priority() {
+    use mtg_engine::{Progress, apply};
+    let mut state = game();
+    state.step = Step::PrecombatMain;
+    let creature = state.place(DUMMY, P0, ZoneRef::shared(Zone::Battlefield));
+    let mut log = Vec::new();
+    for (kind, delta) in [
+        (CounterKind::PlusOnePlusOne, 3),
+        (CounterKind::MinusOneMinusOne, 2),
+    ] {
+        apply::apply(
+            &mut state,
+            mtg_core::Cause::TurnStructure,
+            mtg_core::Event::CountersChanged {
+                object: creature,
+                kind,
+                delta,
+            },
+            &mut log,
+        );
+    }
+    assert_eq!(
+        state.objects[&creature].counters.len(),
+        2,
+        "cancellation is an SBA, not event application"
+    );
+    let mut engine = Engine::new(state);
+    for _ in 0..200 {
+        if let Progress::NeedsChoice(_) = engine.advance(&TestCards::default()) {
+            let object = &engine.state.objects[&creature];
+            assert_eq!(object.counters.get(&CounterKind::PlusOnePlusOne), Some(&1));
+            assert!(!object.counters.contains_key(&CounterKind::MinusOneMinusOne));
+            return;
+        }
+    }
+    panic!("never reached priority");
+}
+
+#[test]
+fn death_and_counter_cancellation_preserve_pre_sba_last_known_counters() {
+    use mtg_engine::Progress;
+    let mut state = game();
+    let creature = state.place(DUMMY, P0, ZoneRef::shared(Zone::Battlefield));
+    state.objects.get_mut(&creature).unwrap().counters.extend([
+        (CounterKind::PlusOnePlusOne, 1),
+        (CounterKind::MinusOneMinusOne, 3),
+    ]);
+    let mut engine = Engine::new(state);
+    for _ in 0..200 {
+        if let Progress::NeedsChoice(_) = engine.advance(&TestCards::default()) {
+            assert!(!engine.state.objects.contains_key(&creature));
+            let previous = &engine.state.last_known[&creature];
+            assert_eq!(
+                previous.counters.get(&CounterKind::PlusOnePlusOne),
+                Some(&1)
+            );
+            assert_eq!(
+                previous.counters.get(&CounterKind::MinusOneMinusOne),
+                Some(&3)
+            );
+            return;
+        }
+    }
+    panic!("never reached priority");
+}
+
+#[test]
+fn cleanup_state_based_action_without_a_trigger_grants_priority_and_repeats() {
+    use mtg_engine::{
+        Progress,
+        choice::{Answer, ChoiceKind},
+    };
+    let mut state = game();
+    state.step = Step::Cleanup;
+    let creature = state.place(DUMMY, P0, ZoneRef::shared(Zone::Battlefield));
+    state
+        .objects
+        .get_mut(&creature)
+        .unwrap()
+        .counters
+        .insert(CounterKind::MinusOneMinusOne, 2);
+    pump(&mut state, creature, 0, 1, layer::PT_MODIFY);
+    let cards = TestCards::default();
+    assert_eq!(
+        layers::compute(&state, &cards, creature).unwrap().toughness,
+        Some(1)
+    );
+    let mut engine = Engine::new(state);
+    let mut priority = false;
+    for _ in 0..200 {
+        if engine.state.active_player == P1 {
+            assert!(
+                priority,
+                "an SBA during cleanup grants priority even without triggers"
+            );
+            assert!(!engine.state.objects.contains_key(&creature));
+            assert_eq!(
+                engine
+                    .log
+                    .iter()
+                    .filter(|event| matches!(
+                        event.event,
+                        mtg_core::Event::StepBegan {
+                            step: Step::Cleanup,
+                            ..
+                        }
+                    ))
+                    .count(),
+                2
+            );
+            return;
+        }
+        if let Progress::NeedsChoice(question) = engine.advance(&cards) {
+            assert!(matches!(question.kind, ChoiceKind::Priority { .. }));
+            assert_eq!(engine.state.step, Step::Cleanup);
+            priority = true;
+            engine.answer(&cards, question.id, Answer::Pass).unwrap();
+        }
+    }
+    panic!("cleanup did not finish");
+}
+
+#[test]
+fn ordinary_cleanup_has_no_priority_window_or_extra_cleanup() {
+    use mtg_engine::Progress;
+    let mut state = game();
+    state.step = Step::Cleanup;
+    let mut engine = Engine::new(state);
+    for _ in 0..200 {
+        if let Progress::NeedsChoice(question) = engine.advance(&TestCards::default()) {
+            assert_eq!(question.who, P1);
+            assert_eq!(engine.state.step, Step::Upkeep);
+            assert_eq!(
+                engine
+                    .log
+                    .iter()
+                    .filter(|event| matches!(
+                        event.event,
+                        mtg_core::Event::StepBegan {
+                            step: Step::Cleanup,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            return;
+        }
+    }
+    panic!("next turn never received priority");
+}
+
+#[test]
 fn a_player_at_zero_life_loses() {
     let mut state = game();
     state.players.get_mut(&P1).unwrap().life = 0;

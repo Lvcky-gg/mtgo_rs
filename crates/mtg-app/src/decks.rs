@@ -73,9 +73,14 @@ pub fn deck_spec(store: Option<&Store>, id: DeckId) -> Result<DeckSpec, String> 
         .map_err(|e| e.to_string())?
         .ok_or("that deck no longer exists")?;
 
+    let printings: std::collections::BTreeMap<_, _> = store
+        .deck_printings(id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
     let uuid = |oracle: u32| -> Result<CardKey, String> {
         let card = store.card(oracle).map_err(|e| e.to_string())?;
-        card.map(|c| CardKey::Oracle(c.oracle_uuid, None))
+        card.map(|c| CardKey::Oracle(c.oracle_uuid, printings.get(&oracle).cloned()))
             .ok_or_else(|| format!("card {oracle} is missing from the database"))
     };
     let mut spec = DeckSpec {

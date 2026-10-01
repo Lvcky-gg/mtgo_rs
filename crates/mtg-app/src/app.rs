@@ -12,7 +12,7 @@ use std::sync::{
     mpsc::{self, Receiver, Sender, TryRecvError},
 };
 
-use egui::{Color32, RichText, Ui};
+use egui::{RichText, Ui};
 use mtg_net::fairness::Seed;
 use mtg_session::{
     game::{CardKey, DeckSpec, Format, GameCards, MatchSettings, deck_problems},
@@ -30,8 +30,7 @@ use crate::{
     ui::GuiApp,
 };
 
-const WARN: Color32 = Color32::from_rgb(220, 140, 90);
-const GOOD: Color32 = Color32::from_rgb(120, 190, 130);
+use crate::theme::{GOOD, WARN};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
@@ -145,6 +144,7 @@ pub struct App {
 
 impl App {
     pub fn new(ctx: egui::Context) -> Self {
+        crate::theme::install(&ctx);
         let mut app = Self {
             art: Some(CardArt::start(ctx.clone(), ArtConfig::standard())),
             ctx,
@@ -238,18 +238,23 @@ impl eframe::App for App {
 
 impl App {
     fn menu(&mut self, ui: &mut Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(20)).show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.18);
-                ui.heading(RichText::new("mtgo_rs").size(40.0).strong());
-                ui.label(RichText::new("offline, peer to peer").weak());
-                ui.add_space(28.0);
+                ui.add_space(ui.available_height() * 0.10);
+                ui.label(RichText::new("M T G O   R S").size(13.0).color(crate::theme::GOLD));
+                ui.add_space(12.0);
+                ui.heading(RichText::new("Make your next move.").size(38.0).strong());
+                ui.label(RichText::new("Build a deck. Find a match. Play your cards.").color(crate::theme::MUTED));
+                ui.add_space(30.0);
 
                 let button = |ui: &mut Ui, text: &str| {
-                    ui.add_sized([260.0, 40.0], egui::Button::new(RichText::new(text).size(18.0)))
+                    ui.add_sized([ui.available_width().min(320.0), 44.0], egui::Button::new(RichText::new(text).size(16.0)))
                 };
                 for mode in [Mode::Bot, Mode::Host, Mode::Join] {
-                    if button(ui, mode.title()).clicked() {
+                    let response = if mode == Mode::Bot {
+                        ui.add_sized([ui.available_width().min(320.0), 46.0], egui::Button::new(RichText::new(mode.title()).size(16.0).strong().color(crate::theme::INK)).fill(crate::theme::GOLD))
+                    } else { button(ui, mode.title()) };
+                    if response.clicked() {
                         self.setup_error = None;
                         self.screen = Screen::Setup(mode);
                     }
@@ -422,11 +427,16 @@ impl App {
 
         let previous_id = builder.draft.id;
         let mut action = BuilderAction::Nothing;
-        egui::Panel::top("builder-top").show(ui, |ui| action = builder.top_bar(ui, store));
+        egui::Panel::top("builder-top")
+            .frame(crate::theme::panel())
+            .show(ui, |ui| action = builder.top_bar(ui, store));
         egui::Panel::right("builder-deck")
+            .frame(crate::theme::panel())
             .default_size(400.0)
             .show(ui, |ui| builder.deck(ui, store, art));
-        egui::CentralPanel::default().show(ui, |ui| builder.search(ui, store, art));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(18))
+            .show(ui, |ui| builder.search(ui, store, art));
         let saved_id = builder.draft.id;
 
         match action {

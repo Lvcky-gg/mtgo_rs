@@ -337,6 +337,11 @@ fn perform(state: &mut GameState, event: &Event) {
                 o.tapped = *tapped;
             }
         }
+        Event::EnteredTapped { object } => {
+            if let Some(o) = state.objects.get_mut(object) {
+                o.tapped = true;
+            }
+        }
 
         Event::DamageMarked {
             object,

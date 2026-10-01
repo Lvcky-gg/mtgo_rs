@@ -96,9 +96,6 @@ enum Suspended {
     Attackers,
     /// CR 509.1 — waiting for the defending player to declare blockers.
     Blockers,
-    /// CR 509.2 — the attacking player orders the blockers of each blocked attacker.
-    /// One attacker at a time, from the front of the queue.
-    OrderingBlockers { queue: Vec<ObjectId> },
     /// CR 510.1c — damage assignment for attackers where it is not forced.
     AssigningDamage {
         queue: Vec<ObjectId>,
@@ -273,6 +270,8 @@ pub struct Engine {
     to_place: VecDeque<(PlayerId, PendingTrigger)>,
     /// Whether this step's turn-based action has run.
     tba_done: bool,
+    /// CR 514.3a: this cleanup needs priority and a subsequent cleanup step.
+    cleanup_priority: bool,
     /// A turn-based action mid-flight, waiting on answers.
     suspended: Option<Suspended>,
     /// An announcement mid-flight, waiting for targets.
@@ -308,6 +307,7 @@ struct Checkpoint {
     log_len: usize,
     phase: Phase,
     tba_done: bool,
+    cleanup_priority: bool,
     /// The priority question the action answered, asked again on undo.
     question: Choice,
 }
@@ -329,6 +329,7 @@ impl Engine {
             to_order: VecDeque::new(),
             to_place: VecDeque::new(),
             tba_done: false,
+            cleanup_priority: false,
             suspended: None,
             announcing: None,
             announcement_choice: None,
@@ -425,7 +426,15 @@ impl Engine {
                     Event::StepEnded { turn, active, step },
                     &mut self.log,
                 );
-                self.advance_step(cards);
+                if step == Step::Cleanup && self.cleanup_priority {
+                    // A cleanup that granted priority is followed by another cleanup,
+                    // not the next turn (CR 514.3a). StepEnded still empties mana.
+                    self.undo.clear();
+                    self.state.priority = Some(active);
+                    self.phase = Phase::BeginStep;
+                } else {
+                    self.advance_step(cards);
+                }
                 Progress::Continue
             }
         }
@@ -716,32 +725,6 @@ impl Engine {
                 }
             }
 
-            (ChoiceKind::OrderBlockers { attacker, .. }, Answer::Order(order)) => {
-                let attacker = *attacker;
-                if let Some(blockers) = self.state.combat.blocks.get(&attacker).cloned() {
-                    let mut reordered: Vec<ObjectId> = order
-                        .iter()
-                        .filter_map(|i| blockers.get(*i).copied())
-                        .collect();
-                    // Anything the answer left out keeps its previous position, so a
-                    // short answer cannot drop a blocker out of combat.
-                    for b in &blockers {
-                        if !reordered.contains(b) {
-                            reordered.push(*b);
-                        }
-                    }
-                    self.state.combat.blocks.insert(attacker, reordered);
-                    self.state.bump();
-                }
-                // Move past this attacker and carry on with the queue.
-                if let Some(Suspended::OrderingBlockers { queue }) = self.suspended.clone() {
-                    let rest: Vec<ObjectId> =
-                        queue.into_iter().filter(|a| *a != attacker).collect();
-                    self.suspended = Some(Suspended::OrderingBlockers { queue: rest });
-                }
-                Ok(())
-            }
-
             (
                 ChoiceKind::AssignCombatDamage {
                     attacker,
@@ -779,25 +762,22 @@ impl Engine {
                     let valid_rows = rows
                         .iter()
                         .all(|(object, _)| among.contains(object) && seen.insert(*object));
-                    let mut nonlethal = false;
-                    let valid_order = among.iter().all(|blocker| {
+                    let all_lethal = among.iter().all(|blocker| {
                         let amount = rows
                             .iter()
                             .find(|(object, _)| object == blocker)
                             .map_or(0, |(_, n)| *n);
-                        if nonlethal && amount > 0 {
-                            return false;
-                        }
-                        if amount
-                            < crate::combat::lethal_damage(&self.state, cards, *blocker, deathtouch)
-                        {
-                            nonlethal = true;
-                        }
-                        true
+                        amount
+                            >= crate::combat::lethal_damage(
+                                &self.state,
+                                cards,
+                                *blocker,
+                                deathtouch,
+                            )
                     });
                     let excess = u64::from(*total).saturating_sub(assigned);
                     if excess > 0
-                        && !nonlethal
+                        && all_lethal
                         && self.has_kw(cards, attacker, mtg_ir::ability::Keyword::Trample)
                     {
                         trample_excess = self
@@ -809,7 +789,6 @@ impl Engine {
                     }
                     if !valid_rows
                         || assigned > u64::from(*total)
-                        || !valid_order
                         || (excess > 0 && trample_excess.is_none())
                     {
                         self.pending = Some(choice);
@@ -1003,6 +982,13 @@ impl Engine {
         //    log detects exactly the same triggers. Because settle loops, events
         //    caused by state-based actions are scanned on the next pass round.
         self.detect_triggers(cards);
+        if self.state.step == Step::Cleanup
+            && (!self.state.pending_triggers.is_empty()
+                || !self.to_place.is_empty()
+                || !self.to_order.is_empty())
+        {
+            self.cleanup_priority = true;
+        }
 
         // 0.5 Cards exiled until a permanent leaves come back once it has (CR 610.3a). Not
         //     a trigger: nothing can be done in between.
@@ -1029,11 +1015,17 @@ impl Engine {
             !matches!(a, sba::Sba::PutIntoGraveyard { object, rule: "704.5s" } if queued.contains(object))
         });
         if !check.actions.is_empty() {
+            if self.state.step == Step::Cleanup {
+                self.cleanup_priority = true;
+            }
             self.perform_sbas(cards, check.actions);
             self.cache.invalidate();
             return Progress::Continue;
         }
         if let Some(conflict) = check.legend_conflicts.first() {
+            if self.state.step == Step::Cleanup {
+                self.cleanup_priority = true;
+            }
             // The legend rule needs its controller to pick a survivor. Emitted as a
             // real choice rather than resolved arbitrarily.
             let c = self.new_choice(
@@ -1056,6 +1048,9 @@ impl Engine {
         //     actions, because both are the engine noticing the world changed rather
         //     than reacting to something that happened.
         if self.poll_state_triggers(cards) {
+            if self.state.step == Step::Cleanup {
+                self.cleanup_priority = true;
+            }
             return Progress::Continue;
         }
 
@@ -1105,7 +1100,9 @@ impl Engine {
         }
 
         // 4. Nothing left to settle.
-        self.phase = if self.state.step.grants_priority() {
+        self.phase = if self.state.step.grants_priority()
+            || (self.state.step == Step::Cleanup && self.cleanup_priority)
+        {
             Phase::Priority
         } else {
             Phase::EndStep
@@ -1360,6 +1357,18 @@ impl Engine {
                 }
                 Sba::Unattach { object } => {
                     events.push(Event::Attached { object, to: None });
+                }
+                Sba::CancelCounters { object, amount } => {
+                    for kind in [
+                        mtg_core::CounterKind::PlusOnePlusOne,
+                        mtg_core::CounterKind::MinusOneMinusOne,
+                    ] {
+                        events.push(Event::CountersChanged {
+                            object,
+                            kind,
+                            delta: -amount,
+                        });
+                    }
                 }
                 Sba::ReturnCommander { object } => {
                     if let Some(o) = self.state.objects.get(&object) {
@@ -4296,7 +4305,6 @@ impl Engine {
             | Suspended::Blockers
             | Suspended::Discarding
             | Suspended::Untapping => None,
-            Suspended::OrderingBlockers { queue } => self.next_blocker_ordering(cards, queue),
             Suspended::AssigningDamage {
                 queue,
                 first_strike,
@@ -4347,6 +4355,7 @@ impl Engine {
     }
 
     fn begin_cleanup(&mut self, cards: &dyn PrintedCards) -> Option<Choice> {
+        self.cleanup_priority = false;
         let who = self.state.active_player;
         let hand = self.state.objects_in(ZoneRef::of(Zone::Hand, who));
         // "You have no maximum hand size" from a permanent they control.
@@ -4621,55 +4630,10 @@ impl Engine {
         self.mark_unblocked();
         self.cache.invalidate();
 
-        // Attackers blocked by more than one creature need their blockers ordered.
-        let queue: Vec<ObjectId> = self
-            .state
-            .combat
-            .blocks
-            .iter()
-            .filter(|(_, bs)| bs.len() > 1)
-            .map(|(a, _)| *a)
-            .collect();
-        self.suspended = Some(Suspended::OrderingBlockers { queue });
-        Ok(())
-    }
-
-    /// CR 509.2 — ask the attacking player to order one attacker's blockers.
-    fn next_blocker_ordering(
-        &mut self,
-        _cards: &dyn PrintedCards,
-        mut queue: Vec<ObjectId>,
-    ) -> Option<Choice> {
-        while let Some(attacker) = queue.first().copied() {
-            let blockers = self
-                .state
-                .combat
-                .blocks
-                .get(&attacker)
-                .cloned()
-                .unwrap_or_default();
-            // Fewer than two blockers left: nothing to order, so do not ask.
-            if blockers.len() < 2 {
-                queue.remove(0);
-                continue;
-            }
-            self.suspended = Some(Suspended::OrderingBlockers {
-                queue: queue.clone(),
-            });
-            let who = crate::layers::controller(&self.state, attacker)
-                .unwrap_or(self.state.active_player);
-            return Some(self.new_choice(
-                who,
-                ChoiceKind::OrderBlockers {
-                    attacker,
-                    blockers: blockers.clone(),
-                },
-                "order blockers for damage assignment".into(),
-                Some(Answer::Order((0..blockers.len()).collect())),
-            ));
-        }
+        // CR 509.2: priority follows declaration. Damage assignment order is obsolete;
+        // each controller chooses the division when combat damage is assigned.
         self.suspended = None;
-        None
+        Ok(())
     }
 
     // ---- combat damage (CR 510) ------------------------------------------
@@ -4679,6 +4643,18 @@ impl Engine {
         cards: &dyn PrintedCards,
         first_strike: bool,
     ) -> Option<Choice> {
+        if first_strike {
+            self.state.combat.first_strike_participants = Some(
+                self.state
+                    .combat
+                    .attackers
+                    .keys()
+                    .copied()
+                    .chain(self.state.combat.blocks.values().flatten().copied())
+                    .filter(|id| crate::combat::deals_damage_now(&self.state, cards, *id, true))
+                    .collect(),
+            );
+        }
         // Attackers whose assignment involves a real decision get asked; the rest are
         // assigned canonically. Same principle as trigger ordering: a forced choice
         // is not a choice.
@@ -5428,6 +5404,7 @@ impl Engine {
             log_len: self.log.len(),
             phase: self.phase,
             tba_done: self.tba_done,
+            cleanup_priority: self.cleanup_priority,
             question: choice.clone(),
         });
     }
@@ -5447,6 +5424,7 @@ impl Engine {
         self.log.truncate(cp.log_len);
         self.phase = cp.phase;
         self.tba_done = cp.tba_done;
+        self.cleanup_priority = cp.cleanup_priority;
         self.to_order.clear();
         self.to_place.clear();
         self.suspended = None;

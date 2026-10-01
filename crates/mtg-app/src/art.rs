@@ -202,6 +202,7 @@ enum Slot {
 enum Art {
     /// A card, by the name the UI shows.
     Card(String),
+    Printing(String, Option<String>),
     /// A mana symbol, by its code without braces: `"W"`, `"2/U"`.
     Symbol(String),
 }
@@ -245,15 +246,15 @@ impl Jobs {
 }
 
 /// Spaces out requests to Scryfall's API across every downloader.
-#[derive(Default)]
-struct ApiGate(std::sync::Mutex<Option<std::time::Instant>>);
+struct ApiGate;
 
 impl ApiGate {
     fn wait_turn(&self, url: &str) {
         if !url.contains("api.scryfall.com") {
             return;
         }
-        if let Ok(mut last) = self.0.lock() {
+        static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        if let Ok(mut last) = LAST.lock() {
             if let Some(then) = *last {
                 let since = then.elapsed();
                 if since < REQUEST_GAP {
@@ -263,6 +264,10 @@ impl ApiGate {
             *last = Some(std::time::Instant::now());
         }
     }
+}
+
+pub(crate) fn wait_api_turn(url: &str) {
+    ApiGate.wait_turn(url);
 }
 
 /// The UI's side: textures by what they depict, and the work list the downloaders share.
@@ -278,7 +283,7 @@ impl CardArt {
         let jobs = std::sync::Arc::new(Jobs::default());
         let (done, ready) = std::sync::mpsc::channel();
         let config = std::sync::Arc::new(config);
-        let gate = std::sync::Arc::new(ApiGate::default());
+        let gate = std::sync::Arc::new(ApiGate);
 
         for i in 0..WORKERS {
             let (jobs, done, ctx, config, gate) = (
@@ -303,7 +308,20 @@ impl CardArt {
 
     /// The texture for a shown card name, if it has arrived. Asks for it the first time.
     pub fn get(&mut self, ctx: &egui::Context, name: &str) -> Option<&egui::TextureHandle> {
+        if let Some(id) = name.strip_prefix("scryfall:") {
+            return self.request(ctx, Art::Printing(id.to_string(), None));
+        }
         self.request(ctx, Art::Card(name.to_string()))
+    }
+
+    /// A known printing can use its CDN URL without another API lookup.
+    pub fn printing(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        uri: Option<&str>,
+    ) -> Option<&egui::TextureHandle> {
+        self.request(ctx, Art::Printing(id.to_owned(), uri.map(str::to_owned)))
     }
 
     /// The texture for a mana symbol code (`"G"`, `"W/U"`), if it has arrived.
@@ -358,6 +376,29 @@ fn worker(
     while let Some(job) = jobs.pop() {
         let image = match &job {
             Art::Card(shown) => load(config, store.as_ref(), &agent, gate, shown),
+            Art::Printing(id, uri) => {
+                let path = cache_file(&config.cache_dir, &format!("scryfall:{id}"));
+                load_cached_image(&path, decode, || {
+                    let (uuid, face) = id
+                        .strip_suffix("/back")
+                        .map_or((id.as_str(), "front"), |uuid| (uuid, "back"));
+                    if uuid.len() != 36 || !uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+                    {
+                        return None;
+                    }
+                    let url = uri
+                        .as_ref()
+                        .filter(|url| url.starts_with("https://cards.scryfall.io/"))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            format!(
+                                "https://api.scryfall.com/cards/{uuid}?format=image&version=normal&face={face}"
+                            )
+                        });
+                    gate.wait_turn(&url);
+                    fetch(&agent, &url).ok()
+                })
+            }
             Art::Symbol(code) => load_symbol(&config.cache_dir, &agent, gate, code),
         };
         if done.send((job, image)).is_err() {
@@ -711,13 +752,11 @@ mod tests {
             .build()
             .into();
         assert_eq!(
-            load_symbol(&dir, &agent, &ApiGate::default(), "W/U")
-                .unwrap()
-                .size,
+            load_symbol(&dir, &agent, &ApiGate, "W/U").unwrap().size,
             [SYMBOL_PIXELS as usize; 2]
         );
         assert_eq!(
-            load_symbol(&dir, &agent, &ApiGate::default(), "../bad"),
+            load_symbol(&dir, &agent, &ApiGate, "../bad"),
             None,
             "never a path outside the cache"
         );
@@ -747,8 +786,8 @@ mod tests {
             .build()
             .into();
 
-        let image = load(&config, None, &agent, &ApiGate::default(), "Training Field")
-            .expect("served from the cache");
+        let image =
+            load(&config, None, &agent, &ApiGate, "Training Field").expect("served from the cache");
         assert_eq!(image.size, [1, 1]);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -786,7 +825,7 @@ mod queue_tests {
 
     #[test]
     fn only_the_api_is_spaced_out() {
-        let gate = ApiGate::default();
+        let gate = ApiGate;
         let start = std::time::Instant::now();
         for _ in 0..5 {
             gate.wait_turn("https://cards.scryfall.io/normal/front/x.jpg");

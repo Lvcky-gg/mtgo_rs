@@ -70,7 +70,7 @@ impl Decide for UiSeat {
 
 impl Seat for UiSeat {
     fn begin_match(&mut self, settings: MatchSettings, cards: &GameCards) {
-        let texts = CardTexts::snapshot(cards, cards.ids());
+        let texts = CardTexts::for_match(cards);
         let _ = self
             .events
             .send(MatchEvent::MatchStarted { settings, texts });

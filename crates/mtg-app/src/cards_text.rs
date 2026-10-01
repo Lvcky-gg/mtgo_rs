@@ -14,6 +14,7 @@ use mtg_ir::PrintedCards;
 #[derive(Clone, Debug, Default)]
 pub struct CardText {
     pub name: String,
+    pub printing: Option<String>,
     pub cost: String,
     pub type_line: String,
     pub power_toughness: Option<String>,
@@ -36,7 +37,40 @@ pub struct CardTexts {
     splits: BTreeMap<CardId, CardText>,
 }
 
+impl CardText {
+    pub fn artwork(&self) -> String {
+        self.printing
+            .as_ref()
+            .map_or_else(|| self.name.clone(), |id| format!("scryfall:{id}"))
+    }
+}
+
 impl CardTexts {
+    /// Preserve deck artwork preferences across the game/UI thread boundary.
+    pub fn for_match(cards: &mtg_session::game::GameCards) -> Self {
+        let mut texts = Self::snapshot(cards, cards.ids());
+        for ((id, face), text) in &mut texts.entries {
+            if let Some(mtg_session::game::CardKey::Oracle(_, Some(printing))) = cards.key(*id) {
+                let back = *face == 1
+                    && matches!(
+                        cards.layout(*id),
+                        mtg_ir::Layout::ModalDfc | mtg_ir::Layout::Transforming
+                    );
+                text.printing = Some(if back {
+                    format!("{printing}/back")
+                } else {
+                    printing.clone()
+                });
+            }
+        }
+        for (id, text) in &mut texts.splits {
+            if let Some(mtg_session::game::CardKey::Oracle(_, Some(printing))) = cards.key(*id) {
+                text.printing = Some(printing.clone());
+            }
+        }
+        texts
+    }
+
     /// Build a snapshot from a card source.
     ///
     /// `ids` is the set worth including — usually every card in the loaded decks, rather than the
@@ -61,6 +95,7 @@ impl CardTexts {
                     (id, index),
                     CardText {
                         name: face.name.to_string(),
+                        printing: None,
                         cost: crate::format::mana_cost(&face.mana_cost),
                         type_line: crate::format::type_line(&ch, |s| {
                             cards.subtype_name(s).unwrap_or("").to_string()

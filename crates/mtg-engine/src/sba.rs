@@ -48,6 +48,8 @@ pub enum Sba {
     Unattach { object: ObjectId },
     /// CR 704.5e — a token outside the battlefield ceases to exist.
     CeaseToExist { object: ObjectId },
+    /// Remove matching +1/+1 and -1/-1 counters as a state-based action.
+    CancelCounters { object: ObjectId, amount: i32 },
     /// CR 903.9a — a commander in a graveyard or exile goes to the command zone.
     ///
     /// The rule lets the owner choose; it is taken without asking, because keeping a
@@ -274,6 +276,30 @@ pub fn check(state: &GameState, cards: &dyn PrintedCards) -> Check {
                 object: id,
                 rule: "704.5s",
             });
+        }
+    }
+
+    // Append counter removals after zone changes in the simultaneous batch. If a
+    // creature dies in the same check, its last-known information must retain both
+    // kinds of counters from before that check (CR 704.8), e.g. for undying.
+    for id in state.battlefield() {
+        let Some(object) = state.objects.get(&id).filter(|object| !object.phased_out) else {
+            continue;
+        };
+        let amount = object
+            .counters
+            .get(&CounterKind::PlusOnePlusOne)
+            .copied()
+            .unwrap_or(0)
+            .min(
+                object
+                    .counters
+                    .get(&CounterKind::MinusOneMinusOne)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        if amount > 0 {
+            out.actions.push(Sba::CancelCounters { object: id, amount });
         }
     }
 

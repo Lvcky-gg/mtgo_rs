@@ -451,13 +451,15 @@ pub struct Combat {
     pub defending_player: Option<PlayerId>,
     /// Attacker to what it is attacking.
     pub attackers: BTreeMap<ObjectId, mtg_core::Target>,
-    /// Attacker to its blockers, in the damage-assignment order the attacking
-    /// player chose (CR 509.2).
+    /// Attacker to its blockers. Their order does not constrain damage assignment.
     pub blocks: BTreeMap<ObjectId, Vec<ObjectId>>,
     /// Attackers that were blocked at least once. Tracked separately from
     /// `blocks` because a blocker leaving combat does not make the attacker
     /// unblocked (CR 509.1h).
     pub was_blocked: BTreeSet<ObjectId>,
+    /// Creatures with first/double strike when the first damage step began (CR 510.4).
+    /// None means combat has not had a first-strike damage step.
+    pub first_strike_participants: Option<BTreeSet<ObjectId>>,
 }
 
 impl Combat {
@@ -474,6 +476,7 @@ impl Combat {
         self.attackers.clear();
         self.blocks.clear();
         self.was_blocked.clear();
+        self.first_strike_participants = None;
     }
 }
 

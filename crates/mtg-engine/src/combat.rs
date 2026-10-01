@@ -490,14 +490,16 @@ pub fn lethal_damage(
     victim: ObjectId,
     source_has_deathtouch: bool,
 ) -> u32 {
-    if source_has_deathtouch {
-        return 1;
-    }
     let toughness = crate::layers::compute(state, cards, victim)
         .and_then(|c| c.toughness)
         .unwrap_or(0);
     let marked = state.objects.get(&victim).map_or(0, |o| o.damage);
-    (i64::from(toughness) - i64::from(marked)).max(0) as u32
+    let remaining = (i64::from(toughness) - i64::from(marked)).max(0) as u32;
+    if source_has_deathtouch {
+        remaining.min(1)
+    } else {
+        remaining
+    }
 }
 
 /// One creature's combat damage assignment.
@@ -511,8 +513,8 @@ pub struct Assignment {
 
 /// The canonical assignment for an attacking creature.
 ///
-/// Follows CR 510.1c: blockers are assigned damage in the order the attacking player
-/// chose, and each must be assigned lethal damage before the next receives any.
+/// A convenient legal division under CR 510.1c: assign lethal to each blocker
+/// in turn. The controller may instead choose any division among the blockers.
 /// Whatever remains goes to the last blocker, or — with trample — to the player being
 /// attacked (CR 702.19b).
 ///
@@ -546,7 +548,7 @@ pub fn assign_attacker_damage(
 
     if blockers.is_empty() {
         // Blocked by nothing but still blocked deals no damage (CR 509.1h).
-        if state.combat.was_blocked.contains(&attacker) {
+        if state.combat.was_blocked.contains(&attacker) && !trample {
             return Some(out);
         }
         if power > 0 {
@@ -577,12 +579,9 @@ pub fn assign_attacker_damage(
     Some(out)
 }
 
-/// Whether an attacker's damage assignment has only one sensible answer.
-///
-/// Used the same way the trigger ordering analysis is: if there is no decision, do
-/// not ask. There is a real decision only when the attacker is blocked by more than
-/// one creature *and* has power to spare beyond lethal for all of them, or when
-/// trample lets excess be pushed at the player instead.
+/// Whether an attacker's damage assignment has only one legal division.
+/// Multiple blockers always allow a choice with positive power (CR 510.1c).
+/// Trample also allows choosing between excess damage and overassigning to a blocker.
 pub fn assignment_is_forced(
     state: &GameState,
     cards: &dyn PrintedCards,
@@ -594,20 +593,24 @@ pub fn assignment_is_forced(
         .get(&attacker)
         .cloned()
         .unwrap_or_default();
-    if blockers.len() <= 1 {
-        return true;
-    }
     let power = crate::layers::compute(state, cards, attacker)
         .and_then(|c| c.power)
         .unwrap_or(0)
         .max(0) as u32;
-    let deathtouch = has(state, cards, attacker, Keyword::Deathtouch);
-    let total_lethal: u64 = blockers
-        .iter()
-        .map(|b| u64::from(lethal_damage(state, cards, *b, deathtouch)))
-        .sum();
-    // No spare damage means every blocker's share is determined.
-    u64::from(power) <= total_lethal
+    if power == 0 || blockers.is_empty() {
+        return true;
+    }
+    if blockers.len() > 1 {
+        return false;
+    }
+    !has(state, cards, attacker, Keyword::Trample)
+        || power
+            <= lethal_damage(
+                state,
+                cards,
+                blockers[0],
+                has(state, cards, attacker, Keyword::Deathtouch),
+            )
 }
 
 /// A blocking creature's damage assignment: all of it to the attacker it blocks.
@@ -643,7 +646,12 @@ pub fn deals_damage_now(
     if first_strike_step {
         first || double
     } else {
-        !first || double
+        state
+            .combat
+            .first_strike_participants
+            .as_ref()
+            .is_none_or(|participants| !participants.contains(&id))
+            || double
     }
 }
 

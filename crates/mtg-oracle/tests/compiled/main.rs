@@ -6,6 +6,7 @@
 
 mod abilities_extended;
 mod adventure;
+mod audit;
 mod backup;
 mod bestow;
 mod changeling;

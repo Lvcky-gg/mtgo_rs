@@ -33,6 +33,7 @@ pub mod mana_text;
 pub mod narrate;
 pub mod net;
 pub mod seat;
+pub mod theme;
 pub mod ui;
 pub mod widgets;
 
@@ -246,3 +247,5 @@ mod tests {
         assert!(questions.try_recv().is_err(), "nothing was sent to the UI");
     }
 }
+
+pub mod printings;

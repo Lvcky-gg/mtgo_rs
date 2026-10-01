@@ -26,12 +26,9 @@ use crate::{
     format, mana_text, widgets,
 };
 
-/// A neutral palette. Deliberately not evocative of printed cards: this is a tool, and its own
-/// visual language is clearer than a pastiche of one.
-const CARD_FILL: Color32 = Color32::from_rgb(38, 40, 46);
-const CARD_EDGE: Color32 = Color32::from_rgb(88, 92, 104);
-const TAPPED_EDGE: Color32 = Color32::from_rgb(140, 112, 60);
-const ACCENT: Color32 = Color32::from_rgb(118, 168, 220);
+use crate::theme::{
+    BORDER as CARD_EDGE, GOLD as TAPPED_EDGE, GOLD as ACCENT, SURFACE as CARD_FILL,
+};
 /// Attacking creatures.
 const ATTACK: Color32 = Color32::from_rgb(220, 90, 80);
 
@@ -381,35 +378,39 @@ impl GuiApp {
 
         let view = self.last_view.clone();
 
-        egui::Panel::top("status").show(ui, |ui| {
-            if let Some(v) = &view {
-                phase_bar(ui, v, &self.texts);
-            }
-            ui.horizontal(|ui| {
-                match &view {
-                    Some(v) => ui.label(RichText::new(format::status_line(v)).strong()),
-                    None => ui.label("waiting for the game to start…"),
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Showing this is how a player sees the client working for them rather than
-                    // wondering why it is not asking.
-                    ui.label(
-                        RichText::new(format!(
-                            "{} handled for you",
-                            self.auto_answered.load(Ordering::Relaxed)
-                        ))
-                        .color(ACCENT)
-                        .small(),
-                    );
+        egui::Panel::top("status")
+            .frame(crate::theme::panel())
+            .show(ui, |ui| {
+                if let Some(v) = &view {
+                    phase_bar(ui, v, &self.texts);
+                }
+                ui.horizontal(|ui| {
+                    match &view {
+                        Some(v) => ui.label(RichText::new(format::status_line(v)).strong()),
+                        None => ui.label("waiting for the game to start…"),
+                    };
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Showing this is how a player sees the client working for them rather than
+                        // wondering why it is not asking.
+                        ui.label(
+                            RichText::new(format!(
+                                "{} handled for you",
+                                self.auto_answered.load(Ordering::Relaxed)
+                            ))
+                            .color(ACCENT)
+                            .small(),
+                        );
+                    });
                 });
             });
-        });
 
         egui::Panel::right("log")
+            .frame(crate::theme::panel())
             .default_size(320.0)
             .min_size(240.0)
             .show(ui, |ui| {
-                ui.heading("Log");
+                ui.heading("Match journal");
+                ui.add_space(4.0);
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
@@ -426,6 +427,7 @@ impl GuiApp {
             });
 
         egui::Panel::bottom("question")
+            .frame(crate::theme::panel())
             .min_size(120.0)
             .show(ui, |ui| {
                 self.draw_question(ui);
@@ -434,6 +436,7 @@ impl GuiApp {
         // Declared after the question panel, so it sits just above it: the hand is next to the
         // buttons that act on it.
         egui::Panel::bottom("hand")
+            .frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(8))
             .exact_size(HAND_CARD.y + 16.0)
             .resizable(false)
             .show(ui, |ui| {
@@ -442,16 +445,18 @@ impl GuiApp {
                 }
             });
 
-        egui::CentralPanel::default().show(ui, |ui| match &view {
-            Some(v) => {
-                let board = board::arrange(v);
-                self.draw_board(ui, v, &board);
-                self.zone_window(ui, v);
-            }
-            None => {
-                ui.centered_and_justified(|ui| ui.label("no position yet"));
-            }
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(12))
+            .show(ui, |ui| match &view {
+                Some(v) => {
+                    let board = board::arrange(v);
+                    self.draw_board(ui, v, &board);
+                    self.zone_window(ui, v);
+                }
+                None => {
+                    ui.centered_and_justified(|ui| ui.label("no position yet"));
+                }
+            });
         widgets::show_enlarged_card(ui, &mut self.art);
     }
 }
@@ -522,11 +527,25 @@ impl GuiApp {
         ui.horizontal(|ui| {
             let who = format::player_name(view, side.player);
             ui.label(RichText::new(who).strong().size(16.0));
-            ui.label(
-                RichText::new(format!("{} life", side.life))
-                    .strong()
-                    .size(16.0),
-            );
+            egui::Frame::new()
+                .fill(CARD_FILL)
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(12, 5))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(side.life.to_string())
+                                .strong()
+                                .size(24.0)
+                                .color(if side.life <= 5 {
+                                    ATTACK
+                                } else {
+                                    crate::theme::TEXT
+                                }),
+                        );
+                        ui.label(RichText::new("LIFE").size(10.0).color(crate::theme::MUTED));
+                    });
+                });
             if side.poison > 0 {
                 ui.label(RichText::new(format!("{} poison", side.poison)).color(TAPPED_EDGE));
             }
@@ -1008,7 +1027,7 @@ impl GuiApp {
             .cloned();
         let texture = text
             .as_ref()
-            .and_then(|t| self.art.get(painter.ctx(), &t.name))
+            .and_then(|t| self.art.get(painter.ctx(), &t.artwork()))
             .map(|t| t.id());
         let radius = 5.0;
 
@@ -1109,7 +1128,7 @@ impl GuiApp {
 
         let texture = text
             .as_ref()
-            .and_then(|t| self.art.get(ui.ctx(), &t.name))
+            .and_then(|t| self.art.get(ui.ctx(), &t.artwork()))
             .cloned();
         if let (Some(texture), Some(text)) = (texture, text.as_ref()) {
             return ui
@@ -1266,10 +1285,10 @@ impl GuiApp {
 
     /// Everything the text panel shows, symbols included, for hovering over a card.
     fn card_details(&mut self, ui: &mut Ui, text: &crate::cards_text::CardText) {
-        widgets::offer_card_enlargement(ui, &text.name);
+        widgets::offer_printing_enlargement(ui, &text.name, text.printing.as_deref());
         // The card itself, large, beside its text: the image is what a player recognises, the
         // text is what the engine actually plays.
-        if let Some(texture) = self.art.get(ui.ctx(), &text.name).cloned() {
+        if let Some(texture) = self.art.get(ui.ctx(), &text.artwork()).cloned() {
             ui.horizontal_top(|ui| {
                 ui.add(
                     egui::Image::new(&texture)
@@ -1299,6 +1318,55 @@ impl GuiApp {
         if let Some(pt) = &text.power_toughness {
             ui.add_space(4.0);
             ui.label(RichText::new(pt).strong());
+        }
+    }
+
+    fn object_hover(
+        &mut self,
+        response: egui::Response,
+        view: &PlayerView,
+        id: ObjectId,
+    ) -> egui::Response {
+        if let Some(text) = board::object(view, id)
+            .and_then(|object| object.card.map(|card| (card, object.face)))
+            .and_then(|(card, face)| self.texts.get_face(card, face))
+            .cloned()
+        {
+            response.on_hover_ui(|ui| self.card_details(ui, &text))
+        } else {
+            response
+        }
+    }
+
+    fn action_hover(
+        &mut self,
+        response: egui::Response,
+        view: &PlayerView,
+        action: &Action,
+    ) -> egui::Response {
+        let (id, face) = match *action {
+            Action::CastFace { object, face } | Action::PlayLandFace { object, face } => {
+                (object, face)
+            }
+            Action::Cast { object }
+            | Action::PlayLand { object }
+            | Action::CastAlternative { object, .. }
+            | Action::CastFaceDown { object } => (object, 0),
+            Action::ActivateAbility { source, .. }
+            | Action::ActivateManaAbility { source, .. }
+            | Action::SpecialAction { source, .. } => {
+                return self.object_hover(response, view, source);
+            }
+            Action::Pass | Action::Concede => return response,
+        };
+        if let Some(text) = board::object(view, id)
+            .and_then(|object| object.card)
+            .and_then(|card| self.texts.get_face(card, face))
+            .cloned()
+        {
+            response.on_hover_ui(|ui| self.card_details(ui, &text))
+        } else {
+            response
         }
     }
 
@@ -1355,16 +1423,7 @@ impl GuiApp {
                         .unwrap_or_default();
                     for action in &options {
                         let response = ui.button(self.action_label(view, action));
-                        if let Some((object, face, _)) = action.play()
-                            && let Some(text) = board::object(view, object)
-                                .and_then(|o| o.card)
-                                .and_then(|card| self.texts.get_face(card, face))
-                                .cloned()
-                        {
-                            response
-                                .clone()
-                                .on_hover_ui(|ui| self.card_details(ui, &text));
-                        }
+                        let response = self.action_hover(response, view, action);
                         if response.clicked() {
                             self.answer(Answer::Action(action.clone()));
                             return;
@@ -1385,7 +1444,8 @@ impl GuiApp {
                         |id| board::object(view, id).map(|o| o.zone),
                     ) {
                         let label = self.action_label(view, action);
-                        if ui.button(label).clicked() {
+                        let response = ui.button(label);
+                        if self.action_hover(response, view, action).clicked() {
                             self.answer(Answer::Action(action.clone()));
                             return;
                         }
@@ -1511,12 +1571,24 @@ impl GuiApp {
                                 mtg_core::Target::Player(p) => format::player_name(view, *p),
                             };
                             let chosen = self.picked_targets.get(&i) == Some(target);
-                            let clicked = ui.vertical(|ui| {
-                                let card_clicked = if let mtg_core::Target::Object(object) = target {
-                                    self.draw_card(ui, view, *object, true).clicked()
-                                } else { false };
-                                ui.selectable_label(chosen, label).clicked() || card_clicked
-                            }).inner;
+                            let clicked = ui
+                                .vertical(|ui| {
+                                    let card_clicked =
+                                        if let mtg_core::Target::Object(object) = target {
+                                            self.draw_card(ui, view, *object, true).clicked()
+                                        } else {
+                                            false
+                                        };
+                                    let response = ui.selectable_label(chosen, label);
+                                    let response = if let mtg_core::Target::Object(object) = target
+                                    {
+                                        self.object_hover(response, view, *object)
+                                    } else {
+                                        response
+                                    };
+                                    response.clicked() || card_clicked
+                                })
+                                .inner;
                             if clicked {
                                 if slots.len() == 1 {
                                     self.answer(Answer::Targets(vec![vec![*target]]));
@@ -1560,7 +1632,8 @@ impl GuiApp {
                         } else {
                             label
                         };
-                        if ui.button(label).clicked() {
+                        let response = ui.button(label);
+                        if self.object_hover(response, view, *id).clicked() {
                             toggle(&mut self.picked, *id);
                         }
                     }
@@ -1626,10 +1699,13 @@ impl GuiApp {
                 ui.label(RichText::new(format!("keep which {name}?")).small());
                 ui.horizontal_wrapped(|ui| {
                     for id in candidates {
-                        let clicked = ui.vertical(|ui| {
-                            let card = self.draw_card(ui, view, *id, true);
-                            ui.button(self.name_of(view, *id)).clicked() || card.clicked()
-                        }).inner;
+                        let clicked = ui
+                            .vertical(|ui| {
+                                let card = self.draw_card(ui, view, *id, true);
+                                let response = ui.button(self.name_of(view, *id));
+                                self.object_hover(response, view, *id).clicked() || card.clicked()
+                            })
+                            .inner;
                         if clicked {
                             self.answer(Answer::Objects(vec![*id]));
                             return;
@@ -1669,6 +1745,7 @@ impl GuiApp {
                                 );
                             }
                             let button = ui.add_enabled(enabled, egui::Button::new(label));
+                            let button = self.object_hover(button, view, *id);
                             if enabled && (card.clicked() || button.clicked()) {
                                 toggle(&mut self.picked, *id);
                             }
@@ -1691,7 +1768,9 @@ impl GuiApp {
                 // illegal, so this only has to offer the pairs it was given.
                 for (blocker, attackers) in eligible {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(self.name_of(view, *blocker)).strong().small());
+                        let response =
+                            ui.label(RichText::new(self.name_of(view, *blocker)).strong().small());
+                        self.object_hover(response, view, *blocker);
                         ui.label(RichText::new("blocks").weak().small());
                         let current = self.blocks.iter().find(|(b, _)| b == blocker).map(|p| p.1);
                         for attacker in attackers {
@@ -1702,7 +1781,8 @@ impl GuiApp {
                             } else {
                                 label
                             };
-                            if ui.button(label).clicked() {
+                            let response = ui.button(label);
+                            if self.object_hover(response, view, *attacker).clicked() {
                                 self.toggle_block(*blocker, *attacker);
                             }
                         }
@@ -1758,7 +1838,8 @@ impl GuiApp {
                         {
                             swap = Some((pos, pos + 1));
                         }
-                        ui.label(self.name_of(view, blockers[index]));
+                        let response = ui.label(self.name_of(view, blockers[index]));
+                        self.object_hover(response, view, blockers[index]);
                     });
                 }
                 if let Some((a, b)) = swap {
@@ -1856,7 +1937,9 @@ impl GuiApp {
                 if let Some(mut rows) = self.custom_damage.take() {
                     for (index, (object, amount)) in rows.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(format!("{}. {}", index + 1, self.name_of(view, *object)));
+                            let response =
+                                ui.label(format!("{}. {}", index + 1, self.name_of(view, *object)));
+                            self.object_hover(response, view, *object);
                             ui.add(egui::DragValue::new(amount).range(0..=*total));
                         });
                     }
@@ -1876,7 +1959,7 @@ impl GuiApp {
                             u64::from(*total) - assigned
                         ));
                     }
-                    ui.label(RichText::new("Assign lethal damage to earlier blockers before later ones. Unassigned damage requires trample and lethal damage to every blocker.").weak().small());
+                    ui.label(RichText::new("Divide damage among blockers as you choose. Unassigned damage requires trample and lethal damage to every blocker.").weak().small());
                     if ui
                         .add_enabled(
                             assigned <= u64::from(*total),
@@ -2261,6 +2344,68 @@ mod target_tests {
         assert_eq!(app.picked, vec![first]);
         click_question_label(&mut app, &ctx, "Confirm");
         assert!(matches!(answers.try_recv().unwrap(), Answer::Objects(ids) if ids == vec![first]));
+    }
+
+    #[test]
+    fn bottom_cast_action_hover_offers_enlargement_without_casting() {
+        use mtg_headless::cards::{DUMMY, DemoCards};
+        let cards = DemoCards::default();
+        let mut state = mtg_engine::state::GameState::new(&[PlayerId(0), PlayerId(1)], 20);
+        let object = state.place(
+            DUMMY,
+            PlayerId(0),
+            mtg_core::ZoneRef::of(mtg_core::Zone::Hand, PlayerId(0)),
+        );
+        let action = Action::Cast { object };
+        let (mut app, answers, ctx) = question_app(ChoiceKind::Priority {
+            legal: mtg_engine::actions::LegalActions {
+                actions: vec![action.clone()],
+                ..Default::default()
+            },
+        });
+        app.texts = CardTexts::snapshot(&cards, [DUMMY]);
+        app.current.as_mut().unwrap().view = mtg_engine::view::project(&state, PlayerId(0));
+        let label = app.action_label(&app.current.as_ref().unwrap().view, &action);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw_question(ui));
+        output.textures_delta.clear();
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::epaint::Shape::Text(text) = &shape.shape
+                    && text.galley.text() == label
+                {
+                    Some(text.pos + text.galley.rect.center().to_vec2())
+                } else {
+                    None
+                }
+            })
+            .expect("cast button should render");
+        let mut offered = false;
+        for time in [1.0, 2.0, 3.0] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events: if time == 1.0 {
+                        vec![egui::Event::PointerMoved(pos)]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                },
+                |ui| app.draw_question(ui),
+            );
+            output.textures_delta.clear();
+            offered |= output.shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+                egui::epaint::Shape::Text(text) if text.galley.text() == "Enlarge card")
+            });
+        }
+        assert!(
+            offered,
+            "hovering the bottom cast button should offer enlargement"
+        );
+        assert!(answers.try_recv().is_err());
     }
 
     #[test]
