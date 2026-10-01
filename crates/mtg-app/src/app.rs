@@ -300,81 +300,118 @@ impl App {
             return self.builder_screen(ui);
         }
 
-        egui::Panel::top("decks-top").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("⏴ Menu").clicked() {
-                    self.screen = Screen::Menu;
-                    self.confirm_delete = None;
-                }
-                ui.heading("Decks");
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        self.store.is_some(),
-                        egui::Button::new(RichText::new("New deck").strong()),
-                    )
-                    .clicked()
-                {
-                    self.builder = Some(crate::builder::Builder::new(crate::builder::Draft::new(
-                        "New deck",
-                    )));
-                    self.confirm_delete = None;
+        egui::Panel::top("decks-top")
+            .frame(crate::theme::panel())
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("⏴ Menu").clicked() {
+                        self.screen = Screen::Menu;
+                        self.confirm_delete = None;
+                    }
+                    ui.heading("Decks");
+                    ui.separator();
+                    if ui
+                        .add_enabled(
+                            self.store.is_some(),
+                            crate::theme::primary_button(
+                                RichText::new("+ New deck")
+                                    .strong()
+                                    .color(crate::theme::INK),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.builder = Some(crate::builder::Builder::new(
+                            crate::builder::Draft::new("New deck"),
+                        ));
+                        self.confirm_delete = None;
+                    }
+                });
+                if let Some(error) = &self.store_error {
+                    ui.label(
+                        RichText::new(format!("Could not read the card database: {error}"))
+                            .color(WARN),
+                    );
+                    if ui.button("Retry database").clicked() {
+                        self.store_error = None;
+                        if self.store.is_some() {
+                            self.refresh_from_store();
+                        }
+                        ui.ctx().request_repaint();
+                    }
                 }
             });
-            if let Some(error) = &self.store_error {
-                ui.label(
-                    RichText::new(format!("Could not read the card database: {error}")).color(WARN),
-                );
-                if ui.button("Retry database").clicked() {
-                    self.store_error = None;
-                    if self.store.is_some() {
-                        self.refresh_from_store();
-                    }
-                    ui.ctx().request_repaint();
-                }
-            }
-        });
 
-        egui::Panel::bottom("card-db").show(ui, |ui| self.card_database(ui));
+        egui::Panel::bottom("card-db")
+            .frame(crate::theme::panel())
+            .show(ui, |ui| self.card_database(ui));
 
         egui::Panel::left("deck-list")
-            .default_size(320.0)
+            .frame(crate::theme::panel())
+            .default_size(340.0)
             .show(ui, |ui| {
                 ui.heading("Your decks");
+                ui.label(
+                    RichText::new("Select to inspect · double-click to edit")
+                        .small()
+                        .color(crate::theme::MUTED),
+                );
+                ui.add_space(10.0);
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let mut delete = None;
                     for (id, name) in self.decks.clone() {
-                        ui.horizontal(|ui| {
-                            let selected = self.selected_deck == Some(id);
-                            let label = ui
-                                .selectable_label(selected, &name)
-                                .on_hover_text("click for details, double-click to edit");
-                            if label.clicked() {
-                                if self.selected_deck != Some(id) {
-                                    self.confirm_delete = None;
-                                }
-                                self.selected_deck = Some(id);
-                            }
-                            if label.double_clicked() {
-                                self.open_builder(id);
-                            }
-                            // Deleting takes two clicks: the first arms it, the second confirms.
-                            if let DeckId::Stored(n) = id {
-                                if self.confirm_delete == Some(n) {
-                                    if ui
-                                        .small_button(RichText::new("Really delete?").color(WARN))
-                                        .clicked()
-                                    {
-                                        delete = Some(n);
+                        let selected = self.selected_deck == Some(id);
+                        egui::Frame::new()
+                            .fill(if selected {
+                                crate::theme::SURFACE
+                            } else {
+                                crate::theme::PANEL
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if selected {
+                                    crate::theme::GOLD
+                                } else {
+                                    crate::theme::BORDER
+                                },
+                            ))
+                            .corner_radius(8)
+                            .inner_margin(8)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let label = ui
+                                        .selectable_label(selected, &name)
+                                        .on_hover_text("click for details, double-click to edit");
+                                    if label.clicked() {
+                                        if self.selected_deck != Some(id) {
+                                            self.confirm_delete = None;
+                                        }
+                                        self.selected_deck = Some(id);
                                     }
-                                    if ui.small_button("Cancel").clicked() {
-                                        self.confirm_delete = None;
+                                    if label.double_clicked() {
+                                        self.open_builder(id);
                                     }
-                                } else if ui.small_button("Delete").clicked() {
-                                    self.confirm_delete = Some(n);
-                                }
-                            }
-                        });
+                                    // Deleting takes two clicks: the first arms it, the second confirms.
+                                    if let DeckId::Stored(n) = id {
+                                        if self.confirm_delete == Some(n) {
+                                            if ui
+                                                .small_button(
+                                                    RichText::new("Really delete?").color(WARN),
+                                                )
+                                                .clicked()
+                                            {
+                                                delete = Some(n);
+                                            }
+                                            if ui.small_button("Cancel").clicked() {
+                                                self.confirm_delete = None;
+                                            }
+                                        } else if ui.small_button("Delete").clicked() {
+                                            self.confirm_delete = Some(n);
+                                        }
+                                    }
+                                });
+                            });
+                        ui.add_space(6.0);
                     }
                     if let (Some(n), Some(store)) = (delete, &self.store) {
                         self.confirm_delete = None;
@@ -399,7 +436,9 @@ impl App {
                 }
             });
 
-        egui::CentralPanel::default().show(ui, |ui| self.import_form(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(24))
+            .show(ui, |ui| self.import_form(ui));
     }
 
     fn open_builder(&mut self, id: DeckId) {
@@ -516,7 +555,13 @@ impl App {
     }
 
     fn import_form(&mut self, ui: &mut Ui) {
+        ui.label(
+            RichText::new("BRING YOUR OWN DECK")
+                .size(10.0)
+                .color(crate::theme::GOLD),
+        );
         ui.heading("Import a deck");
+        ui.add_space(6.0);
         ui.label(
             RichText::new("Paste a list from Moxfield, Archidekt, Arena, MTGO or plain text (\"4 Card Name\" per line).")
                 .weak(),
@@ -546,7 +591,14 @@ impl App {
         let can = self.store.is_some() && self.card_count > 0;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(can, egui::Button::new("Import deck"))
+                .add_enabled(
+                    can,
+                    crate::theme::primary_button(
+                        RichText::new("Import deck")
+                            .strong()
+                            .color(crate::theme::INK),
+                    ),
+                )
                 .clicked()
             {
                 let result = self
