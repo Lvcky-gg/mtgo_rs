@@ -433,6 +433,8 @@ impl App {
         egui::Panel::right("builder-deck")
             .frame(crate::theme::panel())
             .default_size(400.0)
+            .min_size(280.0)
+            .max_size((ui.available_width() * 0.48).max(280.0))
             .show(ui, |ui| builder.deck(ui, store, art));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(18))

@@ -884,7 +884,13 @@ impl Builder {
                 self.status = None;
                 self.confirm_close = false;
             }
-            let save = egui::Button::new(if self.draft.dirty { "Save" } else { "Saved" });
+            let save = if self.draft.dirty {
+                crate::theme::primary_button(
+                    RichText::new("Save deck").strong().color(crate::theme::INK),
+                )
+            } else {
+                egui::Button::new("Saved")
+            };
             if ui
                 .add_enabled(self.draft.dirty, save)
                 .on_hover_text("Ctrl+S")
@@ -982,18 +988,20 @@ impl Builder {
         }
         ui.heading("Card gallery");
         ui.label(RichText::new("Find the next card for your deck.").color(crate::theme::MUTED));
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.query.text)
-                    .hint_text("search name, type or rules text")
-                    .desired_width(260.0),
+                    .hint_text("Search cards by name or rules…")
+                    .desired_width(ui.available_width().min(340.0)),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.query.type_contains)
-                    .hint_text("type, e.g. Creature, Elf")
+                    .hint_text("Card type or creature type")
                     .desired_width(160.0),
             );
+        });
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.filter_colors, "Colours:");
             for (i, letter) in ["W", "U", "B", "R", "G"].iter().enumerate() {
                 let on = self.color_filter[i];
@@ -1035,7 +1043,7 @@ impl Builder {
                     }
                     ui.selectable_value(&mut self.query.legal_in, None, "all cards");
                 });
-            if ui.button("Clear").clicked() {
+            if ui.button("Reset filters").clicked() {
                 self.query = CardQuery {
                     legal_in: Some(String::new()),
                     ..Default::default()
@@ -1073,7 +1081,8 @@ impl Builder {
             return;
         }
 
-        ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(self.page > 0, egui::Button::new("⏴ Prev"))
                 .clicked()
@@ -1088,11 +1097,9 @@ impl Builder {
                 self.page += 1;
             }
             ui.label(
-                RichText::new(
-                    "click: add to deck · right-click: sideboard or commander · hover: details",
-                )
-                .weak()
-                .small(),
+                RichText::new("Hover to inspect · right-click for sideboard and commander")
+                    .weak()
+                    .small(),
             );
         });
         ui.separator();
@@ -1190,9 +1197,21 @@ impl Builder {
                                     egui::Label::new(RichText::new(&name).size(12.0)).truncate(),
                                 );
                                 self.hover_card(name_response, store, art, oracle);
-                                if ui.small_button("Choose printing").clicked() {
-                                    self.choose_printing(ui, store, oracle);
-                                }
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button("+ Add")
+                                        .on_hover_text("Add one copy to the main deck")
+                                        .clicked()
+                                    {
+                                        self.draft.add(store, oracle, false);
+                                        self.problems = None;
+                                    }
+                                    let printing = ui.small_button("Printing");
+                                    let printing = self.hover_card(printing, store, art, oracle);
+                                    if printing.clicked() {
+                                        self.choose_printing(ui, store, oracle);
+                                    }
+                                });
                                 if !support.ready() {
                                     ui.label(RichText::new("Rules incomplete").color(WARN).small())
                                         .on_hover_ui(|ui| support.explain(ui));
@@ -1247,16 +1266,37 @@ impl Builder {
                 .or_insert_with(|| CardSupport::load(store, *oracle));
         }
         let colors = self.draft.colors();
-        ui.horizontal(|ui| {
-            ui.heading(format!("{} cards", self.draft.main_count()));
-            if self.draft.side_count() > 0 {
-                ui.label(RichText::new(format!("+ {} sideboard", self.draft.side_count())).weak());
-            }
-            let pips: String = colors.chars().map(|c| format!("{{{c}}}")).collect();
-            if !pips.is_empty() {
-                widgets::mana_label(ui, art, &pips, 16.0, ui.visuals().text_color());
-            }
+        ui.heading("Your deck");
+        crate::theme::surface().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(self.draft.main_count().to_string())
+                        .size(30.0)
+                        .strong(),
+                );
+                ui.label(RichText::new("main deck").color(crate::theme::MUTED));
+                let pips: String = colors.chars().map(|c| format!("{{{c}}}")).collect();
+                if !pips.is_empty() {
+                    widgets::mana_label(ui, art, &pips, 16.0, ui.visuals().text_color());
+                }
+            });
+            ui.label(
+                RichText::new(format!(
+                    "{} sideboard · {} unique cards",
+                    self.draft.side_count(),
+                    ids.len()
+                ))
+                .color(crate::theme::MUTED)
+                .small(),
+            );
         });
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("MANA CURVE")
+                .size(10.0)
+                .color(crate::theme::MUTED),
+        );
         curve_chart(ui, &self.draft.curve());
         if !ids.is_empty() {
             let ready = ids.iter().filter(|id| self.support[id].ready()).count();
@@ -1322,24 +1362,34 @@ impl Builder {
             }
             for (group, cards) in self.draft.grouped() {
                 let total: u32 = cards.iter().map(|(_, n)| n).sum();
-                ui.label(RichText::new(format!("{} ({total})", group.label())).strong());
+                crate::theme::section(ui, group.label(), total);
                 for (oracle, n) in cards {
                     changed |= self.deck_row(ui, store, art, oracle, n, false);
                 }
                 ui.add_space(6.0);
             }
             if !self.draft.side.is_empty() {
-                ui.label(
-                    RichText::new(format!("Sideboard ({})", self.draft.side_count())).strong(),
-                );
+                crate::theme::section(ui, "Sideboard", self.draft.side_count());
                 for (oracle, n) in self.draft.side.clone() {
                     changed |= self.deck_row(ui, store, art, oracle, n, true);
                 }
             }
             if self.draft.main.is_empty() && self.draft.commander.is_none() {
-                ui.label(
-                    RichText::new("Empty. Search on the left and click cards to add them.").weak(),
-                );
+                crate::theme::surface().show(ui, |ui| {
+                    ui.label(RichText::new("Start with a card you love.").strong());
+                    ui.label(
+                        RichText::new("Search the gallery and use + Add to build your deck.")
+                            .color(crate::theme::MUTED),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Hover to read a card. Choose Printing to find your favorite artwork.",
+                        )
+                        .small()
+                        .color(crate::theme::MUTED),
+                    );
+                });
             }
         });
         if changed {
@@ -1362,27 +1412,35 @@ impl Builder {
     ) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            if ui.small_button("−").clicked() {
+            if ui
+                .small_button("−")
+                .on_hover_text("Remove one copy")
+                .clicked()
+            {
                 self.draft.remove(oracle, side);
                 changed = true;
             }
             ui.label(RichText::new(format!("{n}")).strong());
-            if ui.small_button("+").clicked() {
+            if ui.small_button("+").on_hover_text("Add one copy").clicked() {
                 self.draft.add(store, oracle, side);
                 changed = true;
             }
             let name = self.draft.name_of(oracle).to_string();
-            let response = ui.add(egui::Label::new(name).sense(egui::Sense::click()));
+            let name_width = (ui.available_width() - 115.0).max(60.0);
+            let response = ui.add_sized(
+                Vec2::new(name_width, ui.text_style_height(&egui::TextStyle::Body)),
+                egui::Label::new(name)
+                    .truncate()
+                    .sense(egui::Sense::click()),
+            );
             let response = self.hover_card(response, store, art, oracle);
             if self.support.get(&oracle).is_some_and(|s| !s.ready()) {
                 ui.label(RichText::new("!").color(WARN))
                     .on_hover_ui(|ui| self.support[&oracle].explain(ui));
             }
-            if ui
-                .small_button("Art")
-                .on_hover_text("Choose printing")
-                .clicked()
-            {
+            let printing = ui.small_button("Art");
+            let printing = self.hover_card(printing, store, art, oracle);
+            if printing.clicked() {
                 self.choose_printing(ui, store, oracle);
             }
             response.context_menu(|ui| {

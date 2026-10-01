@@ -420,7 +420,7 @@ impl GuiApp {
                             ui.label(if line.starts_with('—') {
                                 text.strong().color(ACCENT)
                             } else {
-                                text
+                                text.color(crate::theme::MUTED).size(13.0)
                             });
                         }
                     });
@@ -2075,8 +2075,8 @@ fn phase_bar(ui: &mut Ui, view: &PlayerView, texts: &CardTexts) {
     } else {
         TAPPED_EDGE
     };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
         for (step, label) in format::PHASE_BAR {
             let on = step == current;
             let text = RichText::new(label).small();
@@ -2087,8 +2087,8 @@ fn phase_bar(ui: &mut Ui, view: &PlayerView, texts: &CardTexts) {
             };
             egui::Frame::new()
                 .fill(if on { lit } else { Color32::TRANSPARENT })
-                .corner_radius(3.0)
-                .inner_margin(egui::Margin::symmetric(6, 2))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(8, 5))
                 .show(ui, |ui| ui.label(text));
         }
     });

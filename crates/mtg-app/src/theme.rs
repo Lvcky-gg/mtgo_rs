@@ -66,3 +66,31 @@ pub fn install(ctx: &egui::Context) {
 pub fn panel() -> egui::Frame {
     egui::Frame::new().fill(PANEL).inner_margin(12)
 }
+
+/// A raised surface for summaries and empty states.
+pub fn surface() -> egui::Frame {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(10)
+        .inner_margin(12)
+}
+
+pub fn primary_button(label: impl Into<egui::WidgetText>) -> egui::Button<'static> {
+    egui::Button::new(label).fill(GOLD)
+}
+
+pub fn section(ui: &mut egui::Ui, label: &str, count: impl std::fmt::Display) {
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).strong().color(TEXT));
+        egui::Frame::new()
+            .fill(INK)
+            .corner_radius(5)
+            .inner_margin(egui::Margin::symmetric(7, 2))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(count.to_string()).small().color(MUTED));
+            });
+    });
+    ui.add_space(3.0);
+}
