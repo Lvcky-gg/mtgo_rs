@@ -15,6 +15,8 @@ struct Printing {
     collector_number: String,
     lang: String,
     #[serde(default)]
+    released_at: String,
+    #[serde(default)]
     digital: bool,
     image_uris: Option<ImageUris>,
     #[serde(default)]
@@ -63,6 +65,8 @@ pub struct Picker {
     ready: Receiver<Result<Vec<Printing>, String>>,
     result: Option<Result<Vec<Printing>, String>>,
     filter: String,
+    newest_first: bool,
+    english_only: bool,
 }
 
 impl Picker {
@@ -80,6 +84,8 @@ impl Picker {
             ready,
             result: None,
             filter: String::new(),
+            newest_first: true,
+            english_only: false,
         }
     }
 
@@ -107,10 +113,25 @@ impl Picker {
                 {
                     selection = Some(None);
                 }
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text("Filter by set, collector number, or language"),
-                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .hint_text("Search sets, numbers, languages…")
+                            .desired_width(300.0),
+                    );
+                    ui.checkbox(&mut self.english_only, "English only");
+                    egui::ComboBox::from_id_salt("printing-sort")
+                        .selected_text(if self.newest_first {
+                            "Newest first"
+                        } else {
+                            "Oldest first"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.newest_first, true, "Newest first");
+                            ui.selectable_value(&mut self.newest_first, false, "Oldest first");
+                        });
+                });
+                ui.separator();
                 match &self.result {
                     None => {
                         ui.horizontal(|ui| {
@@ -141,20 +162,43 @@ impl Picker {
                         );
                         let filter = self.filter.to_lowercase();
                         let width = 146.0;
-                        let columns = ((ui.available_width() + 16.0) / (width + 16.0))
+                        let columns = ((ui.available_width() + 16.0) / (width + 32.0))
                             .floor()
                             .max(1.0) as usize;
-                        let visible: Vec<_> = printings
+                        let mut visible: Vec<_> = printings
                             .iter()
-                            .filter(|p| p.label().to_lowercase().contains(&filter))
+                            .filter(|p| {
+                                (!self.english_only || p.lang == "en")
+                                    && p.label().to_lowercase().contains(&filter)
+                            })
                             .collect();
+                        visible.sort_by(|a, b| {
+                            let order = a
+                                .released_at
+                                .cmp(&b.released_at)
+                                .then_with(|| a.id.cmp(&b.id));
+                            if self.newest_first {
+                                order.reverse()
+                            } else {
+                                order
+                            }
+                        });
+                        ui.label(
+                            RichText::new(format!(
+                                "Showing {} of {} printings",
+                                visible.len(),
+                                printings.len()
+                            ))
+                            .small()
+                            .color(crate::theme::MUTED),
+                        );
                         if visible.is_empty() {
                             ui.label("No printings match this filter.");
                         }
                         ui.spacing_mut().item_spacing.y = 16.0;
                         egui::ScrollArea::vertical().show_rows(
                             ui,
-                            270.0,
+                            330.0,
                             visible.len().div_ceil(columns),
                             |ui, rows| {
                                 egui::Grid::new("printing-grid")
@@ -167,68 +211,119 @@ impl Picker {
                                             .take(rows.len() * columns)
                                             .enumerate()
                                         {
-                                            ui.vertical(|ui| {
-                                                ui.set_width(width);
-                                                ui.set_min_height(270.0);
-                                                let size = Vec2::new(width, width * 680.0 / 488.0);
-                                                let response = if let Some(texture) = art
-                                                    .printing(
-                                                        ctx,
-                                                        &printing.id,
-                                                        printing.image_uri(),
-                                                    )
-                                                    .cloned()
-                                                {
-                                                    ui.add(
-                                                        egui::Image::new(&texture)
-                                                            .fit_to_exact_size(size)
-                                                            .sense(egui::Sense::click()),
-                                                    )
-                                                } else {
-                                                    ui.add_sized(
-                                                        size,
-                                                        egui::Button::new(&self.name),
-                                                    )
-                                                };
-                                                let response = response.on_hover_ui(|ui| {
-                                                    ui.label(printing.label());
-                                                    widgets::offer_printing_enlargement(
-                                                        ui,
-                                                        &self.name,
-                                                        Some(&printing.id),
-                                                    );
-                                                    if let Some(texture) = art
-                                                        .printing(
-                                                            ctx,
-                                                            &printing.id,
-                                                            printing.image_uri(),
-                                                        )
-                                                        .cloned()
-                                                    {
+                                            let is_selected =
+                                                selected == Some(printing.id.as_str());
+                                            egui::Frame::new()
+                                                .fill(crate::theme::SURFACE)
+                                                .stroke(egui::Stroke::new(
+                                                    1.0,
+                                                    if is_selected {
+                                                        crate::theme::GOLD
+                                                    } else {
+                                                        crate::theme::BORDER
+                                                    },
+                                                ))
+                                                .corner_radius(10)
+                                                .inner_margin(8)
+                                                .show(ui, |ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.set_width(width);
+                                                        ui.set_min_height(314.0);
+                                                        let size =
+                                                            Vec2::new(width, width * 680.0 / 488.0);
+                                                        let response = if let Some(texture) = art
+                                                            .printing(
+                                                                ctx,
+                                                                &printing.id,
+                                                                printing.image_uri(),
+                                                            )
+                                                            .cloned()
+                                                        {
+                                                            ui.add(
+                                                                egui::Image::new(&texture)
+                                                                    .fit_to_exact_size(size)
+                                                                    .sense(egui::Sense::click()),
+                                                            )
+                                                        } else {
+                                                            ui.add_sized(
+                                                                size,
+                                                                egui::Button::new(&self.name),
+                                                            )
+                                                        };
+                                                        let response = response.on_hover_ui(|ui| {
+                                                            ui.label(printing.label());
+                                                            widgets::offer_printing_enlargement(
+                                                                ui,
+                                                                &self.name,
+                                                                Some(&printing.id),
+                                                            );
+                                                            if let Some(texture) = art
+                                                                .printing(
+                                                                    ctx,
+                                                                    &printing.id,
+                                                                    printing.image_uri(),
+                                                                )
+                                                                .cloned()
+                                                            {
+                                                                ui.add(
+                                                                    egui::Image::new(&texture)
+                                                                        .fit_to_exact_size(
+                                                                            Vec2::new(
+                                                                                260.0,
+                                                                                260.0 * 680.0
+                                                                                    / 488.0,
+                                                                            ),
+                                                                        ),
+                                                                );
+                                                            }
+                                                        });
+                                                        if response.clicked() {
+                                                            selection =
+                                                                Some(Some(printing.id.clone()));
+                                                        }
+                                                        if selected == Some(printing.id.as_str()) {
+                                                            ui.painter().rect_stroke(
+                                                                response.rect,
+                                                                6,
+                                                                egui::Stroke::new(
+                                                                    2.0,
+                                                                    crate::theme::GOLD,
+                                                                ),
+                                                                egui::StrokeKind::Inside,
+                                                            );
+                                                        }
                                                         ui.add(
-                                                            egui::Image::new(&texture)
-                                                                .fit_to_exact_size(Vec2::new(
-                                                                    260.0,
-                                                                    260.0 * 680.0 / 488.0,
-                                                                )),
+                                                            egui::Label::new(
+                                                                RichText::new(&printing.set_name)
+                                                                    .strong()
+                                                                    .size(12.0),
+                                                            )
+                                                            .truncate(),
+                                                        )
+                                                        .on_hover_text(printing.label());
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "#{} · {}",
+                                                                printing.collector_number,
+                                                                printing.lang.to_uppercase()
+                                                            ))
+                                                            .small()
+                                                            .color(crate::theme::MUTED),
                                                         );
-                                                    }
+                                                        let use_printing = ui.add_sized(
+                                                            [width, 28.0],
+                                                            egui::Button::new(if is_selected {
+                                                                "Selected"
+                                                            } else {
+                                                                "Use this printing"
+                                                            }),
+                                                        );
+                                                        if use_printing.clicked() {
+                                                            selection =
+                                                                Some(Some(printing.id.clone()));
+                                                        }
+                                                    });
                                                 });
-                                                if response.clicked() {
-                                                    selection = Some(Some(printing.id.clone()));
-                                                }
-                                                if selected == Some(printing.id.as_str()) {
-                                                    ui.painter().rect_stroke(
-                                                        response.rect,
-                                                        6,
-                                                        egui::Stroke::new(2.0, crate::theme::GOLD),
-                                                        egui::StrokeKind::Inside,
-                                                    );
-                                                }
-                                                ui.label(
-                                                    RichText::new(printing.label()).size(12.0),
-                                                );
-                                            });
                                             if (index + 1) % columns == 0 {
                                                 ui.end_row();
                                             }
@@ -307,12 +402,20 @@ mod tests {
                 set_name: "Sample set".into(),
                 collector_number: "12".into(),
                 lang: "ja".into(),
+                released_at: "2026-01-01".into(),
                 digital: false,
                 image_uris: None,
                 card_faces: vec![],
             }])),
             filter: String::new(),
+            newest_first: true,
+            english_only: false,
         };
+        if let Some(Ok(printings)) = &mut picker.result {
+            let mut second = printings[0].clone();
+            second.id = "another-printing".into();
+            printings.push(second);
+        }
         let mut art = CardArt::start(
             ctx.clone(),
             crate::art::ArtConfig {
@@ -322,11 +425,25 @@ mod tests {
             },
         );
         let mut pos = None;
+        let mut grid_rendered = false;
         for _ in 0..3 {
             let mut output = ctx.run_ui(Default::default(), |_| {
                 picker.show(&ctx, &mut art, None);
             });
             output.textures_delta.clear();
+            let tiles: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.text() == "Sample card" => {
+                        Some(text.pos)
+                    }
+                    _ => None,
+                })
+                .collect();
+            grid_rendered |= tiles.len() == 2
+                && (tiles[0].y - tiles[1].y).abs() < 1.0
+                && tiles[1].x > tiles[0].x;
             pos = output
                 .shapes
                 .iter()
@@ -338,6 +455,10 @@ mod tests {
                 })
                 .or(pos);
         }
+        assert!(
+            grid_rendered,
+            "printing tiles should share a row in the grid"
+        );
         let pos = pos.expect("printing tile should render");
         let mut offered = false;
         for time in [1.0, 2.0, 3.0] {

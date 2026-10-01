@@ -1177,80 +1177,87 @@ impl Builder {
                                 .corner_radius(10)
                                 .inner_margin(8)
                                 .show(ui, |ui| {
-                                    ui.set_width(tile.x);
-                                    let response = card_tile_with_art(
-                                        ui,
-                                        art,
-                                        &name,
-                                        &self.draft.printings.get(&oracle).map_or_else(
-                                            || name.clone(),
-                                            |id| format!("scryfall:{id}"),
-                                        ),
-                                        tile,
-                                        self.count_of(oracle),
-                                    );
-                                    let response = response.on_hover_ui(|ui| {
-                                        if let Some(card) = DraftCard::load(store, oracle) {
-                                            card_preview_printing(
-                                                ui,
-                                                art,
-                                                &card,
-                                                self.draft
-                                                    .printings
-                                                    .get(&oracle)
-                                                    .map(String::as_str),
-                                            );
-                                        }
-                                        support.explain(ui);
-                                    });
-                                    if response.clicked() {
-                                        self.draft.add(store, oracle, false);
-                                        self.problems = None;
-                                    }
-                                    response.context_menu(|ui| {
-                                        if ui.button("Choose printing").clicked() {
-                                            self.choose_printing(ui, store, oracle);
-                                            ui.close();
-                                        }
-                                        if ui.button("Add to sideboard").clicked() {
-                                            self.draft.add(store, oracle, true);
-                                            self.problems = None;
-                                            ui.close();
-                                        }
-                                        if ui.button("Set as commander").clicked() {
-                                            self.draft.set_commander(store, Some(oracle));
-                                            self.format = Format::Commander;
-                                            self.problems = None;
-                                            ui.close();
-                                        }
-                                    });
-                                    let name_response = ui.add(
-                                        egui::Label::new(RichText::new(&name).size(13.0).strong())
-                                            .truncate(),
-                                    );
-                                    self.hover_card(name_response, store, art, oracle);
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .small_button("+ Add")
-                                            .on_hover_text("Add one copy to the main deck")
-                                            .clicked()
-                                        {
+                                    ui.vertical(|ui| {
+                                        ui.set_width(tile.x);
+                                        let response = card_tile_with_art(
+                                            ui,
+                                            art,
+                                            &name,
+                                            &self.draft.printings.get(&oracle).map_or_else(
+                                                || name.clone(),
+                                                |id| format!("scryfall:{id}"),
+                                            ),
+                                            tile,
+                                            self.count_of(oracle),
+                                        );
+                                        let response = response.on_hover_ui(|ui| {
+                                            if let Some(card) = DraftCard::load(store, oracle) {
+                                                card_preview_printing(
+                                                    ui,
+                                                    art,
+                                                    &card,
+                                                    self.draft
+                                                        .printings
+                                                        .get(&oracle)
+                                                        .map(String::as_str),
+                                                );
+                                            }
+                                            support.explain(ui);
+                                        });
+                                        if response.clicked() {
                                             self.draft.add(store, oracle, false);
                                             self.problems = None;
                                         }
-                                        let printing = ui.small_button("Printing");
-                                        let printing =
-                                            self.hover_card(printing, store, art, oracle);
-                                        if printing.clicked() {
-                                            self.choose_printing(ui, store, oracle);
+                                        response.context_menu(|ui| {
+                                            if ui.button("Choose printing").clicked() {
+                                                self.choose_printing(ui, store, oracle);
+                                                ui.close();
+                                            }
+                                            if ui.button("Add to sideboard").clicked() {
+                                                self.draft.add(store, oracle, true);
+                                                self.problems = None;
+                                                ui.close();
+                                            }
+                                            if ui.button("Set as commander").clicked() {
+                                                self.draft.set_commander(store, Some(oracle));
+                                                self.format = Format::Commander;
+                                                self.problems = None;
+                                                ui.close();
+                                            }
+                                        });
+                                        let name_response = ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&name).size(13.0).strong(),
+                                            )
+                                            .truncate(),
+                                        );
+                                        self.hover_card(name_response, store, art, oracle);
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .small_button("+ Add")
+                                                .on_hover_text("Add one copy to the main deck")
+                                                .clicked()
+                                            {
+                                                self.draft.add(store, oracle, false);
+                                                self.problems = None;
+                                            }
+                                            let printing = ui.small_button("Printing");
+                                            let printing =
+                                                self.hover_card(printing, store, art, oracle);
+                                            if printing.clicked() {
+                                                self.choose_printing(ui, store, oracle);
+                                            }
+                                        });
+                                        if !support.ready() {
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                RichText::new("Rules incomplete")
+                                                    .color(WARN)
+                                                    .small(),
+                                            )
+                                            .on_hover_ui(|ui| support.explain(ui));
                                         }
                                     });
-                                    if !support.ready() {
-                                        ui.label(
-                                            RichText::new("Rules incomplete").color(WARN).small(),
-                                        )
-                                        .on_hover_ui(|ui| support.explain(ui));
-                                    }
                                 });
                             if (index + 1) % columns == 0 {
                                 ui.end_row();
@@ -1922,6 +1929,45 @@ mod tests {
             store.set_color_identity(ids[i], identity).unwrap();
         }
         (store, ids)
+    }
+
+    #[test]
+    fn gallery_warning_sits_below_the_printing_button() {
+        let (store, [land, _, _]) = store();
+        let ctx = egui::Context::default();
+        let mut art = CardArt::start(
+            ctx.clone(),
+            crate::art::ArtConfig {
+                names: Default::default(),
+                db: None,
+                cache_dir: std::env::temp_dir().join("mtgo-gallery-spacing-test"),
+            },
+        );
+        let mut builder = Builder::new(Draft::new("Layout"));
+        builder.query.legal_in = None;
+        builder.support.insert(
+            land,
+            CardSupport {
+                issues: vec!["Example unsupported rule".into()],
+            },
+        );
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            builder.search(ui, &store, &mut art)
+        });
+        output.textures_delta.clear();
+        let text_rect = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing label: {label}"))
+        };
+        assert!(text_rect("Rules incomplete").top() > text_rect("Printing").bottom());
     }
 
     #[test]
