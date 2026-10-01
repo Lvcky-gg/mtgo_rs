@@ -1067,46 +1067,56 @@ impl Builder {
         egui::ScrollArea::vertical()
             .id_salt("results")
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (oracle, name) in results {
-                        let support = self
-                            .support
-                            .entry(oracle)
-                            .or_insert_with(|| CardSupport::load(store, oracle))
-                            .clone();
-                        ui.vertical(|ui| {
-                            ui.set_max_width(TILE.x);
-                            let response = card_tile(ui, art, &name, TILE, self.count_of(oracle));
-                            let response = response.on_hover_ui(|ui| {
-                                if let Some(card) = DraftCard::load(store, oracle) {
-                                    card_preview(ui, art, &card);
-                                }
-                                support.explain(ui);
-                            });
-                            if response.clicked() {
-                                self.draft.add(store, oracle, false);
-                                self.problems = None;
-                            }
-                            response.context_menu(|ui| {
-                                if ui.button("Add to sideboard").clicked() {
-                                    self.draft.add(store, oracle, true);
+                let spacing = ui.spacing().item_spacing.x;
+                let columns = ((ui.available_width() + spacing) / (TILE.x + spacing))
+                    .floor()
+                    .max(1.0) as usize;
+                egui::Grid::new("card-gallery")
+                    .num_columns(columns)
+                    .show(ui, |ui| {
+                        for (index, (oracle, name)) in results.into_iter().enumerate() {
+                            let support = self
+                                .support
+                                .entry(oracle)
+                                .or_insert_with(|| CardSupport::load(store, oracle))
+                                .clone();
+                            ui.vertical(|ui| {
+                                ui.set_width(TILE.x);
+                                let response =
+                                    card_tile(ui, art, &name, TILE, self.count_of(oracle));
+                                let response = response.on_hover_ui(|ui| {
+                                    if let Some(card) = DraftCard::load(store, oracle) {
+                                        card_preview(ui, art, &card);
+                                    }
+                                    support.explain(ui);
+                                });
+                                if response.clicked() {
+                                    self.draft.add(store, oracle, false);
                                     self.problems = None;
-                                    ui.close();
                                 }
-                                if ui.button("Set as commander").clicked() {
-                                    self.draft.set_commander(store, Some(oracle));
-                                    self.format = Format::Commander;
-                                    self.problems = None;
-                                    ui.close();
+                                response.context_menu(|ui| {
+                                    if ui.button("Add to sideboard").clicked() {
+                                        self.draft.add(store, oracle, true);
+                                        self.problems = None;
+                                        ui.close();
+                                    }
+                                    if ui.button("Set as commander").clicked() {
+                                        self.draft.set_commander(store, Some(oracle));
+                                        self.format = Format::Commander;
+                                        self.problems = None;
+                                        ui.close();
+                                    }
+                                });
+                                if !support.ready() {
+                                    ui.label(RichText::new("Rules incomplete").color(WARN).small())
+                                        .on_hover_ui(|ui| support.explain(ui));
                                 }
                             });
-                            if !support.ready() {
-                                ui.label(RichText::new("Rules incomplete").color(WARN).small())
-                                    .on_hover_ui(|ui| support.explain(ui));
+                            if (index + 1) % columns == 0 {
+                                ui.end_row();
                             }
-                        });
-                    }
-                });
+                        }
+                    });
             });
     }
 
@@ -1591,6 +1601,7 @@ fn card_tile(ui: &mut Ui, art: &mut CardArt, name: &str, size: Vec2, count: u64)
 
 /// The card large, with its type line — what hovering anywhere in the builder shows.
 fn card_preview(ui: &mut Ui, art: &mut CardArt, card: &DraftCard) {
+    widgets::offer_card_enlargement(ui, &card.name);
     match art.get(ui.ctx(), &card.name) {
         Some(texture) => {
             ui.add(

@@ -452,6 +452,7 @@ impl GuiApp {
                 ui.centered_and_justified(|ui| ui.label("no position yet"));
             }
         });
+        widgets::show_enlarged_card(ui, &mut self.art);
     }
 }
 
@@ -944,6 +945,14 @@ impl GuiApp {
 
         let Some(i) = hovered else { return };
         let id = hand[i];
+        if let Some(text) = board::object(view, id)
+            .and_then(|object| self.texts.object_text(object))
+            .cloned()
+        {
+            response
+                .clone()
+                .on_hover_ui(|ui| self.card_details(ui, &text));
+        }
         let playable = plays.get(&id).cloned();
 
         // Enlarged on a foreground layer so it may rise out of the panel over the board, and
@@ -1227,7 +1236,12 @@ impl GuiApp {
                     }
                 });
             });
-        ui.interact(frame.response.rect, click_id, egui::Sense::click())
+        let response = ui.interact(frame.response.rect, click_id, egui::Sense::click());
+        if let Some(text) = text.as_ref() {
+            response.on_hover_ui(|ui| self.card_details(ui, text))
+        } else {
+            response
+        }
     }
 
     fn paint_mana_text(
@@ -1252,6 +1266,7 @@ impl GuiApp {
 
     /// Everything the text panel shows, symbols included, for hovering over a card.
     fn card_details(&mut self, ui: &mut Ui, text: &crate::cards_text::CardText) {
+        widgets::offer_card_enlargement(ui, &text.name);
         // The card itself, large, beside its text: the image is what a player recognises, the
         // text is what the engine actually plays.
         if let Some(texture) = self.art.get(ui.ctx(), &text.name).cloned() {
@@ -1496,7 +1511,13 @@ impl GuiApp {
                                 mtg_core::Target::Player(p) => format::player_name(view, *p),
                             };
                             let chosen = self.picked_targets.get(&i) == Some(target);
-                            if ui.selectable_label(chosen, label).clicked() {
+                            let clicked = ui.vertical(|ui| {
+                                let card_clicked = if let mtg_core::Target::Object(object) = target {
+                                    self.draw_card(ui, view, *object, true).clicked()
+                                } else { false };
+                                ui.selectable_label(chosen, label).clicked() || card_clicked
+                            }).inner;
+                            if clicked {
                                 if slots.len() == 1 {
                                     self.answer(Answer::Targets(vec![vec![*target]]));
                                     return;
@@ -1605,7 +1626,11 @@ impl GuiApp {
                 ui.label(RichText::new(format!("keep which {name}?")).small());
                 ui.horizontal_wrapped(|ui| {
                     for id in candidates {
-                        if ui.button(self.name_of(view, *id)).clicked() {
+                        let clicked = ui.vertical(|ui| {
+                            let card = self.draw_card(ui, view, *id, true);
+                            ui.button(self.name_of(view, *id)).clicked() || card.clicked()
+                        }).inner;
+                        if clicked {
                             self.answer(Answer::Objects(vec![*id]));
                             return;
                         }
@@ -1633,9 +1658,21 @@ impl GuiApp {
                         };
                         // A full selection disables the rest rather than silently replacing one.
                         let enabled = chosen || self.picked.len() < max;
-                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                            toggle(&mut self.picked, *id);
-                        }
+                        ui.vertical(|ui| {
+                            let card = self.draw_card(ui, view, *id, enabled);
+                            if chosen {
+                                ui.painter().rect_stroke(
+                                    card.rect,
+                                    4.0,
+                                    Stroke::new(3.0, TAPPED_EDGE),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                            let button = ui.add_enabled(enabled, egui::Button::new(label));
+                            if enabled && (card.clicked() || button.clicked()) {
+                                toggle(&mut self.picked, *id);
+                            }
+                        });
                     }
                 });
                 let ready = (min..=max).contains(&self.picked.len());
@@ -1817,14 +1854,28 @@ impl GuiApp {
                 ));
                 let answer = mtg_policy::well_formed(&question.choice, view);
                 if let Some(mut rows) = self.custom_damage.take() {
-                    for (object, amount) in &mut rows {
+                    for (index, (object, amount)) in rows.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(self.name_of(view, *object));
+                            ui.label(format!("{}. {}", index + 1, self.name_of(view, *object)));
                             ui.add(egui::DragValue::new(amount).range(0..=*total));
                         });
                     }
                     let assigned: u64 = rows.iter().map(|(_, amount)| u64::from(*amount)).sum();
                     ui.label(format!("Assigned {assigned} of {total}"));
+                    if assigned > u64::from(*total) {
+                        ui.label(
+                            RichText::new(format!(
+                                "Reduce assigned damage by {}",
+                                assigned - u64::from(*total)
+                            ))
+                            .color(TAPPED_EDGE),
+                        );
+                    } else if assigned < u64::from(*total) {
+                        ui.label(format!(
+                            "Unassigned: {} (trample only)",
+                            u64::from(*total) - assigned
+                        ));
+                    }
                     ui.label(RichText::new("Assign lethal damage to earlier blockers before later ones. Unassigned damage requires trample and lethal damage to every blocker.").weak().small());
                     if ui
                         .add_enabled(
@@ -2133,8 +2184,8 @@ mod target_tests {
         (app, received, ctx)
     }
 
-    fn click_question_label(app: &mut GuiApp, ctx: &egui::Context, label: &str) {
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw_question(ui));
+    fn click_label(ctx: &egui::Context, label: &str, mut draw: impl FnMut(&mut Ui)) {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw(ui));
         output.textures_delta.clear();
         let pos = output
             .shapes
@@ -2167,8 +2218,76 @@ mod target_tests {
             ],
             ..Default::default()
         };
-        let mut output = ctx.run_ui(input, |ui| app.draw_question(ui));
+        let mut output = ctx.run_ui(input, |ui| draw(ui));
         output.textures_delta.clear();
+    }
+
+    fn click_question_label(app: &mut GuiApp, ctx: &egui::Context, label: &str) {
+        click_label(ctx, label, |ui| app.draw_question(ui));
+    }
+
+    #[test]
+    fn object_choices_render_cards_and_enforce_the_pick_limit() {
+        use mtg_headless::cards::{DUMMY, DemoCards, SENTRY};
+        let cards = DemoCards::default();
+        let mut state = mtg_engine::state::GameState::new(&[PlayerId(0), PlayerId(1)], 20);
+        let first = state.place(
+            DUMMY,
+            PlayerId(0),
+            mtg_core::ZoneRef::of(mtg_core::Zone::Hand, PlayerId(0)),
+        );
+        let second = state.place(
+            SENTRY,
+            PlayerId(0),
+            mtg_core::ZoneRef::of(mtg_core::Zone::Hand, PlayerId(0)),
+        );
+        let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseObjects {
+            from: vec![first, second],
+            min: 1,
+            max: 1,
+        });
+        app.texts = CardTexts::snapshot(&cards, [DUMMY, SENTRY]);
+        app.current.as_mut().unwrap().view = mtg_engine::view::project(&state, PlayerId(0));
+        let first_name = app.texts.name(Some(DUMMY));
+        let second_name = app.texts.name(Some(SENTRY));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw_question(ui));
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(
+            |shape| matches!(&shape.shape, egui::epaint::Shape::Text(text)
+            if text.galley.text().contains("Creature"))
+        ));
+        click_question_label(&mut app, &ctx, &first_name);
+        click_question_label(&mut app, &ctx, &second_name);
+        assert_eq!(app.picked, vec![first]);
+        click_question_label(&mut app, &ctx, "Confirm");
+        assert!(matches!(answers.try_recv().unwrap(), Answer::Objects(ids) if ids == vec![first]));
+    }
+
+    #[test]
+    fn enlarge_action_opens_a_persistent_popup_without_answering() {
+        let (mut app, answers, ctx) = question_app(ChoiceKind::Confirm);
+        click_label(&ctx, "Enlarge card", |ui| {
+            widgets::offer_card_enlargement(ui, "Faithless Looting")
+        });
+        assert_eq!(
+            ctx.data(|data| data.get_temp::<String>(egui::Id::new("enlarged-card")))
+                .as_deref(),
+            Some("Faithless Looting")
+        );
+        let mut first_frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+            widgets::show_enlarged_card(ui, &mut app.art)
+        });
+        first_frame.textures_delta.clear();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            widgets::show_enlarged_card(ui, &mut app.art)
+        });
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(
+            |shape| matches!(&shape.shape, egui::epaint::Shape::Text(text)
+            if text.galley.text() == "Faithless Looting")
+        ));
+        assert!(answers.try_recv().is_err());
+        assert!(app.current.is_some());
     }
 
     #[test]

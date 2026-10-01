@@ -496,8 +496,20 @@ fn order_independent_when_no_write_read_dependencies() {
     // Trigger 2: reads C, writes D.
     // Neither reads what the other writes.
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[Resource::Object(ObjectId(80))], &[Resource::Object(ObjectId(81))], false),
-        trigger(2, P0, &[Resource::Object(ObjectId(82))], &[Resource::Object(ObjectId(83))], false),
+        trigger(
+            1,
+            P0,
+            &[Resource::Object(ObjectId(80))],
+            &[Resource::Object(ObjectId(81))],
+            false,
+        ),
+        trigger(
+            2,
+            P0,
+            &[Resource::Object(ObjectId(82))],
+            &[Resource::Object(ObjectId(83))],
+            false,
+        ),
     ]);
 
     let interruptions = run(&mut engine, &cards, 900, |e| {
@@ -530,10 +542,7 @@ fn three_triggers_with_partial_conflicts() {
     });
 
     let prompts = ordering_prompts(&interruptions);
-    assert!(
-        prompts > 0,
-        "should ask about T1/T2 conflict"
-    );
+    assert!(prompts > 0, "should ask about T1/T2 conflict");
 }
 
 // ---- conservative ask-when-unsure behavior ----

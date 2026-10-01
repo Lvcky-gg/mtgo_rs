@@ -360,7 +360,7 @@ fn perform(state: &mut GameState, event: &Event) {
                         .entry(mtg_core::CounterKind::MinusOneMinusOne)
                         .or_insert(0) += *amount as i32;
                 } else {
-                    o.damage += amount;
+                    o.damage = o.damage.saturating_add(*amount);
                 }
                 o.dealt_deathtouch_damage |= *deathtouch;
             }

@@ -10,6 +10,44 @@ use crate::{
     mana_text::{self, Piece},
 };
 
+/// An explicit action inside card hovers; selection clicks retain their meaning.
+pub fn offer_card_enlargement(ui: &mut Ui, name: &str) {
+    if ui.button("Enlarge card").clicked() {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new("enlarged-card"), name.to_owned()));
+    }
+}
+
+/// Shared persistent inspection window for match, builder, and sample cards.
+pub fn show_enlarged_card(ui: &mut Ui, art: &mut CardArt) {
+    let key = egui::Id::new("enlarged-card");
+    let Some(name) = ui.ctx().data(|data| data.get_temp::<String>(key)) else {
+        return;
+    };
+    let mut open = true;
+    egui::Window::new(&name)
+        .id(key)
+        .open(&mut open)
+        .resizable(true)
+        .default_size(Vec2::new(488.0, 680.0))
+        .show(ui.ctx(), |ui| {
+            if let Some(texture) = art.get(ui.ctx(), &name).cloned() {
+                let height = ui.available_height().max(150.0);
+                let width = ui.available_width().max(100.0);
+                let scale = (width / 488.0).min(height / 680.0);
+                ui.add(
+                    egui::Image::new(&texture).fit_to_exact_size(Vec2::new(488.0, 680.0) * scale),
+                );
+            } else {
+                ui.label(&name);
+                ui.label("Card image is loading or unavailable.");
+            }
+        });
+    if !open {
+        ui.ctx().data_mut(|data| data.remove::<String>(key));
+    }
+}
+
 /// Paint text with its mana symbols inline, wrapped to `width`, from `origin`. Returns the
 /// size it took. Labels, buttons and the hand all draw symbols through here or through
 /// [`symbol_image`], so a symbol looks the same everywhere.

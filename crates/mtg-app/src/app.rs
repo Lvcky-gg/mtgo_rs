@@ -228,6 +228,9 @@ impl eframe::App for App {
             Screen::Setup(mode) => self.setup(ui, mode),
             Screen::Match => self.match_screen(ui),
         }
+        if let Some(art) = &mut self.art {
+            crate::widgets::show_enlarged_card(ui, art);
+        }
     }
 }
 
@@ -1324,7 +1327,10 @@ fn sideboard_editor(ui: &mut Ui, deck: &mut DeckSpec, names: &BTreeMap<CardKey, 
             .show(&mut cols[0], |ui| {
                 for (k, n) in &deck.main {
                     ui.horizontal(|ui| {
-                        ui.label(format!("{n}× {}", name(k)));
+                        let card_name = name(k);
+                        ui.label(format!("{n}× {card_name}")).on_hover_ui(|ui| {
+                            crate::widgets::offer_card_enlargement(ui, &card_name)
+                        });
                         if ui
                             .small_button("⏵")
                             .on_hover_text("move one to the sideboard")
@@ -1349,7 +1355,10 @@ fn sideboard_editor(ui: &mut Ui, deck: &mut DeckSpec, names: &BTreeMap<CardKey, 
                         {
                             to_main = Some(k.clone());
                         }
-                        ui.label(format!("{n}× {}", name(k)));
+                        let card_name = name(k);
+                        ui.label(format!("{n}× {card_name}")).on_hover_ui(|ui| {
+                            crate::widgets::offer_card_enlargement(ui, &card_name)
+                        });
                     });
                 }
             });

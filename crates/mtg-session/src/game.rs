@@ -530,7 +530,10 @@ mod tests {
     #[test]
     fn missing_cards_are_all_reported() {
         let d = DeckSpec {
-            main: vec![(CardKey::Oracle("nope".into(), None), 1), (CardKey::Demo(99), 1)],
+            main: vec![
+                (CardKey::Oracle("nope".into(), None), 1),
+                (CardKey::Demo(99), 1),
+            ],
             ..Default::default()
         };
         assert_eq!(GameCards::build([&d], &source()).unwrap_err().len(), 2);

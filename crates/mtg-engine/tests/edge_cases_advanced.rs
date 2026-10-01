@@ -4,11 +4,7 @@ mod common;
 
 use common::*;
 use mtg_core::{Step, Zone, ZoneRef};
-use mtg_engine::{
-    Engine, Progress,
-    choice::Answer,
-    state::GameState,
-};
+use mtg_engine::{Engine, Progress, choice::Answer, state::GameState};
 use mtg_ir::PrintedCards;
 
 // ---- Simple State Resilience Tests ---

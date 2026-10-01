@@ -6,7 +6,6 @@ use mtg_engine::{
     actions::Action,
     choice::{Answer, Choice, ChoiceKind},
     state::GameState,
-    view,
 };
 use mtg_policy::Policy;
 
@@ -102,7 +101,7 @@ pub fn run(state: GameState, cards: &DemoCards, settings: &Settings) -> (Engine,
             }
 
             Progress::NeedsChoice(c) => {
-                let v = view::project(&engine.state, c.who);
+                let v = engine.view_for(c.who);
                 match settings.policy.may_auto_answer(&c, &v) {
                     // Handled without troubling the player.
                     Some(answer) => {

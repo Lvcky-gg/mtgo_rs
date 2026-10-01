@@ -179,7 +179,7 @@ pub fn check(state: &GameState, cards: &dyn PrintedCards) -> Check {
             }
 
             // 704.5g — damage marked equal to or greater than toughness.
-            if destroyable && obj.damage as i32 >= toughness {
+            if destroyable && i64::from(obj.damage) >= i64::from(toughness) {
                 out.actions.push(Sba::Destroy {
                     object: id,
                     rule: "704.5g",

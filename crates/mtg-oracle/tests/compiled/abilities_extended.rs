@@ -18,12 +18,7 @@ use mtg_engine::actions::Action;
 #[ignore = "Morph compilation incomplete"]
 fn morph_allows_facedown_casting() {
     let mut t = Table::default();
-    let morphed = t.card(
-        "{1}{U}",
-        "Creature — Wizard",
-        Some((2, 2)),
-        "Morph {U}",
-    );
+    let morphed = t.card("{1}{U}", "Creature — Wizard", Some((2, 2)), "Morph {U}");
     let mut g = Game::new(t);
     g.lands(2);
     let card = g.put(morphed, P0, Zone::Hand);
@@ -41,12 +36,7 @@ fn morph_allows_facedown_casting() {
 #[ignore = "Morph face-down action not yet implemented in engine"]
 fn morph_facedown_is_2_2_creature() {
     let mut t = Table::default();
-    let morphed = t.card(
-        "{1}{U}",
-        "Creature — Wizard",
-        Some((2, 2)),
-        "Morph {U}",
-    );
+    let morphed = t.card("{1}{U}", "Creature — Wizard", Some((2, 2)), "Morph {U}");
     let mut g = Game::new(t);
     g.lands(2);
     let _card = g.put(morphed, P0, Zone::Hand);
@@ -82,7 +72,10 @@ fn megamorph_various_costs() {
     let _m1 = t.card("{2}{U}", "Creature", Some((2, 2)), "Megamorph {U}");
     let _m2 = t.card("{2}{B}", "Creature", Some((2, 2)), "Megamorph {B}");
     let _m3 = t.card("{2}{R}", "Creature", Some((2, 2)), "Megamorph {1}{R}");
-    assert!(t.understood.iter().all(|&u| u), "all megamorph variants compile");
+    assert!(
+        t.understood.iter().all(|&u| u),
+        "all megamorph variants compile"
+    );
 }
 
 // ============================================================================
@@ -109,10 +102,10 @@ fn cascade_casts_lower_spell() {
     let order = g.engine.state.zone_order.get_mut(&lib).unwrap();
     order.clear();
     order.extend_from_slice(&[m2, b, m1]);
-    
+
     let _library_before = g.count(Zone::Library, P0);
     g.cast(s, &[Target::Player(P1)]);
-    
+
     // See copies.rs::cascade_casts_the_first_cheaper_nonland_for_free for full test
 }
 
@@ -126,19 +119,23 @@ fn cascade_exiles_equal_or_higher() {
     g.lands(3);
     let cas = g.put(cascader, P0, Zone::Hand);
     let hi = g.put(higher, P0, Zone::Library);
-    
+
     // Put higher-cost spell on top of library
     let lib = mtg_core::ZoneRef::of(Zone::Library, P0);
     let order = g.engine.state.zone_order.get_mut(&lib).unwrap();
     order.retain(|id| *id != hi);
     order.insert(0, hi);
-    
+
     g.main();
     g.cast(cas, &[]);
-    
+
     // After cascade, the higher spell should be in library bottom or exile
     // The cascade spell itself should be in graveyard
-    assert_eq!(g.count(Zone::Graveyard, P0), 1, "cascade spell in graveyard");
+    assert_eq!(
+        g.count(Zone::Graveyard, P0),
+        1,
+        "cascade spell in graveyard"
+    );
 }
 
 // ============================================================================
@@ -203,12 +200,7 @@ fn multi_target_each_creature() {
 #[test]
 fn any_target_pattern() {
     let mut t = Table::default();
-    let _spell = t.card(
-        "{1}{R}",
-        "Instant",
-        None,
-        "~ deals 3 damage to any target.",
-    );
+    let _spell = t.card("{1}{R}", "Instant", None, "~ deals 3 damage to any target.");
     // "Any target" patterns compile correctly
     let all_understood = t.understood.iter().all(|&u| u);
     assert!(all_understood, "any-target pattern compiles");

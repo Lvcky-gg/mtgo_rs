@@ -440,7 +440,11 @@ mod tests {
             .card(&CardKey::Demo(demo::PLAINS.0))
             .expect("demo card");
         assert_eq!(card.faces[0].name.as_ref(), "Training Field");
-        assert!(source.card(&CardKey::Oracle("anything".into(), None)).is_none());
+        assert!(
+            source
+                .card(&CardKey::Oracle("anything".into(), None))
+                .is_none()
+        );
     }
 
     #[test]

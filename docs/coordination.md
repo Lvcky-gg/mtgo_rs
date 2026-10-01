@@ -606,3 +606,21 @@ Codex added explicit retry feedback when an answered game question returns with
 the same ID, excluding Undo to avoid false rejection messages. All 19 UI tests,
 all-target app Clippy, and diff checks pass after concurrent API updates settled.
 Handoff: `docs/sessions/2026-10-01-rejected-answer-feedback.md`.
+
+Post-cleanup app validation passes: 192 app tests and 30 combat tests. The custom
+damage editor now numbers blockers and shows unassigned or excess amounts.
+All 19 UI tests and all-target app Clippy pass after the presentation change.
+Handoff: `docs/sessions/2026-10-01-combat-editor-integration-check.md`.
+
+Fixed accumulated marked-damage overflow and signed wrapping in the state-based
+lethal check. Regressions reproduced both failures. All 32 combat tests, rules
+integration tests, and scoped engine Clippy pass. Handoff:
+`docs/sessions/2026-10-01-large-accumulated-damage.md`.
+
+Card choices now render candidates and card hovers offer persistent enlargement.
+Resolution questions preserve the chooser's pre-rollback view, fixing newly drawn
+discard candidates while retaining opponent privacy. All 194 app tests, 23 session
+tests, the headless bot test, the new draw/discard regression, and scoped Clippy
+pass. Broad compiled suite has 10 trigger-related failures (419 pass, 15 ignored);
+concurrent detection edits preserved. Handoff:
+`docs/sessions/2026-10-01-card-choice-previews.md`.

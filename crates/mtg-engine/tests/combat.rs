@@ -448,6 +448,44 @@ fn trample_pushes_excess_damage_through_to_the_player() {
 }
 
 #[test]
+fn large_marked_damage_remains_lethal_without_signed_wrapping() {
+    let mut state = board();
+    let victim = ready(&mut state, DUMMY, P1);
+    state.objects.get_mut(&victim).unwrap().damage = u32::MAX;
+    let check = mtg_engine::sba::check(&state, &TestCards::default());
+    assert!(check.actions.iter().any(
+        |action| matches!(action, mtg_engine::sba::Sba::Destroy { object, .. } if *object == victim)
+    ));
+}
+
+#[test]
+fn accumulated_damage_saturates_without_losing_the_event() {
+    let mut state = board();
+    let source = ready(&mut state, BIG, P0);
+    let victim = ready(&mut state, DUMMY, P1);
+    state.objects.get_mut(&victim).unwrap().damage = u32::MAX - 1;
+    let mut log = Vec::new();
+    mtg_engine::apply::apply(
+        &mut state,
+        mtg_core::Cause::TurnStructure,
+        mtg_core::Event::DamageMarked {
+            source,
+            object: victim,
+            amount: 5,
+            recipient: mtg_core::ObjectDamageKind::Creature,
+            deathtouch: false,
+            counters: false,
+        },
+        &mut log,
+    );
+    assert_eq!(state.objects.get(&victim).unwrap().damage, u32::MAX);
+    assert!(matches!(
+        log.last().unwrap().event,
+        mtg_core::Event::DamageMarked { amount: 5, .. }
+    ));
+}
+
+#[test]
 fn custom_trample_damage_sends_only_valid_excess_to_the_defender() {
     let mut state = board();
     let attacker = ready(&mut state, TRAMPLER, P0);

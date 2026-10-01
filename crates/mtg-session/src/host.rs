@@ -33,7 +33,7 @@ impl<C: Channel> HostSession<C> {
 
     /// The view the guest is entitled to, right now.
     pub fn guest_view(&self) -> view::PlayerView {
-        view::project(&self.engine.state, self.guest_seat)
+        self.engine.view_for(self.guest_seat)
     }
 
     /// Play until the game ends or the connection does.
@@ -68,7 +68,7 @@ impl<C: Channel> HostSession<C> {
                             None => return Ok(Outcome::Disconnected),
                         }
                     } else {
-                        let view = view::project(&self.engine.state, choice.who);
+                        let view = self.engine.view_for(choice.who);
                         local.decide(&choice, &view)
                     };
 
@@ -96,7 +96,7 @@ impl<C: Channel> HostSession<C> {
     /// Returns `None` when the guest conceded, which is not an error.
     fn ask_guest(&mut self, choice: &mtg_engine::Choice) -> Result<Option<Answer>, SessionError> {
         // The view goes first, so the guest is looking at the position the question is about.
-        let view = view::project(&self.engine.state, self.guest_seat);
+        let view = self.engine.view_for(self.guest_seat);
         self.channel.send_msg(&HostMessage::Snapshot {
             at_event: self.engine.log.len() as u64,
             view_bytes: mtg_net::wire::encode(&view)?,
@@ -136,7 +136,7 @@ impl<C: Channel> HostSession<C> {
                 GuestMessage::Resume { last_seen, .. } => {
                     // Resync is a snapshot: see the crate docs on why events are not streamed.
                     let _ = last_seen;
-                    let view = view::project(&self.engine.state, self.guest_seat);
+                    let view = self.engine.view_for(self.guest_seat);
                     self.channel.send_msg(&HostMessage::Snapshot {
                         at_event: self.engine.log.len() as u64,
                         view_bytes: mtg_net::wire::encode(&view)?,

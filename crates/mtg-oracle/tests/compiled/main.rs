@@ -4,8 +4,8 @@
 //! *and* the engine must then do what the line says. Unit tests in `compile::tests` hold
 //! the first half; these hold the second, one scenario per shape the compiler emits.
 
-mod adventure;
 mod abilities_extended;
+mod adventure;
 mod backup;
 mod bestow;
 mod changeling;
@@ -33,6 +33,77 @@ use mtg_engine::actions::Action;
 use mtg_ir::PrintedCards;
 
 // ---- spells ---------------------------------------------------------------------
+
+#[test]
+fn draw_then_discard_question_keeps_new_cards_visible_only_to_the_chooser() {
+    use mtg_engine::{
+        Progress,
+        choice::{Answer, ChoiceKind},
+    };
+    let mut table = Table::default();
+    let looting = table.card(
+        "{R}",
+        "Sorcery",
+        None,
+        "Draw two cards, then discard two cards.",
+    );
+    let mut game = Game::new(table);
+    game.lands(1);
+    let spell = game.put(looting, P0, Zone::Hand);
+    game.main();
+    game.act_holding(Action::Cast { object: spell }, &[]);
+    let priority = game.pending.take().unwrap();
+    game.engine
+        .answer(&game.table, priority.id, Answer::Pass)
+        .unwrap();
+    for _ in 0..1000 {
+        let Progress::NeedsChoice(choice) = game.engine.advance(&game.table) else {
+            continue;
+        };
+        if let ChoiceKind::ChooseObjects { from, min, .. } = &choice.kind {
+            let mine = game.engine.view_for(P0);
+            let theirs = game.engine.view_for(P1);
+            assert_eq!(*min, 2);
+            let new_cards: Vec<_> = from
+                .iter()
+                .filter(|id| !game.engine.state.objects.contains_key(id))
+                .collect();
+            assert_eq!(
+                new_cards.len(),
+                2,
+                "the resolving draws are rolled back in the engine state"
+            );
+            for id in new_cards {
+                let object = mine
+                    .visible
+                    .get(id)
+                    .expect("drawn candidate must be projected");
+                assert!(object.card.is_some());
+                assert_eq!(object.zone.zone, Zone::Hand);
+                assert!(
+                    !theirs.visible.contains_key(id),
+                    "the opponent must not see private resolving draws"
+                );
+            }
+            game.engine
+                .answer(
+                    &game.table,
+                    choice.id,
+                    Answer::Objects(from.iter().copied().take(2).collect()),
+                )
+                .unwrap();
+            return;
+        }
+        game.engine
+            .answer(
+                &game.table,
+                choice.id,
+                choice.default.clone().unwrap_or(Answer::Pass),
+            )
+            .unwrap();
+    }
+    panic!("discard prompt expected");
+}
 
 #[test]
 fn burn_hits_a_player() {
@@ -3419,7 +3490,12 @@ fn edict_of_their_choice_and_cheating_from_hand() {
         None,
         "You may put a creature card from your hand onto the battlefield.",
     );
-    let wipe = t.card("{1}{R}", "Sorcery", None, "Discard your hand, then draw two cards.");
+    let wipe = t.card(
+        "{1}{R}",
+        "Sorcery",
+        None,
+        "Discard your hand, then draw two cards.",
+    );
     let bear = t.bear();
     let mut g = Game::new(t);
     g.lands(6);
@@ -3442,5 +3518,10 @@ fn edict_of_their_choice_and_cheating_from_hand() {
     assert!(g.find(bear).is_some(), "put onto the battlefield");
     let hand = g.count(Zone::Hand, P0);
     g.cast(w, &[]);
-    assert_eq!(g.count(Zone::Hand, P0), 2, "discarded {} and drew two", hand - 1);
+    assert_eq!(
+        g.count(Zone::Hand, P0),
+        2,
+        "discarded {} and drew two",
+        hand - 1
+    );
 }

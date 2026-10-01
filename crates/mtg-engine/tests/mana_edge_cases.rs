@@ -43,7 +43,7 @@ fn payable(c: &ManaCost, sources: &[ManaSource], pool: [u16; 6], life: i32) -> b
     plan_with(&requirements(c, 0), sources, pool, life).is_some()
 }
 
-use Color::{Blue as U, Green as G, Red as R, White as W, Black as B};
+use Color::{Black as B, Blue as U, Green as G, Red as R, White as W};
 
 // ---- 5+ color mana scenarios ----
 
@@ -58,7 +58,10 @@ fn five_color_mana_with_perfect_sources() {
         ManaSymbol::Colored(R),
         ManaSymbol::Colored(G),
     ]);
-    assert!(payable(&c, &sources, EMPTY, 20), "five-color cost is payable");
+    assert!(
+        payable(&c, &sources, EMPTY, 20),
+        "five-color cost is payable"
+    );
 }
 
 #[test]
@@ -121,7 +124,7 @@ fn four_color_with_complex_duals() {
 #[test]
 fn hybrid_source_correctly_routes_to_either_color() {
     let sources = [dual(1, W, U)];
-    
+
     // {W} only needs white
     assert!(payable(
         &cost(&[ManaSymbol::Colored(W)]),
@@ -143,11 +146,11 @@ fn hybrid_source_correctly_routes_to_either_color() {
 fn multiple_hybrid_sources_serve_different_needs() {
     // Two W/U duals can pay {W}{U} - each dual produces one mana
     let sources = [dual(1, W, U), dual(2, W, U)];
-    let c = cost(&[
-        ManaSymbol::Colored(W),
-        ManaSymbol::Colored(U),
-    ]);
-    assert!(payable(&c, &sources, EMPTY, 20), "two duals can pay one white and one blue");
+    let c = cost(&[ManaSymbol::Colored(W), ManaSymbol::Colored(U)]);
+    assert!(
+        payable(&c, &sources, EMPTY, 20),
+        "two duals can pay one white and one blue"
+    );
 }
 
 #[test]
@@ -155,11 +158,11 @@ fn hybrid_with_mono_sources_for_single_color_requirement() {
     // Need {W}{U}
     // Have: W mono and U mono (can pay 2 colors)
     let sources = [mono(1, W), mono(2, U)];
-    let c = cost(&[
-        ManaSymbol::Colored(W),
-        ManaSymbol::Colored(U),
-    ]);
-    assert!(payable(&c, &sources, EMPTY, 20), "white and blue mono sources cover two colors");
+    let c = cost(&[ManaSymbol::Colored(W), ManaSymbol::Colored(U)]);
+    assert!(
+        payable(&c, &sources, EMPTY, 20),
+        "white and blue mono sources cover two colors"
+    );
 }
 
 #[test]
@@ -180,9 +183,24 @@ fn three_color_hybrid_with_specific_routing() {
     let sources = [tri(1, &[W, U, B])];
 
     // Can pay any single color
-    assert!(payable(&cost(&[ManaSymbol::Colored(W)]), &sources, EMPTY, 20));
-    assert!(payable(&cost(&[ManaSymbol::Colored(U)]), &sources, EMPTY, 20));
-    assert!(payable(&cost(&[ManaSymbol::Colored(B)]), &sources, EMPTY, 20));
+    assert!(payable(
+        &cost(&[ManaSymbol::Colored(W)]),
+        &sources,
+        EMPTY,
+        20
+    ));
+    assert!(payable(
+        &cost(&[ManaSymbol::Colored(U)]),
+        &sources,
+        EMPTY,
+        20
+    ));
+    assert!(payable(
+        &cost(&[ManaSymbol::Colored(B)]),
+        &sources,
+        EMPTY,
+        20
+    ));
 
     // But not two different colors (only one mana)
     assert!(!payable(
@@ -208,7 +226,7 @@ fn floating_mana_spent_first_before_sources() {
         20,
     )
     .expect("payable");
-    
+
     assert!(
         plan.activate.is_empty(),
         "floating mana should be spent before tapping sources"
@@ -340,7 +358,10 @@ fn flexibility_preserved_when_possible() {
 
     assert_eq!(plan.activate.len(), 2, "both sources needed");
     // Verify that the W mono is assigned to {W}
-    assert!(plan.activate.contains(&(ObjectId(1), AbilityId(0), Some(W))));
+    assert!(
+        plan.activate
+            .contains(&(ObjectId(1), AbilityId(0), Some(W)))
+    );
 }
 
 // ---- Impossible scenarios and error cases ----
@@ -354,10 +375,7 @@ fn impossible_cost_returns_none() {
         EMPTY,
         20,
     );
-    assert!(
-        result.is_none(),
-        "cannot pay blue with only white source"
-    );
+    assert!(result.is_none(), "cannot pay blue with only white source");
 }
 
 #[test]
@@ -408,7 +426,10 @@ fn phyrexian_impossible_with_low_life() {
         EMPTY,
         1, // Only 1 life
     );
-    assert!(result.is_none(), "cannot pay phyrexian without sufficient life");
+    assert!(
+        result.is_none(),
+        "cannot pay phyrexian without sufficient life"
+    );
 }
 
 #[test]
@@ -448,13 +469,7 @@ fn complex_scenario_five_colors_specific_routing() {
     // A sophisticated scenario combining many constraints:
     // Need: {W}{U}{B}{R}{G}
     // Have: 5 sources, each covering combinations
-    let sources = [
-        mono(1, W),
-        mono(2, U),
-        mono(3, B),
-        mono(4, R),
-        mono(5, G),
-    ];
+    let sources = [mono(1, W), mono(2, U), mono(3, B), mono(4, R), mono(5, G)];
 
     let c = cost(&[
         ManaSymbol::Colored(W),
@@ -474,11 +489,7 @@ fn complex_scenario_five_colors_specific_routing() {
 #[test]
 fn variable_cost_with_complex_colors() {
     // X=1, cost is {X}{W}{U}
-    let sources = [
-        mono(1, W),
-        mono(2, U),
-        mono(3, W),
-    ];
+    let sources = [mono(1, W), mono(2, U), mono(3, W)];
 
     let c = cost(&[
         ManaSymbol::Variable,
@@ -486,8 +497,7 @@ fn variable_cost_with_complex_colors() {
         ManaSymbol::Colored(U),
     ]);
 
-    let plan = plan_with(&requirements(&c, 1), &sources, EMPTY, 20)
-        .expect("X=1 plus two colors");
+    let plan = plan_with(&requirements(&c, 1), &sources, EMPTY, 20).expect("X=1 plus two colors");
     // Should tap all 3 sources: 1 for X, 2 for colors
     assert_eq!(plan.activate.len(), 3);
 }

@@ -260,6 +260,8 @@ pub struct Engine {
     cache: CharacteristicsCache,
     phase: Phase,
     pending: Option<Choice>,
+    /// Chooser-only projection before replayable resolution rolls back.
+    resolution_view: Option<(u64, crate::view::PlayerView)>,
     next_choice_id: u64,
     /// Trigger batches whose controller still has to order them.
     to_order: VecDeque<(PlayerId, Vec<PendingTrigger>)>,
@@ -322,6 +324,7 @@ impl Engine {
             cache: CharacteristicsCache::default(),
             phase: Phase::BeginStep,
             pending: None,
+            resolution_view: None,
             next_choice_id: 1,
             to_order: VecDeque::new(),
             to_place: VecDeque::new(),
@@ -426,6 +429,17 @@ impl Engine {
                 Progress::Continue
             }
         }
+    }
+
+    /// Project the current question, including cards encountered during resolution.
+    pub fn view_for(&self, viewer: PlayerId) -> crate::view::PlayerView {
+        if let Some((id, view)) = &self.resolution_view
+            && view.viewer == viewer
+            && self.pending.as_ref().is_some_and(|choice| choice.id == *id)
+        {
+            return view.clone();
+        }
+        crate::view::project(&self.state, viewer)
     }
 
     /// Answer an outstanding choice.
@@ -3850,6 +3864,7 @@ impl Engine {
 
                 // A decision is needed. Roll back and ask.
                 Err(resolve::ResolveError::Ask { who, kind, because }) => {
+                    let choice_view = crate::view::project(&self.state, who);
                     self.state = *snapshot.clone();
                     self.log.truncate(log_len);
                     self.cache.invalidate();
@@ -3860,6 +3875,7 @@ impl Engine {
                         answers,
                     });
                     let c = self.new_choice(who, *kind, because, None);
+                    self.resolution_view = Some((c.id, choice_view));
                     self.resolution_choice = Some(c.id);
                     return Some(c);
                 }
@@ -3882,6 +3898,7 @@ impl Engine {
             match resolve::enter_choice(&self.state, cards, &mut rc, top) {
                 Ok(answer) => answer,
                 Err(resolve::ResolveError::Ask { who, kind, because }) => {
+                    let choice_view = crate::view::project(&self.state, who);
                     self.state = *snapshot.clone();
                     self.log.truncate(log_len);
                     self.cache.invalidate();
@@ -3892,6 +3909,7 @@ impl Engine {
                         answers,
                     });
                     let c = self.new_choice(who, *kind, because, None);
+                    self.resolution_view = Some((c.id, choice_view));
                     self.resolution_choice = Some(c.id);
                     return Some(c);
                 }

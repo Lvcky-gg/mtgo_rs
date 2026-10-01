@@ -24,7 +24,7 @@
 //! show any card without having imported it. Seat 0 is always the host.
 
 use mtg_core::PlayerId;
-use mtg_engine::{Engine, Progress, view};
+use mtg_engine::{Engine, Progress};
 use mtg_net::{
     fairness::Seed,
     wire::{Channel, TypedChannel},
@@ -220,7 +220,7 @@ fn play_local_game(
             Progress::Continue => {}
             Progress::GameOver { winners } => return winners.first().copied(),
             Progress::NeedsChoice(choice) => {
-                let view = view::project(&engine.state, choice.who);
+                let view = engine.view_for(choice.who);
                 let seat = &mut seats[choice.who.0 as usize];
                 let answer = if rejected >= REJECTIONS {
                     mtg_policy::well_formed(&choice, &view)

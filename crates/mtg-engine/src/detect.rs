@@ -395,11 +395,13 @@ fn candidate_abilities(
     event: &Event,
 ) -> Vec<(ObjectId, u8, AbilityId, Trigger)> {
     let mut out = Vec::new();
-    
+
     // For ZoneChange events, only check the departing object for "leaves" triggers
     // and the arriving object for arrival triggers. This skips scanning all objects.
     let objects_to_check: Vec<ObjectId> = match event {
-        Event::ZoneChange { object, new_object, .. } => {
+        Event::ZoneChange {
+            object, new_object, ..
+        } => {
             // Departing object (for leaves/dies triggers) and arriving object (for any triggers)
             let mut to_check = vec![*new_object];
             if to_check.last() != Some(object) {
@@ -409,7 +411,7 @@ fn candidate_abilities(
         }
         _ => state.objects.keys().copied().collect(),
     };
-    
+
     for obj_id in objects_to_check {
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
