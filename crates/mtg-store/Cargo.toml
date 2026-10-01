@@ -1,0 +1,15 @@
+[package]
+name = "mtg-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Bundled so there is no system SQLite to install. FTS5 is what makes card search a
+# query rather than a hand-written index.
+rusqlite = { version = "0.40", features = ["bundled"] }
+mtg-deck = { workspace = true }
+mtg-core = { workspace = true }
+
+[lints]
+workspace = true

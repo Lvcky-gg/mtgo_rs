@@ -1,0 +1,29 @@
+[package]
+name = "mtg-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mtg-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+# Identity is a keypair, not an account. Ed25519 is small, fast, and has no parameter
+# choices to get wrong.
+ed25519-dalek = { version = "3", features = ["rand_core"] }
+sha2 = "0.11"
+# Base32 for invite links: case-insensitive and safe to paste into any chat client,
+# unlike base64 which is neither.
+data-encoding = "2"
+serde_json = "1"
+# Transport only. Blocking rather than async: a two-peer game has one socket, and an async
+# runtime would be a large dependency serving no concurrency that exists.
+tungstenite = { version = "0.30", optional = true }
+snow = { version = "0.10", optional = true }
+
+[features]
+# The wire is optional: the protocol logic is pure and testable without it.
+default = []
+transport = ["dep:tungstenite", "dep:snow"]
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "mtg-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Optional: only a build that downloads needs an HTTP client.
+# `json` is what provides `read_json` for the bulk-data manifest.
+ureq = { version = "3", features = ["json"], optional = true }
+mtg-store = { workspace = true }
+mtg-deck = { workspace = true }
+mtg-core = { workspace = true }
+mtg-ir = { workspace = true }
+flate2 = "1.1.10"
+
+[features]
+# The HTTP download is optional: parsing and importing work from any reader, so the
+# network dependency is not forced on a build that only needs to read a file.
+default = []
+fetch = ["dep:ureq"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+mtg-engine = { workspace = true }
+mtg-policy = { workspace = true }

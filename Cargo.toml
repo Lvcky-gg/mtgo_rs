@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+rust-version = "1.90"
+
+[workspace.dependencies]
+mtg-core    = { path = "crates/mtg-core" }
+mtg-deck    = { path = "crates/mtg-deck" }
+mtg-ir      = { path = "crates/mtg-ir" }
+mtg-engine  = { path = "crates/mtg-engine" }
+mtg-oracle  = { path = "crates/mtg-oracle" }
+mtg-store   = { path = "crates/mtg-store" }
+mtg-net     = { path = "crates/mtg-net" }
+mtg-policy  = { path = "crates/mtg-policy" }
+mtg-session = { path = "crates/mtg-session" }
+mtg-headless = { path = "crates/mtg-headless" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# The engine must be deterministic: iteration order of a HashMap is not.
+# Engine crates use IndexMap/BTreeMap instead.
+disallowed_types = "warn"

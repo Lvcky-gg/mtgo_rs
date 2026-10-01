@@ -1,0 +1,29 @@
+[package]
+name = "mtg-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mtg-ir = { workspace = true }
+mtg-core = { workspace = true }
+mtg-engine = { workspace = true }
+mtg-policy = { workspace = true }
+mtg-store = { workspace = true }
+mtg-deck = { workspace = true }
+mtg-oracle = { workspace = true }
+
+[[bin]]
+name = "mtg-play"
+path = "src/main.rs"
+
+[[bin]]
+name = "mtg-cards"
+path = "src/bin/cards.rs"
+
+[features]
+# Passed through so `mtg-cards --fetch` can download; without it, import reads a file.
+fetch = ["mtg-oracle/fetch"]
+
+[lints]
+workspace = true
