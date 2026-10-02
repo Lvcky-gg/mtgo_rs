@@ -81,6 +81,8 @@ pub struct GuiApp {
     play_choice: Option<ObjectId>,
     /// How large permanents are drawn: shrunk when the board has more rows than fit.
     board_scale: f32,
+    board_zoom: Option<f32>,
+    journal_open: bool,
     /// A graveyard or exile being looked through, by whose and which.
     zone_view: Option<(mtg_core::PlayerId, mtg_core::Zone)>,
     /// Triggers being ordered, as batch indices in the order they will *resolve*.
@@ -124,6 +126,8 @@ impl GuiApp {
             pending_blocker: None,
             play_choice: None,
             board_scale: 1.0,
+            board_zoom: None,
+            journal_open: true,
             zone_view: None,
             trigger_order: Vec::new(),
             blocker_order: Vec::new(),
@@ -402,29 +406,59 @@ impl GuiApp {
                         );
                     });
                 });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Card size")
+                            .small()
+                            .color(crate::theme::MUTED),
+                    );
+                    egui::ComboBox::from_id_salt("arena-card-size")
+                        .selected_text(match self.board_zoom {
+                            None => "Fit board",
+                            Some(size) if size < 0.7 => "Small",
+                            Some(size) if size < 0.9 => "Medium",
+                            _ => "Large",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.board_zoom, None, "Fit board");
+                            ui.selectable_value(&mut self.board_zoom, Some(0.6), "Small");
+                            ui.selectable_value(&mut self.board_zoom, Some(0.8), "Medium");
+                            ui.selectable_value(&mut self.board_zoom, Some(1.0), "Large");
+                        });
+                    let journal = ui
+                        .selectable_label(self.journal_open, "Journal")
+                        .on_hover_text(
+                            "Show or hide the match journal to make room for the battlefield",
+                        );
+                    if journal.clicked() {
+                        self.journal_open = !self.journal_open;
+                    }
+                });
             });
 
-        egui::Panel::right("log")
-            .frame(crate::theme::panel())
-            .default_size(260.0)
-            .min_size(190.0)
-            .show(ui, |ui| {
-                ui.heading("Match journal");
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.log {
-                            // Turn headers stand out, so a long log can be scanned by turn.
-                            let text = RichText::new(line);
-                            ui.label(if line.starts_with('—') {
-                                text.strong().color(ACCENT)
-                            } else {
-                                text.color(crate::theme::MUTED).size(13.0)
-                            });
-                        }
-                    });
-            });
+        if self.journal_open {
+            egui::Panel::right("log")
+                .frame(crate::theme::panel())
+                .default_size(260.0)
+                .min_size(190.0)
+                .show(ui, |ui| {
+                    ui.heading("Match journal");
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for line in &self.log {
+                                // Turn headers stand out, so a long log can be scanned by turn.
+                                let text = RichText::new(line);
+                                ui.label(if line.starts_with('—') {
+                                    text.strong().color(ACCENT)
+                                } else {
+                                    text.color(crate::theme::MUTED).size(13.0)
+                                });
+                            }
+                        });
+                });
+        }
 
         egui::Panel::bottom("question")
             .frame(crate::theme::panel())
@@ -484,7 +518,9 @@ impl GuiApp {
         let headers =
             76.0 * (board.opponents.len() + 1) as f32 + row_count as f32 * 22.0 + stack_height;
         let per_row = (ui.available_height() - headers) / row_count.max(1) as f32;
-        self.board_scale = (per_row / (ART_SIZE.y + 10.0)).clamp(0.45, 1.0);
+        self.board_scale = self
+            .board_zoom
+            .unwrap_or_else(|| (per_row / (ART_SIZE.y + 10.0)).clamp(0.45, 1.0));
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for side in &board.opponents {
@@ -1464,8 +1500,9 @@ impl GuiApp {
             }
             _ => format::choice_heading(&question.choice),
         };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(heading).strong().size(16.0));
+        ui.label(RichText::new("YOUR DECISION").size(10.0).color(ACCENT));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(heading).strong().size(18.0));
             if question.choice.undo || self.has_selection() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Undo").on_hover_text("Ctrl+Z").clicked() {
