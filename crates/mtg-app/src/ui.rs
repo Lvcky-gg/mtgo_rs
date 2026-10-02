@@ -818,43 +818,113 @@ impl GuiApp {
             mtg_core::Zone::Library => "visible library cards",
             _ => "exiled cards",
         };
+        let filter_key = egui::Id::new(("zone-card-filter", who.0, format!("{zone:?}")));
+        let mut filter = ui
+            .ctx()
+            .data(|data| data.get_temp::<String>(filter_key))
+            .unwrap_or_default();
         let mut open = true;
         egui::Window::new(format!("{whose} {what} ({})", ids.len()))
+            .id(egui::Id::new("zone-inspector"))
             .open(&mut open)
-            .default_width(700.0)
+            .default_size(Vec2::new(760.0, 520.0))
             .show(&ui.ctx().clone(), |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(500.0)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let scale = std::mem::replace(&mut self.board_scale, 0.8);
-                            // Newest last in the view; show the most recent first.
-                            for id in ids.iter().rev() {
-                                let actions: Vec<Action> =
-                                    match self.current.as_ref().map(|q| &q.choice.kind) {
-                                        Some(ChoiceKind::Priority { legal }) => {
-                                            board::hand_play_options(&legal.actions, &[*id])
-                                                .remove(id)
-                                                .unwrap_or_default()
-                                        }
-                                        _ => Vec::new(),
-                                    };
-                                let response = self.draw_card(ui, view, *id, !actions.is_empty());
-                                if !actions.is_empty() {
-                                    pointer_cursor(&response);
-                                    if response.clicked() {
-                                        if actions.len() == 1 {
-                                            self.answer(Answer::Action(actions[0].clone()));
-                                        } else {
-                                            self.play_choice = Some(*id);
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut filter)
+                            .hint_text("Find a card by name…")
+                            .desired_width(280.0),
+                    );
+                    if !filter.is_empty() && ui.small_button("Clear search").clicked() {
+                        filter.clear();
+                    }
+                });
+                let query = filter.trim().to_lowercase();
+                let shown: Vec<_> = ids
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|id| self.name_of(view, *id).to_lowercase().contains(&query))
+                    .collect();
+                ui.label(
+                    RichText::new(format!(
+                        "{} of {} cards · hover to inspect",
+                        shown.len(),
+                        ids.len()
+                    ))
+                    .small()
+                    .color(crate::theme::MUTED),
+                );
+                if zone == mtg_core::Zone::Library {
+                    ui.label(
+                        RichText::new("Only revealed library cards are shown.")
+                            .small()
+                            .color(crate::theme::MUTED),
+                    );
+                }
+                ui.separator();
+                if shown.is_empty() {
+                    ui.label(
+                        RichText::new(if ids.is_empty() {
+                            "No visible cards in this zone."
+                        } else {
+                            "No cards match your search."
+                        })
+                        .color(crate::theme::MUTED),
+                    );
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let width = 180.0;
+                    let columns = ((ui.available_width() + 16.0) / (width + 16.0))
+                        .floor()
+                        .max(1.0) as usize;
+                    egui::Grid::new("zone-card-grid")
+                        .num_columns(columns)
+                        .spacing(Vec2::splat(16.0))
+                        .show(ui, |ui| {
+                            let scale = std::mem::replace(&mut self.board_scale, 1.0);
+                            for (index, id) in shown.into_iter().enumerate() {
+                                ui.vertical(|ui| {
+                                    ui.set_width(width);
+                                    let actions: Vec<Action> =
+                                        match self.current.as_ref().map(|q| &q.choice.kind) {
+                                            Some(ChoiceKind::Priority { legal }) => {
+                                                board::hand_play_options(&legal.actions, &[id])
+                                                    .remove(&id)
+                                                    .unwrap_or_default()
+                                            }
+                                            _ => Vec::new(),
+                                        };
+                                    let response =
+                                        self.draw_card(ui, view, id, !actions.is_empty());
+                                    if !actions.is_empty() {
+                                        pointer_cursor(&response);
+                                        if response.clicked() {
+                                            if actions.len() == 1 {
+                                                self.answer(Answer::Action(actions[0].clone()));
+                                            } else {
+                                                self.play_choice = Some(id);
+                                            }
                                         }
                                     }
+                                    let name = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(self.name_of(view, id)).small(),
+                                        )
+                                        .truncate(),
+                                    );
+                                    self.object_hover(name, view, id);
+                                });
+                                if (index + 1) % columns == 0 {
+                                    ui.end_row();
                                 }
                             }
                             self.board_scale = scale;
                         });
-                    });
+                });
             });
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(filter_key, filter));
         if !open {
             self.zone_view = None;
         }
