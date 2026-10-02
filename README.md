@@ -24,6 +24,12 @@ cargo test --workspace                 # 634 tests (more with --features mtg-ses
 cargo clippy --workspace --all-targets
 ```
 
+The arena includes short gameplay sounds with **Mute**, **Volume**, and **Test
+sound** controls. Settings carry between matches while the app stays open. Linux
+builds need ALSA development headers and pkg-config (on Debian/Ubuntu:
+`sudo apt install libasound2-dev pkg-config`). Audio-device failure leaves the game
+usable without sound. The original cues and generator are in [assets/sounds](assets/sounds/README.md).
+
 `mtg-play` is the reference driver: it consumes exactly what a GUI would — the legal
 action list and the choice stream — so anything it can do, the real app can do.
 

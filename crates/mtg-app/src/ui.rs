@@ -83,6 +83,9 @@ pub struct GuiApp {
     board_scale: f32,
     board_zoom: Option<f32>,
     journal_open: bool,
+    sound: crate::sound::SoundFx,
+    silence_next_update: bool,
+    sound_settings_loaded: bool,
     /// A graveyard or exile being looked through, by whose and which.
     zone_view: Option<(mtg_core::PlayerId, mtg_core::Zone)>,
     /// Triggers being ordered, as batch indices in the order they will *resolve*.
@@ -128,6 +131,9 @@ impl GuiApp {
             board_scale: 1.0,
             board_zoom: None,
             journal_open: true,
+            sound: Default::default(),
+            silence_next_update: false,
+            sound_settings_loaded: false,
             zone_view: None,
             trigger_order: Vec::new(),
             blocker_order: Vec::new(),
@@ -145,9 +151,15 @@ impl GuiApp {
     /// Move the board to `view`, logging what changed on the way.
     fn advance_to(&mut self, view: PlayerView) {
         if let Some(before) = &self.last_view {
+            if !self.silence_next_update
+                && let Some(cue) = crate::sound::cue_for(before, &view)
+            {
+                self.sound.play(cue);
+            }
             self.log
                 .extend(crate::narrate::changes(before, &view, &self.texts));
         }
+        self.silence_next_update = false;
         self.last_view = Some(view);
     }
 
@@ -185,6 +197,9 @@ impl GuiApp {
     }
 
     fn answer(&mut self, answer: Answer) {
+        if matches!(&answer, Answer::Undo) {
+            self.silence_next_update = true;
+        }
         self.last_answered_question = if matches!(&answer, Answer::Undo) {
             None
         } else {
@@ -359,6 +374,17 @@ impl GuiApp {
 
     /// Draw the game into the window: status bar, log, question, hand and board.
     pub fn show(&mut self, ui: &mut Ui) {
+        if !self.sound_settings_loaded {
+            if let Some((muted, volume)) = ui
+                .ctx()
+                .data(|data| data.get_temp::<(bool, f32)>(egui::Id::new("arena-audio-settings")))
+            {
+                self.sound.muted = muted;
+                self.sound.volume = volume;
+                self.sound.update_volume();
+            }
+            self.sound_settings_loaded = true;
+        }
         if self.poll() {
             ui.ctx().request_repaint();
         }
@@ -432,6 +458,35 @@ impl GuiApp {
                         );
                     if journal.clicked() {
                         self.journal_open = !self.journal_open;
+                    }
+                    ui.separator();
+                    if ui.checkbox(&mut self.sound.muted, "Mute").changed() {
+                        self.sound.update_volume();
+                    }
+                    if ui
+                        .add(egui::Slider::new(&mut self.sound.volume, 0.0..=1.0).text("Volume"))
+                        .changed()
+                    {
+                        self.sound.update_volume();
+                    }
+                    if ui
+                        .add_enabled(!self.sound.muted, egui::Button::new("Test sound"))
+                        .clicked()
+                    {
+                        self.sound.play(crate::sound::Cue::YourTurn);
+                    }
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(
+                            egui::Id::new("arena-audio-settings"),
+                            (self.sound.muted, self.sound.volume),
+                        )
+                    });
+                    if self.sound.unavailable() {
+                        ui.label(
+                            RichText::new("Audio unavailable")
+                                .small()
+                                .color(crate::theme::MUTED),
+                        );
                     }
                 });
             });
