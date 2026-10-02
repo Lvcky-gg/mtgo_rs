@@ -1,4 +1,4 @@
-"""Generate the app's original, short mono PCM sound cues. No external samples."""
+"""Generate short, warm arena cues using filtered noise and damped resonances."""
 from pathlib import Path
 import math
 import random
@@ -8,40 +8,48 @@ import wave
 RATE = 44100
 ROOT = Path(__file__).resolve().parent
 
+
 def render(name, duration, voice):
     rng = random.Random(name)
     samples = []
-    low = 0.0
+    low = mid = output = 0.0
     for i in range(round(duration * RATE)):
         t = i / RATE
         white = rng.uniform(-1, 1)
-        low += 0.12 * (white - low)
-        # Smooth both edges to keep even short cues free of clicks.
-        edge = min(1.0, t / 0.006, (duration - t) / 0.025)
-        samples.append(max(-1, min(1, voice(t, low, white - low) * edge)))
-    with wave.open(str(ROOT / f'{name}.wav'), 'wb') as output:
-        output.setnchannels(1)
-        output.setsampwidth(2)
-        output.setframerate(RATE)
-        output.writeframes(b''.join(struct.pack('<h', round(v * 32767)) for v in samples))
+        # Paper/felt texture, band-limited instead of raw high-frequency noise.
+        low += 0.035 * (white - low)
+        mid += 0.20 * (white - mid)
+        paper = mid - low
+        attack = min(1.0, t / 0.014)
+        release = min(1.0, (duration - t) / 0.045)
+        envelope = math.sin(attack * math.pi / 2) ** 2 * math.sin(release * math.pi / 2) ** 2
+        signal = voice(t, low, paper) * envelope
+        # Round remaining sharp transients before converting to PCM.
+        output += 0.28 * (signal - output)
+        samples.append(output)
+    # Ensure the filter tail reaches zero smoothly at the file boundary.
+    for i in range(min(256, len(samples))):
+        samples[-1 - i] *= i / 256
+    with wave.open(str(ROOT / f'{name}.wav'), 'wb') as output_file:
+        output_file.setnchannels(1)
+        output_file.setsampwidth(2)
+        output_file.setframerate(RATE)
+        output_file.writeframes(b''.join(struct.pack('<h', round(max(-1, min(1, v)) * 32767)) for v in samples))
+
 
 def tone(t, frequency):
     return math.sin(2 * math.pi * frequency * t)
 
-render('card-draw', .15, lambda t, low, high:
-       .16 * high * math.sin(math.pi * t / .15) ** 2 + .08 * low)
-render('card-play', .20, lambda t, low, high:
-       (.20 * tone(t, 165) + .15 * low + .035 * high) * math.exp(-26 * t))
-render('spell-cast', .38, lambda t, low, high:
-       (.10 * math.sin(2 * math.pi * (440 * t + 420 * t * t))
-        + .055 * math.sin(2 * math.pi * (660 * t + 630 * t * t))
-        + .04 * high) * math.sin(math.pi * t / .38) ** 2)
-render('spell-resolve', .40, lambda t, low, high:
-       (.12 * tone(t, 523.25) + .065 * tone(t, 659.25)
-        + .035 * tone(t, 783.99)) * math.exp(-10 * t))
-render('damage', .23, lambda t, low, high:
-       (.24 * math.sin(2 * math.pi * (115 * t - 90 * t * t))
-        + .16 * low + .02 * high) * math.exp(-18 * t))
-render('your-turn', .65, lambda t, low, high:
-       .11 * tone(t, 659.25) * math.exp(-11 * t)
-       + (0 if t < .16 else .14 * tone(t - .16, 880) * math.exp(-10 * (t - .16))))
+
+render('card-draw', .18, lambda t, low, paper:
+       .42 * paper * math.sin(math.pi * t / .18) ** 2)
+render('card-play', .16, lambda t, low, paper:
+       (.11 * tone(t, 190) + .22 * low + .15 * paper) * math.exp(-32 * t))
+render('spell-cast', .24, lambda t, low, paper:
+       .40 * paper * math.sin(math.pi * t / .24) ** 2 + .05 * low)
+render('spell-resolve', .20, lambda t, low, paper:
+       (.09 * tone(t, 230) + .20 * low + .12 * paper) * math.exp(-24 * t))
+render('damage', .18, lambda t, low, paper:
+       (.12 * tone(t, 105) + .28 * low + .09 * paper) * math.exp(-26 * t))
+render('your-turn', .34, lambda t, low, paper:
+       (.10 * tone(t, 740) + .025 * tone(t, 1170)) * math.exp(-16 * t))
