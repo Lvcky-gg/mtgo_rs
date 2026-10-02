@@ -406,8 +406,8 @@ impl GuiApp {
 
         egui::Panel::right("log")
             .frame(crate::theme::panel())
-            .default_size(320.0)
-            .min_size(240.0)
+            .default_size(260.0)
+            .min_size(190.0)
             .show(ui, |ui| {
                 ui.heading("Match journal");
                 ui.add_space(4.0);
@@ -437,10 +437,13 @@ impl GuiApp {
         // buttons that act on it.
         egui::Panel::bottom("hand")
             .frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(8))
-            .exact_size(HAND_CARD.y + 16.0)
+            .exact_size(HAND_CARD.y + 42.0)
             .resizable(false)
             .show(ui, |ui| {
                 if let Some(v) = &view {
+                    let hand_size = v.players.get(&v.viewer).map_or(0, |player| player.hand_size);
+                    ui.label(RichText::new(format!("Your hand · {hand_size}")).strong().small())
+                        .on_hover_text("Hover over a card to inspect it. Click a highlighted card to play or select it.");
                     self.draw_hand(ui, v);
                 }
             });
@@ -473,39 +476,82 @@ impl GuiApp {
             usize::from(!others.is_empty()) + usize::from(!lands.is_empty())
         };
         let row_count = board.opponents.iter().map(rows).sum::<usize>() + rows(&board.mine);
-        let headers = 34.0 * (board.opponents.len() + 1) as f32 + 40.0;
+        let stack_height = if board.stack.is_empty() {
+            36.0
+        } else {
+            ART_SIZE.y * 0.7 + 56.0
+        };
+        let headers =
+            76.0 * (board.opponents.len() + 1) as f32 + row_count as f32 * 22.0 + stack_height;
         let per_row = (ui.available_height() - headers) / row_count.max(1) as f32;
         self.board_scale = (per_row / (ART_SIZE.y + 10.0)).clamp(0.45, 1.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for side in &board.opponents {
-                self.draw_side(ui, view, side);
-                ui.separator();
+                self.draw_side_panel(ui, view, side);
+                ui.add_space(10.0);
             }
 
-            // The stack sits between the players, which is where it belongs: it is the thing both
-            // of them are waiting on.
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Stack").strong());
-                if board.stack.is_empty() {
-                    ui.label(RichText::new("(empty)").weak());
-                } else {
-                    ui.label(RichText::new("top resolves first ⏵").weak().small());
-                }
-                // Top first, as cards: what is about to happen should be seen, not read.
-                let scale = std::mem::replace(&mut self.board_scale, 0.7);
-                for id in board.stack.iter().rev() {
-                    let response = self.draw_card(ui, view, *id, false);
-                    if board::object(view, *id).is_some_and(|o| o.is_ability) {
-                        tag(ui.painter(), response.rect, "ability", ACCENT);
-                    }
-                }
-                self.board_scale = scale;
-            });
-            ui.separator();
-
-            self.draw_side(ui, view, &board.mine);
+            if board.stack.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("STACK").size(10.0).color(crate::theme::MUTED));
+                    ui.label(
+                        RichText::new("No spells or abilities waiting to resolve")
+                            .small()
+                            .color(crate::theme::MUTED),
+                    );
+                });
+            } else {
+                crate::theme::surface().show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!("Stack · {}", board.stack.len())).strong(),
+                            );
+                            ui.label(
+                                RichText::new("First card resolves next")
+                                    .small()
+                                    .color(crate::theme::MUTED),
+                            );
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            let scale = std::mem::replace(&mut self.board_scale, 0.7);
+                            for id in board.stack.iter().rev() {
+                                let response = self.draw_card(ui, view, *id, false);
+                                if board::object(view, *id).is_some_and(|o| o.is_ability) {
+                                    tag(ui.painter(), response.rect, "ability", ACCENT);
+                                }
+                            }
+                            self.board_scale = scale;
+                        });
+                    });
+                });
+            }
+            ui.add_space(10.0);
+            self.draw_side_panel(ui, view, &board.mine);
         });
+    }
+
+    fn draw_side_panel(&mut self, ui: &mut Ui, view: &PlayerView, side: &board::Side) {
+        let active = view.active_player == side.player;
+        egui::Frame::new()
+            .fill(crate::theme::PANEL)
+            .stroke(Stroke::new(
+                1.0,
+                if active {
+                    ACCENT.gamma_multiply(0.5)
+                } else {
+                    CARD_EDGE
+                },
+            ))
+            .corner_radius(12)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    self.draw_side(ui, view, side);
+                });
+            });
     }
 
     fn draw_side(&mut self, ui: &mut Ui, view: &PlayerView, side: &board::Side) {
@@ -524,9 +570,12 @@ impl GuiApp {
             })
             .map(|o| o.id)
             .collect();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let who = format::player_name(view, side.player);
             ui.label(RichText::new(who).strong().size(16.0));
+            if view.active_player == side.player {
+                ui.label(RichText::new("ACTIVE TURN").size(10.0).color(ACCENT));
+            }
             egui::Frame::new()
                 .fill(CARD_FILL)
                 .corner_radius(8)
@@ -655,10 +704,33 @@ impl GuiApp {
         } else {
             [lands, others]
         };
+        if side.battlefield.is_empty() {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("No permanents on this battlefield")
+                    .small()
+                    .color(crate::theme::MUTED),
+            );
+        }
         for row in order {
             if row.is_empty() {
                 continue;
             }
+            let lands = row
+                .first()
+                .and_then(|id| board::object(view, *id))
+                .and_then(|object| self.texts.object_text(object))
+                .is_some_and(|text| text.is_land);
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} · {}",
+                    if lands { "LANDS" } else { "PERMANENTS" },
+                    row.len()
+                ))
+                .size(10.0)
+                .color(crate::theme::MUTED),
+            );
             ui.horizontal_wrapped(|ui| {
                 for id in row {
                     // A question about the board is answered on the board: attackers,
@@ -1452,7 +1524,9 @@ impl GuiApp {
                     }
                     let pass = format::pass_label(view, top_of_stack.as_deref());
                     if ui
-                        .button(RichText::new(pass).strong())
+                        .add(crate::theme::primary_button(
+                            RichText::new(pass).strong().color(crate::theme::INK),
+                        ))
                         .on_hover_text("Space")
                         .clicked()
                     {
