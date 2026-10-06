@@ -16,6 +16,9 @@ fn your_graveyard() -> Selector {
 
 /// A condition, and the rest of the input.
 pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    if let Some(rest) = s.strip_prefix("you have the city's blessing") {
+        return Some((Condition::HasCityBlessing, rest));
+    }
     // "It" is this object unless the line has bound it to another ("whenever you cast a
     // spell, if it was bargained" is about that spell).
     let it_is_self = matches!(cx.it, None | Some(Selector::SelfSource));

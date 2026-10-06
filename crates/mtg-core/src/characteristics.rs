@@ -180,6 +180,8 @@ pub struct GrantedAbility {
 /// effects would mean the engine consulting card data in the middle of combat.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub enum Keyword {
+    /// Grants the city's blessing once its controller has ten permanents.
+    Ascend,
     Flying,
     Reach,
     FirstStrike,

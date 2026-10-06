@@ -8,6 +8,479 @@ use mtg_engine::{
 };
 
 #[test]
+fn cultivate_splits_the_searched_lands_and_reveals_both_before_moving_them() {
+    for put_second_on_board in [false, true] {
+        let mut t = Table::default();
+        let tutor = t.card("{2}{G}", "Sorcery", None,
+            "Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.");
+        let forest = t.card("", "Basic Land — Forest", None, "");
+        let island = t.card("", "Basic Land — Island", None, "");
+        let mut g = Game::new(t);
+        g.lands(3);
+        let spell = g.put(tutor, P0, Zone::Hand);
+        g.main();
+        let first = g.put(forest, P0, Zone::Library);
+        let second = g.put(island, P0, Zone::Library);
+        let (board, hand) = if put_second_on_board {
+            (island, forest)
+        } else {
+            (forest, island)
+        };
+        let pick = if put_second_on_board { second } else { first };
+        g.act(
+            Action::Cast { object: spell },
+            &[],
+            &[
+                Answer::Objects(vec![first, second]),
+                Answer::Objects(vec![pick]),
+            ],
+        );
+        let found = g.find(board).expect("chosen land enters the battlefield");
+        assert!(g.engine.state.objects[&found].tapped);
+        assert!(g.find(hand).is_none());
+        assert!(
+            g.engine
+                .state
+                .objects_in(ZoneRef::of(Zone::Hand, P0))
+                .iter()
+                .any(|id| g.engine.state.objects[id].card == hand)
+        );
+        assert_eq!(g.engine.state.revealed_cards.len(), 2);
+        let last_reveal = g
+            .engine
+            .log
+            .iter()
+            .rposition(|entry| matches!(entry.event, Event::Revealed { .. }))
+            .unwrap();
+        let first_move = g.engine.log.iter().position(|entry| matches!(entry.event,
+            Event::ZoneChange { object, from, .. } if (object == first || object == second) && from.zone == Zone::Library)).unwrap();
+        assert!(last_reveal < first_move);
+    }
+}
+
+#[test]
+fn cultivate_can_find_zero_or_one_land_and_one_land_must_enter_the_battlefield() {
+    for number_found in 0..=1 {
+        let mut t = Table::default();
+        let tutor = t.card("{2}{G}", "Sorcery", None,
+            "Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.");
+        let forest = t.card("", "Basic Land — Forest", None, "");
+        let mut g = Game::new(t);
+        g.lands(3);
+        let spell = g.put(tutor, P0, Zone::Hand);
+        g.main();
+        let selected: Vec<_> = (0..number_found)
+            .map(|_| g.put(forest, P0, Zone::Library))
+            .collect();
+        let hand_before = g.count(Zone::Hand, P0);
+        // A malformed empty second answer must not skip the mandatory land drop.
+        g.act(
+            Action::Cast { object: spell },
+            &[],
+            &[Answer::Objects(selected), Answer::Objects(vec![])],
+        );
+        assert_eq!(g.find(forest).is_some(), number_found == 1);
+        assert_eq!(g.count(Zone::Hand, P0), hand_before - 1);
+        assert_eq!(g.engine.state.revealed_cards.len(), number_found);
+        assert!(
+            g.engine
+                .log
+                .iter()
+                .any(|entry| matches!(entry.event, Event::Shuffled { player: P0 }))
+        );
+    }
+}
+
+#[test]
+fn split_tutors_cannot_put_an_unsearched_land_onto_the_board() {
+    let mut t = Table::default();
+    let tutor = t.card("{2}{G}", "Sorcery", None,
+        "Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.");
+    let forest = t.card("", "Basic Land — Forest", None, "");
+    let island = t.card("", "Basic Land — Island", None, "");
+    let mountain = t.card("", "Basic Land — Mountain", None, "");
+    let mut g = Game::new(t);
+    g.lands(3);
+    let spell = g.put(tutor, P0, Zone::Hand);
+    g.main();
+    let first = g.put(forest, P0, Zone::Library);
+    let second = g.put(island, P0, Zone::Library);
+    let unrelated = g.put(mountain, P0, Zone::Library);
+    g.act(
+        Action::Cast { object: spell },
+        &[],
+        &[
+            Answer::Objects(vec![first, first, second]),
+            Answer::Objects(vec![unrelated, unrelated]),
+        ],
+    );
+    assert!(g.find(mountain).is_none());
+    assert_eq!(g.engine.state.objects[&unrelated].zone.zone, Zone::Library);
+    assert!(g.find(forest).is_some() || g.find(island).is_some());
+    let in_hand = g
+        .engine
+        .state
+        .objects_in(ZoneRef::of(Zone::Hand, P0))
+        .iter()
+        .filter(|id| [forest, island].contains(&g.engine.state.objects[id].card))
+        .count();
+    assert_eq!(in_hand, 1);
+    assert_eq!(g.engine.state.revealed_cards.len(), 2);
+}
+
+#[test]
+fn a_sacrificed_tutor_source_still_splits_the_searched_lands() {
+    let mut t = Table::default();
+    let tutor = t.card("{2}{G}", "Creature — Bear", Some((2, 2)),
+        "{2}, {T}, Sacrifice ~: Search your library for up to two basic land cards, reveal them, put one onto the battlefield tapped and the other into your hand, then shuffle.");
+    let forest = t.card("", "Basic Land — Forest", None, "");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let source = g.put(tutor, P0, Zone::Battlefield);
+    g.main();
+    let first = g.put(forest, P0, Zone::Library);
+    let second = g.put(forest, P0, Zone::Library);
+    g.act(
+        activate(source, 0),
+        &[],
+        &[
+            Answer::Objects(vec![first, second]),
+            Answer::Objects(vec![first]),
+        ],
+    );
+    assert!(g.find(tutor).is_none());
+    assert!(
+        g.engine
+            .state
+            .objects
+            .values()
+            .any(|o| o.card == tutor && o.zone.zone == Zone::Graveyard)
+    );
+    let land = g.find(forest).unwrap();
+    assert!(g.engine.state.objects[&land].tapped);
+    assert!(
+        g.engine
+            .state
+            .objects
+            .values()
+            .any(|o| o.card == forest && o.zone.zone == Zone::Hand)
+    );
+}
+
+#[test]
+fn navigation_orb_accepts_basic_lands_or_nonbasic_gates_but_not_other_nonbasic_lands() {
+    for (kind, eligible) in [
+        ("Basic Land — Forest", true),
+        ("Land — Gate", true),
+        ("Land — Forest Island", false),
+    ] {
+        let mut t = Table::default();
+        let orb = t.card("{3}", "Artifact", None,
+            "{2}, {T}, Sacrifice ~: Search your library for up to two basic land cards and/or Gate cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.");
+        let land = t.card("", kind, None, "");
+        let mut g = Game::new(t);
+        g.lands(2);
+        let source = g.put(orb, P0, Zone::Battlefield);
+        g.main();
+        let selected = g.put(land, P0, Zone::Library);
+        g.act(
+            activate(source, 0),
+            &[],
+            &[
+                Answer::Objects(vec![selected]),
+                Answer::Objects(vec![selected]),
+            ],
+        );
+        assert_eq!(g.find(land).is_some(), eligible, "{kind}");
+        assert_eq!(g.engine.state.revealed_cards.len(), usize::from(eligible));
+        if let Some(found) = g.find(land) {
+            assert!(g.engine.state.objects[&found].tapped);
+        }
+    }
+}
+
+#[test]
+fn a_search_and_reveal_sentence_preserves_the_found_cards_for_a_later_split() {
+    let mut t = Table::default();
+    let tutor = t.card("{2}{G}", "Sorcery", None,
+        "Search your library for up to two Forest cards and reveal them. Put one of them onto the battlefield tapped and the other into your hand, then shuffle.");
+    let forest = t.card("", "Basic Land — Forest", None, "");
+    let dual = t.card("", "Land — Forest Island", None, "");
+    let mut g = Game::new(t);
+    g.lands(3);
+    let source = g.put(tutor, P0, Zone::Hand);
+    g.main();
+    let first = g.put(forest, P0, Zone::Library);
+    let second = g.put(dual, P0, Zone::Library);
+    g.act(
+        Action::Cast { object: source },
+        &[],
+        &[
+            Answer::Objects(vec![first, second]),
+            Answer::Objects(vec![second]),
+        ],
+    );
+    assert!(g.engine.state.objects[&g.find(dual).unwrap()].tapped);
+    assert!(
+        g.engine
+            .state
+            .objects
+            .values()
+            .any(|o| o.card == forest && o.zone.zone == Zone::Hand)
+    );
+    assert_eq!(g.engine.state.revealed_cards.len(), 2);
+}
+
+#[test]
+fn route_searches_put_both_basic_and_nonbasic_subtype_lands_onto_the_battlefield() {
+    for subtype in ["Gate", "Desert"] {
+        let mut t = Table::default();
+        let tutor = t.card("{3}{G}", "Sorcery", None, &format!(
+            "Search your library for up to two basic land cards and/or {subtype} cards, put them onto the battlefield tapped, then shuffle."));
+        let forest = t.card("", "Basic Land — Forest", None, "");
+        let special = t.card("", &format!("Land — {subtype}"), None, "");
+        let mut g = Game::new(t);
+        g.lands(4);
+        let source = g.put(tutor, P0, Zone::Hand);
+        g.main();
+        let first = g.put(forest, P0, Zone::Library);
+        let second = g.put(special, P0, Zone::Library);
+        g.act(
+            Action::Cast { object: source },
+            &[],
+            &[Answer::Objects(vec![first, second])],
+        );
+        for card in [forest, special] {
+            assert!(g.engine.state.objects[&g.find(card).unwrap()].tapped);
+        }
+        assert!(g.engine.state.revealed_cards.is_empty());
+    }
+}
+
+#[test]
+fn farseek_accepts_each_listed_subtype_and_nonbasic_duals_but_not_plain_forests() {
+    for (kind, eligible) in [
+        ("Basic Land — Plains", true),
+        ("Basic Land — Island", true),
+        ("Basic Land — Swamp", true),
+        ("Basic Land — Mountain", true),
+        ("Land — Forest Island", true),
+        ("Basic Land — Forest", false),
+        ("Artifact", false),
+    ] {
+        let mut t = Table::default();
+        let tutor = t.card("{1}{G}", "Sorcery", None,
+            "Search your library for a Plains, Island, Swamp, or Mountain card, put it onto the battlefield tapped, then shuffle.");
+        let land = t.card("", kind, None, "");
+        let mut g = Game::new(t);
+        g.lands(2);
+        let spell = g.put(tutor, P0, Zone::Hand);
+        g.main();
+        let selected = g.put(land, P0, Zone::Library);
+        g.act(
+            Action::Cast { object: spell },
+            &[],
+            &[Answer::Objects(vec![selected])],
+        );
+        assert_eq!(g.find(land).is_some(), eligible, "{kind}");
+        if let Some(found) = g.find(land) {
+            assert!(g.engine.state.objects[&found].tapped);
+        }
+        assert!(
+            g.engine
+                .log
+                .iter()
+                .any(|entry| matches!(entry.event, Event::Shuffled { player: P0 }))
+        );
+    }
+}
+
+#[test]
+fn chord_of_calling_uses_the_announced_x_as_its_creature_mana_value_limit() {
+    for (x, cost, kind, eligible) in [
+        (0, "{0}", "Creature — Bear", true),
+        (1, "{G}", "Creature — Bear", true),
+        (1, "{1}{G}", "Creature — Bear", false),
+        (3, "{2}{G}", "Creature — Bear", true),
+        (3, "{G}", "Artifact", false),
+    ] {
+        let mut t = Table::default();
+        let tutor = t.card("{X}{G}{G}{G}", "Instant", None,
+            "Convoke\nSearch your library for a creature card with mana value X or less, put it onto the battlefield, then shuffle.");
+        let card = t.card(
+            cost,
+            kind,
+            kind.starts_with("Creature").then_some((1, 1)),
+            "",
+        );
+        let mut g = Game::new(t);
+        g.lands(x as usize + 3);
+        let spell = g.put(tutor, P0, Zone::Hand);
+        g.main();
+        let selected = g.put(card, P0, Zone::Library);
+        g.act(
+            Action::Cast { object: spell },
+            &[],
+            &[Answer::Number(x), Answer::Objects(vec![selected])],
+        );
+        assert_eq!(g.find(card).is_some(), eligible, "X={x}, {cost}, {kind}");
+        if let Some(found) = g.find(card) {
+            assert!(!g.engine.state.objects[&found].tapped);
+        }
+    }
+}
+
+#[test]
+fn green_suns_zenith_filters_color_and_shuffles_itself_back_even_when_no_card_is_found() {
+    for (cost, eligible) in [("{G}", true), ("{B}", false), ("{1}{G}", false)] {
+        let mut t = Table::default();
+        let tutor = t.card("{X}{G}", "Sorcery", None,
+            "Search your library for a green creature card with mana value X or less, put it onto the battlefield, then shuffle. Shuffle ~ into its owner's library.");
+        let creature = t.card(cost, "Creature — Bear", Some((1, 1)), "");
+        let mut g = Game::new(t);
+        g.lands(2);
+        let spell = g.put(tutor, P0, Zone::Hand);
+        g.main();
+        let selected = g.put(creature, P0, Zone::Library);
+        g.act(
+            Action::Cast { object: spell },
+            &[],
+            &[Answer::Number(1), Answer::Objects(vec![selected])],
+        );
+        assert_eq!(g.find(creature).is_some(), eligible);
+        assert!(
+            g.engine
+                .state
+                .objects_in(ZoneRef::of(Zone::Library, P0))
+                .iter()
+                .any(|id| g.engine.state.objects[id].card == tutor)
+        );
+        assert!(
+            !g.engine
+                .state
+                .objects_in(ZoneRef::of(Zone::Graveyard, P0))
+                .iter()
+                .any(|id| g.engine.state.objects[id].card == tutor)
+        );
+    }
+}
+
+#[test]
+fn citanul_flute_reveals_and_puts_a_creature_within_activated_x_into_hand() {
+    for (cost, eligible) in [("{1}{G}", true), ("{2}{G}", false)] {
+        let mut t = Table::default();
+        let flute = t.card("{5}", "Artifact", None,
+            "{X}, {T}: Search your library for a creature card with mana value X or less, reveal it, put it into your hand, then shuffle.");
+        let creature = t.card(cost, "Creature — Bear", Some((1, 1)), "");
+        let mut g = Game::new(t);
+        g.lands(2);
+        let source = g.put(flute, P0, Zone::Battlefield);
+        g.main();
+        let selected = g.put(creature, P0, Zone::Library);
+        g.act(
+            activate(source, 0),
+            &[],
+            &[Answer::Number(2), Answer::Objects(vec![selected])],
+        );
+        assert!(g.engine.state.objects[&source].tapped);
+        let found = g
+            .engine
+            .state
+            .objects_in(ZoneRef::of(Zone::Hand, P0))
+            .iter()
+            .any(|id| g.engine.state.objects[id].card == creature);
+        assert_eq!(found, eligible);
+        assert_eq!(g.engine.state.revealed_cards.len(), usize::from(eligible));
+    }
+}
+
+#[test]
+fn dynamic_quality_filters_observe_equal_lower_and_upper_bounds() {
+    for (quality, x, expected) in [
+        ("power X or less", 0, [true, false, false]),
+        ("power X or greater", 2, [false, true, true]),
+        ("toughness X", 2, [false, true, false]),
+        ("toughness X or greater", 0, [true, true, true]),
+        ("toughness X or greater", 2, [false, true, true]),
+        ("mana value X", 2, [false, true, false]),
+    ] {
+        let mut t = Table::default();
+        let spell = t.card(
+            "{X}{B}",
+            "Sorcery",
+            None,
+            &format!("Destroy all creatures with {quality}."),
+        );
+        let cards = [
+            t.card("{G}", "Creature — Bear", Some((0, 1)), ""),
+            t.card("{1}{G}", "Creature — Bear", Some((2, 2)), ""),
+            t.card("{2}{G}", "Creature — Bear", Some((3, 3)), ""),
+        ];
+        let mut g = Game::new(t);
+        g.lands(x as usize + 1);
+        for card in cards {
+            g.put(card, P1, Zone::Battlefield);
+        }
+        let source = g.put(spell, P0, Zone::Hand);
+        g.main();
+        g.act(Action::Cast { object: source }, &[], &[Answer::Number(x)]);
+        for (card, destroyed) in cards.into_iter().zip(expected) {
+            assert_eq!(
+                g.find(card).is_none(),
+                destroyed,
+                "{quality}, X={x}, {card:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn quality_filters_reject_x_when_the_spell_does_not_define_it() {
+    use mtg_oracle::compile::{FaceText, SubtypeNames, compile};
+    for text in [
+        "Destroy all creatures with power X or less.",
+        "Destroy all creatures with toughness X or greater.",
+        "Search your library for a creature card with mana value X or less, put it into your hand, then shuffle.",
+    ] {
+        let face = FaceText {
+            name: "Undefined X",
+            card_types: &[mtg_core::CardType::Sorcery],
+            subtypes: &[],
+            oracle_text: Some(text),
+            mana_cost: "{B}",
+        };
+        assert!(
+            !compile(&face, &SubtypeNames(vec![])).understood(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn noun_lists_do_not_consume_commas_between_separate_effects() {
+    let mut t = Table::default();
+    let lord = t.card("{1}{U}{B}{R}", "Legendary Creature — Zombie", Some((10, 4)),
+        "When ~ enters, you lose 2 life, you sacrifice two creatures, and target opponent draws two cards.\n{B}: Regenerate ~.");
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(4);
+    let first = g.put(bear, P0, Zone::Battlefield);
+    let second = g.put(bear, P0, Zone::Battlefield);
+    let spell = g.put(lord, P0, Zone::Hand);
+    g.main();
+    let hand_before = g.count(Zone::Hand, P1);
+    g.act(
+        Action::Cast { object: spell },
+        &[mtg_core::Target::Player(P1)],
+        &[Answer::Objects(vec![first, second])],
+    );
+    assert_eq!(g.life(P0), 18);
+    assert_eq!(g.count(Zone::Hand, P1), hand_before + 2);
+    assert!(g.find(bear).is_none());
+    assert!(g.find(lord).is_some());
+}
+
+#[test]
 fn a_tutor_puts_the_card_in_hand_before_randomly_discarding() {
     let mut t = Table::default();
     let tutor = t.card("{R}", "Sorcery", None,

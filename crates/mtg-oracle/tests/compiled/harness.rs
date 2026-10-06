@@ -58,6 +58,10 @@ const SUBTYPES: &[&str] = &[
     "Powerstone",
     "Elemental",
     "Rebel",
+    "Omen",
+    "Dragon",
+    "Gate",
+    "Desert",
 ];
 
 #[derive(Default)]

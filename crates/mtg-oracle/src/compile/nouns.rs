@@ -120,7 +120,7 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
             parts.push(ObjectFilter::OwnedBy(Box::new(Selector::You)));
             rest = r;
         } else if let Some(r) = rest.strip_prefix(" with ") {
-            let (f, r) = with_clause(r)?;
+            let (f, r) = with_clause(r, cx)?;
             parts.push(f);
             rest = r;
         } else if let Some(r) = rest
@@ -255,24 +255,43 @@ fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> 
             rest2,
         ));
     }
-    if let Some(r) = rest.strip_prefix(", ")
-        && let Some((second, _, _, r2)) = one_head(r, cx)
-        // "artifact, creature, or land"; "artifacts, creatures, and lands" (plural only).
-        && let Some(r3) = r2
+    // Lists can contain any number of alternatives, but must end in an
+    // explicit "or" (or plural "and") rather than swallowing clause commas.
+    let mut alternatives = vec![first.clone()];
+    let mut tail = rest;
+    let mut list_plural = plural;
+    loop {
+        let last = tail
             .strip_prefix(", or ")
-            .or_else(|| r2.strip_prefix(", and ").filter(|_| plural))
-        && let Some((third, zone3, plural3, rest3)) = one_head(r3, cx)
-    {
-        return Some((
-            ObjectFilter::Or(vec![first, second, third]),
-            if zone == Zone::Battlefield {
-                zone3
-            } else {
-                zone
-            },
-            plural || plural3,
-            rest3,
-        ));
+            .or_else(|| tail.strip_prefix(", and ").filter(|_| plural));
+        if let Some(r) = last {
+            let Some((last, last_zone, last_plural, left)) = one_head(r, cx) else {
+                break;
+            };
+            if alternatives.len() < 2 {
+                break;
+            }
+            alternatives.push(last);
+            return Some((
+                ObjectFilter::Or(alternatives),
+                if zone == Zone::Battlefield {
+                    last_zone
+                } else {
+                    zone
+                },
+                list_plural || last_plural,
+                left,
+            ));
+        }
+        let Some(r) = tail.strip_prefix(", ") else {
+            break;
+        };
+        let Some((next, _, next_plural, left)) = one_head(r, cx) else {
+            break;
+        };
+        alternatives.push(next);
+        list_plural |= next_plural;
+        tail = left;
     }
     Some((first, zone, plural, rest))
 }
@@ -304,7 +323,7 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
                 .map(ObjectFilter::HasType)
                 .collect(),
             );
-            return card_zone(permanent, plural, r);
+            return card_zone(permanent, plural, r, cx);
         }
         return Some((
             ObjectFilter::Any,
@@ -330,7 +349,7 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
         ));
     } else if word == "card" || word == "cards" {
         // A bare "card": its zone comes from a qualifier.
-        return card_zone(ObjectFilter::Any, word == "cards", rest);
+        return card_zone(ObjectFilter::Any, word == "cards", rest, cx);
     } else {
         let st = cx.subtype(word)?;
         filter = ObjectFilter::HasSubtype(st);
@@ -348,6 +367,7 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
             ObjectFilter::And(vec![filter, permanent_card()]),
             next == "cards",
             r2,
+            cx,
         );
     }
     // "Goblin creature", "artifact creature", "creature spell", "creature card".
@@ -376,7 +396,7 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
                     r2,
                 ));
             }
-            "card" | "cards" => return card_zone(filter, next == "cards", r2),
+            "card" | "cards" => return card_zone(filter, next == "cards", r2, cx),
             // "creature tokens you control", "artifact token".
             "token" | "tokens" => {
                 return Some((
@@ -394,12 +414,13 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
 
 /// A "card" lives somewhere other than the battlefield; which zone comes next, after an
 /// optional quality ("creature card with mana value 3 or less from your graveyard").
-fn card_zone(
+fn card_zone<'s>(
     filter: ObjectFilter,
     plural: bool,
-    rest: &str,
-) -> Option<(ObjectFilter, Zone, bool, &str)> {
-    let (filter, rest) = match rest.strip_prefix(" with ").and_then(with_clause) {
+    rest: &'s str,
+    cx: &Cx,
+) -> Option<(ObjectFilter, Zone, bool, &'s str)> {
+    let (filter, rest) = match rest.strip_prefix(" with ").and_then(|r| with_clause(r, cx)) {
         Some((quality, r)) => (ObjectFilter::And(vec![filter, quality]), r),
         None => (filter, rest),
     };
@@ -418,7 +439,7 @@ fn card_zone(
 }
 
 /// "with flying", "with power 2 or less", "with mana value 3 or greater".
-pub fn with_clause(s: &str) -> Option<(ObjectFilter, &str)> {
+pub fn with_clause<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
     if let Some((k, rest)) = words::keyword_prefix(s) {
         // "with flying or reach"
         if let Some(r) = rest.strip_prefix(" or ")
@@ -471,8 +492,11 @@ pub fn with_clause(s: &str) -> Option<(ObjectFilter, &str)> {
         let Some(r) = s.strip_prefix(prefix) else {
             continue;
         };
-        let (n, r) = words::number(r)?;
-        let v = Value::Fixed(n);
+        let (v, r) = super::clauses::amount(r, cx)?;
+        let below = match &v {
+            Value::Fixed(n) => Value::Fixed(n - 1),
+            _ => Value::Sum(vec![v.clone(), Value::Fixed(-1)]),
+        };
         if let Some(r) = r.strip_prefix(" or less") {
             return Some((
                 match kind {
@@ -489,7 +513,7 @@ pub fn with_clause(s: &str) -> Option<(ObjectFilter, &str)> {
                     0 => ObjectFilter::PowerAtLeast(v),
                     2 => ObjectFilter::ManaValueAtLeast(v),
                     // At least N is not at most N - 1.
-                    _ => not(ObjectFilter::ToughnessAtMost(Value::Fixed(n - 1))),
+                    _ => not(ObjectFilter::ToughnessAtMost(below.clone())),
                 },
                 r,
             ));
@@ -512,7 +536,7 @@ pub fn with_clause(s: &str) -> Option<(ObjectFilter, &str)> {
             )),
             _ => Some((
                 ObjectFilter::And(vec![
-                    not(ObjectFilter::ToughnessAtMost(Value::Fixed(n - 1))),
+                    not(ObjectFilter::ToughnessAtMost(below)),
                     ObjectFilter::ToughnessAtMost(v),
                 ]),
                 r,

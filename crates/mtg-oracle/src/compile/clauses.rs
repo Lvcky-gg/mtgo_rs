@@ -1114,14 +1114,18 @@ fn reveal_hand_choose<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> 
         });
     }
     // "… card with mana value 3 or less from it", "… card from it with mana value 3 or less"
-    let (quality, r) = match r.strip_prefix(" with ").and_then(nouns::with_clause) {
+    let (quality, r) = match r
+        .strip_prefix(" with ")
+        .and_then(|r| nouns::with_clause(r, cx))
+    {
         Some((q, r)) => (Some(q), r),
         None => (None, r),
     };
     let r = r.strip_prefix(" from it")?;
     let (quality, r) = match (
         quality,
-        r.strip_prefix(" with ").and_then(nouns::with_clause),
+        r.strip_prefix(" with ")
+            .and_then(|r| nouns::with_clause(r, cx)),
     ) {
         (None, Some((q, r))) => (Some(q), r),
         (q, _) => (q, r),
@@ -1367,7 +1371,10 @@ fn dig<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
             (filter, &r[at + word.len()..])
         };
         // "… with power 2 or less from among them"
-        match r.strip_prefix("with ").and_then(nouns::with_clause) {
+        match r
+            .strip_prefix("with ")
+            .and_then(|r| nouns::with_clause(r, cx))
+        {
             Some((q, r)) => Some((
                 k,
                 mtg_ir::ObjectFilter::And(vec![filter, q]),
@@ -3614,23 +3621,8 @@ pub fn scale_mods(mods: &mut [Modification], by: Value) {
     }
 }
 
-/// "search your library for a basic land card, put it onto the battlefield tapped, then
-/// shuffle" (CR 701.19): the controller chooses among matching cards in their library, and
-/// may find none — a searched-for quality can always fail to be found (CR 701.19b).
-fn search<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
-    let r = s.strip_prefix("search your library for ")?;
-    let optional_count = r.starts_with("up to ") || r.starts_with("any number of ");
-    let (n, r) = if let Some(r) = r.strip_prefix("up to ") {
-        let (n, r) = words::number(r)?;
-        (n, r.strip_prefix(' ')?)
-    } else if let Some(r) = r.strip_prefix("any number of ") {
-        (i32::from(u8::MAX), r)
-    } else if let Some(r) = r.strip_prefix("a ").or_else(|| r.strip_prefix("an ")) {
-        (1, r)
-    } else {
-        let (n, r) = words::number(r)?;
-        (n, r.strip_prefix(' ')?)
-    };
+/// One quality of a searched card, including adjectives and numeric bounds.
+fn search_quality<'s>(r: &'s str, n: i32, cx: &Cx) -> Option<(mtg_ir::ObjectFilter, &'s str)> {
     // The noun runs up to " card" / " cards".
     let marker = if n == 1 { " card" } else { " cards" };
     let (filter, r) = if let Some(r) = r.strip_prefix(marker.trim_start()) {
@@ -3661,10 +3653,41 @@ fn search<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         (filter, &rest[marker.len()..])
     };
     // "… card with mana value 3 or less"
-    let (filter, r) = match r.strip_prefix(" with ").and_then(nouns::with_clause) {
+    let (filter, r) = match r
+        .strip_prefix(" with ")
+        .and_then(|r| nouns::with_clause(r, cx))
+    {
         Some((quality, r)) => (mtg_ir::ObjectFilter::And(vec![filter, quality]), r),
         None => (filter, r),
     };
+    Some((filter, r))
+}
+
+/// "search your library for a basic land card, put it onto the battlefield tapped, then
+/// shuffle" (CR 701.19): the controller chooses among matching cards in their library, and
+/// may find none — a searched-for quality can always fail to be found (CR 701.19b).
+fn search<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("search your library for ")?;
+    let optional_count = r.starts_with("up to ") || r.starts_with("any number of ");
+    let (n, r) = if let Some(r) = r.strip_prefix("up to ") {
+        let (n, r) = words::number(r)?;
+        (n, r.strip_prefix(' ')?)
+    } else if let Some(r) = r.strip_prefix("any number of ") {
+        (i32::from(u8::MAX), r)
+    } else if let Some(r) = r.strip_prefix("a ").or_else(|| r.strip_prefix("an ")) {
+        (1, r)
+    } else {
+        let (n, r) = words::number(r)?;
+        (n, r.strip_prefix(' ')?)
+    };
+    let (mut filter, mut r) = search_quality(r, n, cx)?;
+    // Each alternative retains its own adjectives: "basic land cards and/or
+    // Gate cards" includes nonbasic Gates but excludes other nonbasic lands.
+    while let Some(next) = r.strip_prefix(" and/or ") {
+        let (alternative, rest) = search_quality(next, n, cx)?;
+        filter = mtg_ir::ObjectFilter::Or(vec![filter, alternative]);
+        r = rest;
+    }
     // CR 701.19: an unrestricted search must find the requested number if
     // available; a stated quality (or an explicit optional count) may find none.
     let up_to = optional_count || filter != mtg_ir::ObjectFilter::Any;
@@ -3675,12 +3698,16 @@ fn search<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         count: Value::Fixed(n),
         up_to,
     };
-    let r = r.strip_prefix(", ")?;
+    let r = r.strip_prefix(", ").or_else(|| r.strip_prefix(" and "))?;
     let revealed = r
         .strip_prefix("reveal it, ")
         .or_else(|| r.strip_prefix("reveal them, "))
         .or_else(|| r.strip_prefix("reveal that card, "))
-        .or_else(|| r.strip_prefix("reveal those cards, "));
+        .or_else(|| r.strip_prefix("reveal those cards, "))
+        .or_else(|| r.strip_prefix("reveal it. "))
+        .or_else(|| r.strip_prefix("reveal them. "))
+        .or_else(|| r.strip_prefix("reveal that card. "))
+        .or_else(|| r.strip_prefix("reveal those cards. "));
     let r = revealed.unwrap_or(r);
     let found_effect = |body: Effect| {
         if revealed.is_some() {
@@ -3703,6 +3730,65 @@ fn search<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     } else {
         found.clone()
     };
+    // Cultivate / Kodama's Reach: first choose the searched cards, then choose
+    // which of those cards enters. Named bindings preserve the original ids
+    // even though moving a card updates the ordinary "it" binding.
+    let split = r.strip_prefix("and ").unwrap_or(r);
+    let split = split
+        .strip_prefix("put one onto the battlefield tapped")
+        .or_else(|| split.strip_prefix("put one of them onto the battlefield tapped"));
+    if let Some(r) = split {
+        let r = r
+            .strip_prefix(" and the other into your hand")
+            .filter(|_| n == 2)
+            .or_else(|| r.strip_prefix(" and the rest into your hand"))?;
+        use mtg_ir::selector::Binding;
+        let searched = Binding::Named(u16::MAX - 6);
+        let battlefield = Binding::Named(u16::MAX - 7);
+        let mut steps = Vec::new();
+        if revealed.is_some() {
+            steps.push(Effect::Reveal {
+                what: Selector::Bound(searched),
+            });
+        }
+        steps.push(Effect::Let {
+            slot: battlefield,
+            what: Selector::ChosenBy {
+                chooser: Box::new(Selector::You),
+                zone: Zone::Library,
+                filter: mtg_ir::ObjectFilter::InBinding(searched),
+                count: Value::Fixed(1),
+                up_to: false,
+            },
+            body: Box::new(Effect::Sequence(vec![
+                Effect::MoveZone {
+                    what: Selector::Bound(battlefield),
+                    to: Zone::Battlefield,
+                    owner_relative_to: None,
+                    position: ZonePosition::Natural,
+                    tapped: true,
+                    face_down: false,
+                    under_control_of: None,
+                },
+                move_zone(
+                    Selector::Except(
+                        Box::new(Selector::Bound(searched)),
+                        Box::new(Selector::Bound(battlefield)),
+                    ),
+                    Zone::Hand,
+                    ZonePosition::Natural,
+                ),
+            ])),
+        });
+        return Some((
+            Effect::Let {
+                slot: searched,
+                what: found,
+                body: Box::new(Effect::Sequence(steps)),
+            },
+            r,
+        ));
+    }
     // "…, then shuffle and put that card on top": it is set aside, and goes back on top.
     if n == 1
         && let Some(r) = r

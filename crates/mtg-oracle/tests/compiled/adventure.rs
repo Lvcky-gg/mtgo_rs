@@ -4,6 +4,210 @@ use mtg_core::{Cause, Event, Step, Target, Zone, ZoneRef};
 use mtg_engine::{Progress, actions::Action, choice::Answer, view::project};
 use mtg_ir::Layout;
 
+#[test]
+fn claim_territory_splits_forests_then_shuffles_the_omen_card_into_its_library() {
+    let mut t = Table::default();
+    let front = t.card("{4}{G}{G}", "Creature — Dragon", Some((4, 5)), "Flying");
+    let omen = t.card("{2}{G}", "Sorcery — Omen", None,
+        "Search your library for up to two basic Forest cards, reveal them, put one onto the battlefield tapped and the other into your hand, then shuffle. (Also shuffle this card.)");
+    t.pair(front, omen, Layout::Adventure);
+    let forest = t.card("", "Basic Land — Forest", None, "");
+    let mut g = Game::new(t);
+    g.lands(3);
+    let spell = g.put(front, P0, Zone::Hand);
+    g.main();
+    let first = g.put(forest, P0, Zone::Library);
+    let second = g.put(forest, P0, Zone::Library);
+    g.act(
+        Action::CastFace {
+            object: spell,
+            face: 1,
+        },
+        &[],
+        &[
+            Answer::Objects(vec![first, second]),
+            Answer::Objects(vec![second]),
+        ],
+    );
+    let card = g
+        .engine
+        .state
+        .objects
+        .values()
+        .find(|o| o.card == front)
+        .unwrap();
+    assert_eq!(card.zone, ZoneRef::of(Zone::Library, P0));
+    assert_eq!(card.face, 0);
+    assert_eq!(card.adventure_player, None);
+    assert_eq!(
+        g.engine
+            .log
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::Shuffled { player: P0 }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        g.engine
+            .state
+            .objects
+            .values()
+            .filter(|o| o.card == forest && o.zone.zone == Zone::Battlefield && o.tapped)
+            .count(),
+        1
+    );
+    assert_eq!(
+        g.engine
+            .state
+            .objects
+            .values()
+            .filter(|o| o.card == forest && o.zone.zone == Zone::Hand)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn countered_or_fizzled_omens_go_to_the_graveyard_without_shuffling() {
+    for countered in [false, true] {
+        let mut t = Table::default();
+        let front = t.card("{4}{R}", "Creature — Dragon", Some((4, 4)), "Flying");
+        let omen = t.card(
+            "{R}",
+            "Instant — Omen",
+            None,
+            "~ deals 2 damage to target creature. (Also shuffle this card.)",
+        );
+        t.pair(front, omen, Layout::Adventure);
+        let bear = t.bear();
+        let response = t.card(
+            "{U}",
+            "Instant",
+            None,
+            if countered {
+                "Counter target spell."
+            } else {
+                "Destroy target creature."
+            },
+        );
+        let mut g = Game::new(t);
+        g.lands(2);
+        let target = g.put(bear, P1, Zone::Battlefield);
+        let spell = g.put(front, P0, Zone::Hand);
+        let answer = g.put(response, P0, Zone::Hand);
+        g.main();
+        g.act_holding(
+            Action::CastFace {
+                object: spell,
+                face: 1,
+            },
+            &[Target::Object(target)],
+        );
+        let response_target = if countered { g.stack()[0] } else { target };
+        g.act(
+            Action::Cast { object: answer },
+            &[Target::Object(response_target)],
+            &[],
+        );
+        let card = g
+            .engine
+            .state
+            .objects
+            .values()
+            .find(|o| o.card == front)
+            .unwrap();
+        assert_eq!(card.zone.zone, Zone::Graveyard);
+        assert_eq!(card.adventure_player, None);
+        assert!(
+            !g.engine
+                .log
+                .iter()
+                .any(|entry| matches!(entry.event, Event::Shuffled { .. }))
+        );
+    }
+}
+
+#[test]
+fn casting_the_creature_half_of_an_omen_enters_the_battlefield() {
+    let mut t = Table::default();
+    let front = t.card("{1}{R}", "Creature — Dragon", Some((2, 2)), "Flying");
+    let omen = t.card(
+        "{R}",
+        "Sorcery — Omen",
+        None,
+        "You gain 2 life. (Also shuffle this card.)",
+    );
+    t.pair(front, omen, Layout::Adventure);
+    let mut g = Game::new(t);
+    g.lands(2);
+    let spell = g.put(front, P0, Zone::Hand);
+    g.main();
+    g.cast(spell, &[]);
+    assert!(g.find(front).is_some());
+    assert_eq!(g.life(P0), 20);
+    assert!(
+        !g.engine
+            .log
+            .iter()
+            .any(|entry| matches!(entry.event, Event::Shuffled { .. }))
+    );
+}
+
+#[test]
+fn copied_omens_resolve_and_shuffle_without_leaving_a_fake_card_in_the_library() {
+    let mut t = Table::default();
+    let front = t.card("{4}{R}", "Creature — Dragon", Some((4, 4)), "Flying");
+    let omen = t.card(
+        "{R}",
+        "Sorcery — Omen",
+        None,
+        "You gain 2 life. (Also shuffle this card.)",
+    );
+    t.pair(front, omen, Layout::Adventure);
+    let copier = t.card(
+        "{U}",
+        "Instant",
+        None,
+        "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+    );
+    let mut g = Game::new(t);
+    g.lands(2);
+    let source = g.put(front, P0, Zone::Hand);
+    let response = g.put(copier, P0, Zone::Hand);
+    g.main();
+    g.act_holding(
+        Action::CastFace {
+            object: source,
+            face: 1,
+        },
+        &[],
+    );
+    let spell = g.stack()[0];
+    g.act(
+        Action::Cast { object: response },
+        &[Target::Object(spell)],
+        &[],
+    );
+    assert_eq!(g.life(P0), 24);
+    let cards: Vec<_> = g
+        .engine
+        .state
+        .objects
+        .values()
+        .filter(|o| o.card == front)
+        .collect();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].zone, ZoneRef::of(Zone::Library, P0));
+    assert_eq!(
+        g.engine
+            .log
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::Shuffled { player: P0 }))
+            .count(),
+        2
+    );
+}
+
 fn cards() -> (Table, mtg_core::CardId) {
     let mut t = Table::default();
     let front = t.card("{2}{G}", "Creature", Some((3, 3)), "Reach");

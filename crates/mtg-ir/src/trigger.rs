@@ -255,6 +255,8 @@ pub enum DamageRecipient {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Condition {
     Always,
+    /// The controller has earned the city's blessing, regardless of current count.
+    HasCityBlessing,
     /// At least `at_least` objects match.
     CountAtLeast {
         what: Selector,

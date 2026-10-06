@@ -602,6 +602,11 @@ fn perform(state: &mut GameState, event: &Event) {
                 p.energy = p.energy.saturating_add_signed(*delta);
             }
         }
+        Event::CityBlessingGranted { player } => {
+            if let Some(p) = state.players.get_mut(player) {
+                p.city_blessing = true;
+            }
+        }
         Event::ChoiceMade {
             object,
             color,

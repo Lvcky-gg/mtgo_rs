@@ -182,10 +182,69 @@ pub fn resolve(
     effect: &Effect,
     rc: &mut ResolveCtx,
 ) -> Result<(), ResolveError> {
+    let result = resolve_inner(state, cards, log, effect, rc);
+    if result.is_ok() {
+        // A player can ascend between instructions of one resolving ability,
+        // even if a later instruction removes the tenth permanent again.
+        refresh_city_blessings(state, cards, log, Cause::Resolution(rc.source));
+    }
+    result
+}
+
+fn controlled_permanents(state: &GameState, cards: &dyn PrintedCards, player: PlayerId) -> Vec<ObjectId> {
+    state.battlefield().into_iter()
+        .filter(|id| crate::layers::controller(state, *id) == Some(player))
+        .filter(|id| crate::layers::compute(state, cards, *id).is_some_and(|ch| ch.is_permanent()))
+        .collect()
+}
+
+/// Ascend on a permanent is immediate, including during another ability's resolution.
+pub(crate) fn refresh_city_blessings(
+    state: &mut GameState,
+    cards: &dyn PrintedCards,
+    log: &mut Vec<StampedEvent>,
+    cause: Cause,
+) {
+    if state.battlefield().len() < 10 {
+        return;
+    }
+    let players: Vec<_> = state.players.values().filter(|p| !p.city_blessing).map(|p| p.id).collect();
+    for player in players {
+        let permanents = controlled_permanents(state, cards, player);
+        if permanents.len() >= 10 && permanents.iter().any(|id| {
+            crate::layers::compute(state, cards, *id).is_some_and(|ch| {
+                ch.granted_keywords.contains(&Keyword::Ascend)
+                    || state.objects.get(id).is_some_and(|o| {
+                        cards.face(o.card, o.face).is_some_and(|face| {
+                            face.abilities.iter().any(|a| ch.abilities.contains(&a.id)
+                                && matches!(a.kind, mtg_ir::AbilityKind::Keyword(Keyword::Ascend)))
+                        })
+                    })
+            })
+        }) {
+            apply::apply(state, cause, Event::CityBlessingGranted { player }, log);
+        }
+    }
+}
+
+fn resolve_inner(
+    state: &mut GameState,
+    cards: &dyn PrintedCards,
+    log: &mut Vec<StampedEvent>,
+    effect: &Effect,
+    rc: &mut ResolveCtx,
+) -> Result<(), ResolveError> {
     let cause = Cause::Resolution(rc.source);
 
     match effect {
         Effect::Nothing => Ok(()),
+        Effect::Ascend => {
+            if !state.player(rc.controller).city_blessing
+                && controlled_permanents(state, cards, rc.controller).len() >= 10 {
+                apply::apply(state, cause, Event::CityBlessingGranted { player: rc.controller }, log);
+            }
+            Ok(())
+        }
         Effect::PreventAllCombatDamage => {
             apply::apply(
                 state,

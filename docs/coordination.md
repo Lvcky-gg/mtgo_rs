@@ -1024,3 +1024,17 @@ automatically. Added contact instructions to README/releases docs and generated
 GitHub release notes. Copy email is available when a mail handler cannot open.
 GUI build, Clippy and workflow/shell validation pass; the real native menu
 screenshot confirms the footer is visible (`/tmp/mtgo-bug-report-footer.png`).
+
+Codex added arbitrary-length explicit type/subtype alternatives and X-based
+power, toughness and mana-value bounds in the rules compiler. Measured coverage
+is 15,327 / 34,913 (43.9%), +53 with no previously playable cards lost. Seven
+regression tests cover tutor destinations, dynamic bounds and effect commas.
+Handoff: `docs/sessions/2026-10-06-card-playability.md`.
+
+Codex added split-destination tutors (Cultivate/Kodama’s Reach), independently
+qualified search alternatives (basic lands and/or Gates/Deserts), and multi-sentence
+search/reveal forms. Fixed Omen resolution: shuffle into its owner’s library rather
+than exile as an Adventure; countered/fizzled Omens do not shuffle. Eleven new
+regression tests cover these mechanics and copied Omens. Coverage is now 15,338 /
+34,913 (43.9%), +11 with zero lost cards. Handoff:
+`docs/sessions/2026-10-06-split-tutors-and-omens.md`.

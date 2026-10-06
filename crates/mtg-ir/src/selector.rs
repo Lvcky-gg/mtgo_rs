@@ -91,6 +91,9 @@ pub enum ObjectFilter {
     /// Without it a self-trigger could only be written as "whenever *a* creature enters",
     /// which fires for every creature — the most common trigger shape there is, unsayable.
     IsSelf,
+    /// An object selected by an earlier step of this resolving effect. This
+    /// restricts a later choice to that set, e.g. Cultivate's searched lands.
+    InBinding(Binding),
     HasType(CardType),
     HasSubtype(Subtype),
     HasSupertype(Supertype),

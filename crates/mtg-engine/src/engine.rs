@@ -1053,6 +1053,7 @@ impl Engine {
     }
 
     fn settle(&mut self, cards: &dyn PrintedCards) -> Progress {
+        resolve::refresh_city_blessings(&mut self.state, cards, &mut self.log, Cause::StateBasedAction);
         self.refresh_no_life_gain(cards);
         // 0. Notice what just happened (CR 603.2). Scanning here rather than inside
         //    `apply` keeps event application free of card data, and means a replayed
@@ -4264,8 +4265,19 @@ impl Engine {
         }
 
         let new_object = self.state.new_object_id();
+        // Omen faces share the two-face casting layout with Adventures, but
+        // resolving them shuffles the card into its owner's library.
+        let omen_face = cards.face(obj.card, obj.face).is_some_and(|face| {
+            face.subtypes.iter().any(|subtype| {
+                cards
+                    .subtype_name(*subtype)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("omen"))
+            })
+        });
+        let omen = !fizzled && !is_permanent && omen_face;
         let adventure = !fizzled
             && !is_ability
+            && !omen_face
             && obj.face == 1
             && cards.layout(obj.card) == mtg_ir::Layout::Adventure;
         let exile = adventure || obj.cast_context.as_ref().is_some_and(|c| c.exile_on_leave);
@@ -4299,6 +4311,8 @@ impl Engine {
         } else if exile {
             // Flashback: exiled instead of going anywhere else (CR 702.34a).
             ZoneRef::shared(Zone::Exile)
+        } else if omen {
+            ZoneRef::of(Zone::Library, obj.owner)
         } else {
             ZoneRef::of(Zone::Graveyard, obj.owner)
         };
@@ -4314,6 +4328,15 @@ impl Engine {
             },
             &mut self.log,
         );
+
+        if omen && to.zone == Zone::Library {
+            apply::apply(
+                &mut self.state,
+                Cause::Resolution(top),
+                Event::Shuffled { player: obj.owner },
+                &mut self.log,
+            );
+        }
 
         // "At the beginning of your next upkeep, you may cast this card from exile without
         // paying its mana cost" — a delayed trigger whose "this" is the exiled card.

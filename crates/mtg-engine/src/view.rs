@@ -55,6 +55,8 @@ pub struct PlayerSummary {
     /// Energy counters (CR 122.1c), public like poison.
     #[serde(default)]
     pub energy: u32,
+    #[serde(default)]
+    pub city_blessing: bool,
     pub hand_size: u32,
     pub library_size: u32,
     pub graveyard: Vec<ObjectId>,
@@ -197,6 +199,7 @@ pub fn project_showing(state: &GameState, viewer: PlayerId, shown: &[ObjectId]) 
                     life: p.life,
                     poison: p.poison,
                     energy: p.energy,
+                    city_blessing: p.city_blessing,
                     hand_size: state.objects_in(ZoneRef::of(Zone::Hand, p.id)).len() as u32,
                     library_size: state.objects_in(ZoneRef::of(Zone::Library, p.id)).len() as u32,
                     graveyard: state.objects_in(ZoneRef::of(Zone::Graveyard, p.id)),

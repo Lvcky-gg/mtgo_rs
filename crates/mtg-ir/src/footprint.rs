@@ -225,6 +225,8 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             Footprint::unanalysable()
         }
         Effect::Nothing => Footprint::default(),
+        Effect::Ascend => Footprint::reading(Resource::ObjectClass)
+            .with(Footprint::writing(Resource::TurnState)),
         Effect::GainClassLevel { .. } => objects_write(&Selector::SelfSource, r),
         Effect::BecomeMonarch { .. }
         | Effect::Dig { .. }
@@ -480,6 +482,7 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
         | C::Saddled
         | C::NoSpellsLastTurn
         | C::PlayerCastTwoLastTurn => Footprint::default(),
+        C::HasCityBlessing => Footprint::reading(Resource::TurnState),
         // Only read while the spell's cost is determined (CR 601.2f).
         C::TargetsMatching(_) => Footprint::default(),
         C::CountAtLeast { what, at_least } => {

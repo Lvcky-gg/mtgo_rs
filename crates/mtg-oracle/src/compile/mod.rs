@@ -156,6 +156,11 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
     let mut awaken: Option<(i32, mtg_core::ManaCost, String)> = None;
     while i < lines.len() {
         let line = lines[i];
+        if is_spell && line == "ascend" {
+            spell_lines.push(Effect::Ascend);
+            i += 1;
+            continue;
+        }
         if backup.is_none()
             && let Some(n) = line.strip_prefix("backup ")
             && let Ok(n) = n.parse::<i32>()

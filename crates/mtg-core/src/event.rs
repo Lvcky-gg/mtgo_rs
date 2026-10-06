@@ -378,6 +378,10 @@ pub enum Event {
         player: PlayerId,
         speed: u8,
     },
+    /// The player has earned the city's blessing for the rest of the game.
+    CityBlessingGranted {
+        player: PlayerId,
+    },
     /// An Aura becomes attached to a player (CR 303.4f, "enchant player").
     AttachedToPlayer {
         object: ObjectId,

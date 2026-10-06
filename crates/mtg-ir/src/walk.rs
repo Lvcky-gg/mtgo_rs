@@ -305,6 +305,7 @@ impl Visitor<'_> {
     pub fn effect(&mut self, e: &mut Effect) {
         match e {
             Effect::Nothing
+            | Effect::Ascend
             | Effect::PreventAllCombatDamage
             | Effect::DamageCantBePrevented
             | Effect::Cascade
@@ -596,6 +597,7 @@ impl Visitor<'_> {
             }
             ObjectFilter::Any
             | ObjectFilter::IsSelf
+            | ObjectFilter::InBinding(_)
             | ObjectFilter::HasType(_)
             | ObjectFilter::HasSubtype(_)
             | ObjectFilter::HasSupertype(_)
@@ -685,6 +687,7 @@ impl Visitor<'_> {
             | Condition::CreatureDiedThisTurn
             | Condition::YouAreMonarch
             | Condition::MaxSpeed
+            | Condition::HasCityBlessing
             | Condition::Saddled
             | Condition::NoSpellsLastTurn
             | Condition::PlayerCastTwoLastTurn => {}

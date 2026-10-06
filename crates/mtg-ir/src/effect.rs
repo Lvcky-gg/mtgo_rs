@@ -24,6 +24,8 @@ use crate::{
 pub enum Effect {
     /// Do nothing. Useful as an explicit "else" arm.
     Nothing,
+    /// Ascend on a resolving instant or sorcery: check its controller's permanents.
+    Ascend,
     /// CR 615: prevent all combat damage until the cleanup step of this turn.
     PreventAllCombatDamage,
     /// "Damage can't be prevented this turn."

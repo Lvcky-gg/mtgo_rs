@@ -28,6 +28,7 @@ pub struct Side {
     pub life: i32,
     pub poison: u32,
     pub energy: u32,
+    pub city_blessing: bool,
     /// How many cards are in hand. For an opponent this is all that is known.
     pub hand_size: u32,
     pub library_size: u32,
@@ -49,6 +50,7 @@ impl Default for Side {
             life: 0,
             poison: 0,
             energy: 0,
+            city_blessing: false,
             hand_size: 0,
             library_size: 0,
             hand: Vec::new(),
@@ -83,6 +85,7 @@ pub fn arrange(view: &PlayerView) -> Board {
             life: summary.life,
             poison: summary.poison,
             energy: summary.energy,
+            city_blessing: summary.city_blessing,
             hand_size: summary.hand_size,
             library_size: summary.library_size,
             graveyard: summary.graveyard.clone(),

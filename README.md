@@ -170,7 +170,7 @@ cargo run -p mtg-headless --bin mtg-cards -- coverage 0 --list   # every accepte
 cargo run -p mtg-headless --bin mtg-cards -- parse Instant "Draw two cards."
 ```
 
-Currently **8,598 of 34,898 cards (24.6%)** are playable as printed, up from 1,258. Every shape the
+Currently **15,338 of 34,913 cards (43.9%)** are playable as printed, up from 1,258. Every shape the
 compiler emits has an end-to-end test in `crates/mtg-oracle/tests/compiled/` that takes printed
 text through import and plays it in the engine.
 

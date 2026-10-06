@@ -498,6 +498,7 @@ pub struct PlayerState {
     pub poison: u32,
     /// Energy counters (CR 122.1c).
     pub energy: u32,
+    pub city_blessing: bool,
     /// CR 702.179 — speed, once a player has any; and the turn it last increased.
     pub speed: Option<u8>,
     pub speed_raised_turn: u32,
@@ -520,6 +521,7 @@ impl PlayerState {
             mana: ManaPool::default(),
             poison: 0,
             energy: 0,
+            city_blessing: false,
             speed: None,
             speed_raised_turn: 0,
             lands_played: 0,

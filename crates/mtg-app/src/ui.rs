@@ -747,6 +747,9 @@ impl GuiApp {
             if side.energy > 0 {
                 ui.label(RichText::new(format!("{} energy", side.energy)).color(ACCENT));
             }
+            if side.city_blessing {
+                ui.label(RichText::new("City’s blessing").color(ACCENT));
+            }
             if side.player == view.viewer {
                 ui.label(RichText::new(format!("hand {}", side.hand_size)).weak());
             } else {

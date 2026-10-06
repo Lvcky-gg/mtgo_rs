@@ -585,6 +585,7 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
                 ) && crate::layers::applies(ctx.state, ctx.cards, e, ctx.source)
             }),
         Condition::MaxSpeed => ctx.state.player(ctx.controller).speed == Some(4),
+        Condition::HasCityBlessing => ctx.state.player(ctx.controller).city_blessing,
         Condition::CreatureDiedThisTurn => ctx.state.died_this_turn.iter().any(|id| {
             ctx.state.last_known.get(id).is_some_and(|o| {
                 !o.face_down
@@ -718,6 +719,7 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
     Ok(match filter {
         ObjectFilter::Any => true,
         ObjectFilter::IsSelf => id == ctx.source,
+        ObjectFilter::InBinding(slot) => bound(ctx, *slot)?.contains(&Target::Object(id)),
 
         ObjectFilter::HasType(t) => ctx.characteristics(id)?.has_type(*t),
         ObjectFilter::HasSubtype(s) => ctx

@@ -1147,6 +1147,8 @@ fn eval_filter(
         // The event's object is the trigger's own source, under either of the identities
         // it has in this event (see `pattern_matches`).
         ObjectFilter::IsSelf => selves.contains(&Some(id)),
+        // Resolution-local bindings are unavailable while detecting triggers.
+        ObjectFilter::InBinding(_) => false,
         ObjectFilter::HasType(t) => chars.has_type(*t),
         ObjectFilter::HasSubtype(s) => chars.has_subtype(*s, |s| cards.subtype_name(s)),
         ObjectFilter::HasSupertype(s) => chars.supertypes.contains(s),
