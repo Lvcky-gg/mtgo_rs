@@ -3,6 +3,12 @@
 Every push to `main` starts [the release workflow](../.github/workflows/release.yml).
 It tests the workspace, computes a semantic version, builds native packages, and
 publishes them to [GitHub Releases](https://github.com/Lvcky-gg/mtgo_rs/releases).
+
+Report bugs to [mail@johnodonnell.xyz](mailto:mail@johnodonnell.xyz). The app's
+**Report a bug** link opens your email app with the version, platform and a short
+report template. Include reproduction steps and a screenshot when helpful.
+If the email link cannot open on your system, use **Copy email** beside it.
+
 You can also run **Actions → Release → Run workflow** on `main` to release its
 current commit. To retry an earlier commit, use **Re-run all jobs** on its original
 workflow run. Manual runs on other branches are skipped.

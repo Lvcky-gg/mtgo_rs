@@ -4,6 +4,10 @@ A Magic client in Rust: native app, offline by design, peer-to-peer over
 WebSockets, local database, and a rules engine that resolves triggers without
 interrogating you about every one of them.
 
+Found a bug? Email [mail@johnodonnell.xyz](mailto:mail@johnodonnell.xyz), or use
+**Report a bug** at the bottom of the app. Include your version, operating system,
+steps to reproduce, and what you expected to happen.
+
 Full architecture and the reasoning behind each decision:
 `~/Documents/obsidian/Brain/03_Projects/mtgo-rs/mtgo-rs-architecture.md`
 

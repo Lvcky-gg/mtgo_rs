@@ -256,6 +256,32 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.poll_db_job();
+        egui::Panel::bottom("bug-report-footer")
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak(format!("MTGO RS v{}", env!("CARGO_PKG_VERSION")));
+                    let details = format!(
+                        "Version: {}\nPlatform: {} ({})\n\nSteps to reproduce:\n\nExpected result:\n\nActual result:\n",
+                        env!("CARGO_PKG_VERSION"),
+                        std::env::consts::OS,
+                        std::env::consts::ARCH,
+                    );
+                    let query = url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("subject", "MTGO RS bug report")
+                        .append_pair("body", &details)
+                        .finish()
+                        .replace('+', "%20");
+                    ui.hyperlink_to(
+                        "Report a bug: mail@johnodonnell.xyz",
+                        format!("mailto:mail@johnodonnell.xyz?{query}"),
+                    )
+                    .on_hover_text("Opens your email app with a bug-report template.");
+                    if ui.small_button("Copy email").clicked() {
+                        ui.ctx().copy_text("mail@johnodonnell.xyz".to_owned());
+                    }
+                });
+            });
         if self.screen != Screen::Setup(Mode::Join) {
             self.nearby = None;
             self.nearby_error = None;

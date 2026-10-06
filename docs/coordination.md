@@ -1014,3 +1014,13 @@ pushed to main; rerunning an older SHA retains the broken manifest.
   next turn" — `Effect::SkipNextTurn`, `Event::TurnSkipAdded`, `GameState::skipped_turns`;
   the end-of-turn rotation in `engine.rs` passes over (and uses up) skipped turns.
   Coverage now 15,274. Tests: 64 in `written_out.rs`.
+
+## 2026-10-06 bug-report contact (Codex)
+
+Added a persistent footer on every application screen with release version,
+`Report a bug: mail@johnodonnell.xyz` and Copy email. The mailto link prepares
+version/platform plus reproduction/expected/actual sections. No report is sent
+automatically. Added contact instructions to README/releases docs and generated
+GitHub release notes. Copy email is available when a mail handler cannot open.
+GUI build, Clippy and workflow/shell validation pass; the real native menu
+screenshot confirms the footer is visible (`/tmp/mtgo-bug-report-footer.png`).

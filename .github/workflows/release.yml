@@ -197,5 +197,13 @@ jobs:
             gh release edit "$RELEASE_TAG" --draft=false
           else
             gh release create "$RELEASE_TAG" dist/* --target "$RELEASE_SHA" --title "MTGO RS $RELEASE_TAG" --generate-notes --draft
+            gh release view "$RELEASE_TAG" --json body --jq '.body' > release-notes.md
+            cat >> release-notes.md <<'NOTES'
+
+          ### Report a bug
+
+          Email [mail@johnodonnell.xyz](mailto:mail@johnodonnell.xyz) with your version, operating system, and steps to reproduce. You can also use **Report a bug** at the bottom of the app.
+          NOTES
+            gh release edit "$RELEASE_TAG" --notes-file release-notes.md
             gh release edit "$RELEASE_TAG" --draft=false --latest
           fi
