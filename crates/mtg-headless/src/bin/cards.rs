@@ -272,6 +272,9 @@ fn coverage(args: &[String]) -> Result<(), String> {
     let dump = args.iter().any(|a| a == "--unparsed");
     // `--sole` prints lines that are a card's only obstacle, verbatim.
     let sole_dump = args.iter().any(|a| a == "--sole");
+    // `--blame` prints, for each such line, the first sentence at which it stops
+    // compiling — the part to teach.
+    let blame = args.iter().any(|a| a == "--blame");
     let store = open()?;
     let subtypes = mtg_oracle::compile::SubtypeNames(store.subtypes().map_err(|e| e.to_string())?);
     let cards = store.all_cards().map_err(|e| e.to_string())?;
@@ -324,6 +327,41 @@ fn coverage(args: &[String]) -> Result<(), String> {
                 );
                 for l in compiled.unparsed {
                     println!("SOLE\t{}", l.replace(&row.name, "~"));
+                }
+            }
+        }
+        if mtg_oracle::compile::layout_understood(card) && blockers.len() == 1 && blame {
+            for row in &card.faces {
+                let types = mtg_oracle::typeline::parse(&row.type_line);
+                let compile = |text: &str| {
+                    mtg_oracle::compile::compile(
+                        &mtg_oracle::compile::FaceText {
+                            name: &row.name,
+                            card_types: &types.card_types,
+                            subtypes: &types.subtypes,
+                            oracle_text: Some(text),
+                            mana_cost: row.mana_cost.as_str(),
+                        },
+                        &subtypes,
+                    )
+                };
+                let Some(text) = row.oracle_text.as_deref() else {
+                    continue;
+                };
+                for l in compile(text).unparsed {
+                    if l.contains('\n') {
+                        continue;
+                    }
+                    let sentences: Vec<&str> = l.trim_end_matches('.').split(". ").collect();
+                    let mut culprit = sentences.last().copied().unwrap_or("");
+                    for k in 1..=sentences.len() {
+                        let prefix = format!("{}.", sentences[..k].join(". "));
+                        if !compile(&prefix).understood() {
+                            culprit = sentences[k - 1];
+                            break;
+                        }
+                    }
+                    println!("BLAME\t{}", culprit.replace(&row.name, "~"));
                 }
             }
         }

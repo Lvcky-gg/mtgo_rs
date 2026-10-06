@@ -126,6 +126,7 @@ pub struct App {
     host_internet: bool,
     host_name: String,
     ngrok_token: String,
+    ngrok_domain: String,
     remember_ngrok: bool,
     nearby: Option<mtg_net::discovery::Browser>,
     nearby_error: Option<String>,
@@ -169,6 +170,7 @@ impl App {
             host_internet: false,
             host_name: "Local game".into(),
             ngrok_token: String::new(),
+            ngrok_domain: String::new(),
             remember_ngrok: false,
             nearby: None,
             nearby_error: None,
@@ -199,6 +201,13 @@ impl App {
             app.ngrok_token = token;
             app.host_internet = !app.ngrok_token.trim().is_empty();
         }
+        app.ngrok_domain = app
+            .store
+            .as_ref()
+            .and_then(|store| store.meta("ngrok_domain").ok().flatten())
+            .filter(|domain| !domain.is_empty())
+            .or_else(|| std::env::var("NGROK_DOMAIN").ok())
+            .unwrap_or_default();
         app
     }
 
@@ -950,7 +959,20 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut self.host_port).desired_width(80.0))
                             .on_hover_text("0 chooses a free port automatically.");
                     });
-                    if !self.host_internet {
+                    if self.host_internet {
+                        ui.horizontal(|ui| {
+                            ui.label("Ngrok domain");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.ngrok_domain)
+                                    .desired_width(260.0)
+                                    .hint_text("optional — your assigned ngrok domain"),
+                            );
+                        });
+                        ui.hyperlink_to(
+                            "Find your ngrok domain",
+                            "https://dashboard.ngrok.com/domains",
+                        );
+                    } else {
                         ui.horizontal(|ui| {
                             ui.label("Additional address");
                             ui.add(
@@ -1034,7 +1056,7 @@ impl App {
         }
     }
 
-    /// Check what can be checked here, then start the match on a worker thread.
+    /// Discover signed nearby lobbies without blocking drawing.
     fn nearby_games(&mut self, ui: &mut Ui) {
         ui.add_space(8.0);
         ui.label(RichText::new("Nearby games").strong());
@@ -1082,6 +1104,7 @@ impl App {
         }
     }
 
+    /// Check setup, then start the match on a worker thread.
     fn start(&mut self, mode: Mode) {
         if mode == Mode::Host && self.host_internet && self.ngrok_token.trim().is_empty() {
             self.setup_error = Some("Paste your ngrok authtoken to host online.".into());
@@ -1095,7 +1118,10 @@ impl App {
             } else {
                 ""
             };
-            if let Err(error) = store.set_meta("ngrok_authtoken", saved) {
+            if let Err(error) = store
+                .set_meta("ngrok_authtoken", saved)
+                .and_then(|()| store.set_meta("ngrok_domain", self.ngrok_domain.trim()))
+            {
                 self.setup_error = Some(format!("Could not save hosting settings: {error}"));
                 return;
             }
@@ -1193,6 +1219,7 @@ impl App {
         let address = self.host_address.clone();
         let tunnel_token = self.host_internet.then(|| self.ngrok_token.clone());
         let host_name = self.host_name.clone();
+        let tunnel_domain = Some(self.ngrok_domain.clone());
         self.nearby = None;
         let worker_cancel = Arc::clone(&cancel);
         let ctx = self.ctx.clone();
@@ -1222,6 +1249,7 @@ impl App {
                             port,
                             public_address: Some(address),
                             tunnel_token,
+                            tunnel_domain,
                             name: host_name,
                             identity: &identity,
                             source: &source,

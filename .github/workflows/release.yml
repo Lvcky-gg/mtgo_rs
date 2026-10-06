@@ -1,0 +1,198 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Queue pushes instead of replacing the pending run. Version allocation and
+# publication are serialized together so two commits cannot claim the same tag.
+concurrency:
+  group: main-releases
+  cancel-in-progress: false
+  queue: max
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Compute semantic version
+        id: version
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_BEFORE: ${{ github.event.before }}
+        run: python3 scripts/release.py version --sha "$RELEASE_SHA" --before "$RELEASE_BEFORE"
+
+  test:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake ninja-build pkg-config
+      - name: Validate release automation
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Stamp version
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: python3 scripts/release.py stamp "$RELEASE_VERSION"
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --all-features --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  desktop:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows-x64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_PLATFORM: ${{ matrix.platform }}
+      RELEASE_TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Stamp version
+        run: python3 scripts/release.py stamp "$RELEASE_VERSION"
+      - name: Build native application
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build -p mtg-app --bin mtg-gui --release --locked --target "$RELEASE_TARGET"
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/$RELEASE_TARGET/release/mtg-gui.exe" "dist/mtgo-rs-v$RELEASE_VERSION-windows-x64.exe"
+      - name: Package macOS app and disk image
+        if: runner.os == 'macOS'
+        run: bash scripts/package-macos.sh "$RELEASE_VERSION" "$RELEASE_PLATFORM" "$RELEASE_TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+          if-no-files-found: error
+
+  flatpak:
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Flatpak SDK and builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder appstream desktop-file-utils
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
+      - name: Stamp version and prepare offline sources
+        run: |
+          python3 scripts/release.py stamp "$RELEASE_VERSION"
+          bash scripts/prepare-flatpak.sh
+          desktop-file-validate packaging/flatpak/io.github.lvcky_gg.MtgoRs.desktop
+          appstreamcli validate --no-net packaging/flatpak/io.github.lvcky_gg.MtgoRs.metainfo.xml
+      - name: Build in the Flatpak SDK
+        run: flatpak-builder --user --force-clean --repo=flatpak-repo build-dir packaging/flatpak/io.github.lvcky_gg.MtgoRs.json
+      - name: Bundle installable Flatpak
+        run: flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo flatpak-repo "dist/mtgo-rs-v$RELEASE_VERSION-linux-x64.flatpak" io.github.lvcky_gg.MtgoRs stable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-flatpak
+          path: dist/*.flatpak
+          if-no-files-found: error
+
+  publish:
+    needs: [version, test, desktop, flatpak]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify assets and add checksums
+        run: |
+          test -f "dist/mtgo-rs-v$RELEASE_VERSION-windows-x64.exe"
+          test -f "dist/mtgo-rs-v$RELEASE_VERSION-macos-arm64.dmg"
+          test -f "dist/mtgo-rs-v$RELEASE_VERSION-macos-x64.dmg"
+          test -f "dist/mtgo-rs-v$RELEASE_VERSION-linux-x64.flatpak"
+          cd dist
+          sha256sum -- *.exe *.dmg *.flatpak > SHA256SUMS.txt
+      - name: Create or update the release for this commit
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            gh release create "$RELEASE_TAG" dist/* --target "$RELEASE_SHA" --title "MTGO RS $RELEASE_TAG" --generate-notes --draft
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi

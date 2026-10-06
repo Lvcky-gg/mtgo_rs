@@ -397,6 +397,7 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::EnterAttacking { .. }
         | Effect::Cascade
         | Effect::Proliferate
+        | Effect::Reveal { .. }
         | Effect::RevealHandChoose { .. }
         | Effect::Madness { .. } => Footprint::unanalysable(),
         Effect::CreateTokenCopy {
@@ -513,7 +514,12 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         | Value::BasicLandTypesAmong(s)
         | Value::SpellsCastThisTurn(s)
         | Value::CardsDrawnThisTurn(s) => selector_read(s, r),
-        Value::Power(s) | Value::Toughness(s) | Value::LeastToughness(s) => objects_read(s, r),
+        Value::Power(s)
+        | Value::Toughness(s)
+        | Value::LeastToughness(s)
+        | Value::GreatestPower(s)
+        | Value::GreatestToughness(s)
+        | Value::GreatestManaValue(s) => objects_read(s, r),
         Value::LifeTotal(s) => players_read(s, r, Resource::Life),
         Value::Counters(s, kind) => {
             let mut f = objects_read(s, r);

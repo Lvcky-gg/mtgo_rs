@@ -1211,6 +1211,10 @@ fn eval_filter(
         ObjectFilter::PowerAtMost(v) => chars.power.unwrap_or(0) <= static_value(v),
         ObjectFilter::ManaValueAtMost(v) => chars.mana_cost.mana_value() as i32 <= static_value(v),
         ObjectFilter::HasCounter(kind) => obj.counters.get(kind).copied().unwrap_or(0) > 0,
+        ObjectFilter::HasAnyCounter => obj.counters.values().any(|n| *n > 0),
+        ObjectFilter::DealtDamageThisTurn => {
+            state.damaged_by_this_turn.iter().any(|(_, o)| *o == id)
+        }
         ObjectFilter::EnteredThisTurn => obj.summoning_sick,
         // Chosen as the trigger's source entered.
         ObjectFilter::HasChosenSubtype => selves

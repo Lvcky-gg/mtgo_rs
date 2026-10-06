@@ -34,14 +34,9 @@
 //! - Turn 3: Play Counterspell (highest mana value now available).
 
 use mtg_core::ObjectId;
-use mtg_engine::{
-    PlayerView,
-    actions::Action,
-    choice::Answer,
-};
+use mtg_engine::{PlayerView, actions::Action, choice::Answer};
 
 use super::Bot;
-
 
 impl Bot {
     /// Determine the bot's priority action on its turn.
@@ -98,7 +93,10 @@ impl Bot {
             return Answer::Action(action.clone());
         }
         let my_main = view.active_player == view.viewer
-            && matches!(view.step, mtg_core::Step::PrecombatMain | mtg_core::Step::PostcombatMain)
+            && matches!(
+                view.step,
+                mtg_core::Step::PrecombatMain | mtg_core::Step::PostcombatMain
+            )
             && view.stack.is_empty();
         if !my_main {
             return Answer::Pass;
@@ -124,7 +122,11 @@ impl Bot {
                 Some((info.delta, *source, *ability, a))
             })
             .max_by_key(|(delta, source, ability, _)| {
-                (*delta, std::cmp::Reverse(*source), std::cmp::Reverse(*ability))
+                (
+                    *delta,
+                    std::cmp::Reverse(*source),
+                    std::cmp::Reverse(*ability),
+                )
             });
         if let Some((_, _, _, action)) = activation {
             return Answer::Action(action.clone());
@@ -159,4 +161,3 @@ impl Bot {
 fn action_object(action: &Action) -> Option<ObjectId> {
     action.play().map(|(object, _, _)| object)
 }
-

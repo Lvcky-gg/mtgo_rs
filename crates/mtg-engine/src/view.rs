@@ -29,12 +29,22 @@ pub struct PlayerView {
     pub visible: BTreeMap<ObjectId, ObjectView>,
     /// Stack from bottom to top.
     pub stack: Vec<ObjectId>,
+    /// Public reveal history: identities only, never library positions or hidden object ids.
+    #[serde(default)]
+    pub revealed_cards: Vec<RevealedCard>,
     /// Public global combat-damage prevention until cleanup.
     #[serde(default)]
     pub prevent_combat_damage: bool,
     /// Public recipients shielded from all damage until cleanup.
     #[serde(default)]
     pub prevent_damage_to: Vec<Target>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RevealedCard {
+    pub owner: PlayerId,
+    pub card: CardId,
+    pub face: u8,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -204,6 +214,7 @@ pub fn project_showing(state: &GameState, viewer: PlayerId, shown: &[ObjectId]) 
         .collect();
 
     PlayerView {
+        revealed_cards: state.revealed_cards.clone(),
         prevent_combat_damage: state.prevent_combat_damage,
         prevent_damage_to: state.prevent_damage_to.clone(),
         viewer,

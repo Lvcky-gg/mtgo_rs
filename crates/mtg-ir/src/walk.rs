@@ -258,6 +258,7 @@ impl Visitor<'_> {
                     self.value(delta);
                 }
                 Restriction::CantAttack
+                | Restriction::AttackDespiteDefender
                 | Restriction::CantBlock
                 | Restriction::MustAttackIfAble
                 | Restriction::Goaded
@@ -295,6 +296,7 @@ impl Visitor<'_> {
             | Modification::AddColors(_)
             | Modification::SetColors(_)
             | Modification::LoseAllAbilities
+            | Modification::LoseKeyword(_)
             | Modification::SwitchPowerToughness => {}
         }
     }
@@ -402,6 +404,7 @@ impl Visitor<'_> {
                     self.selector(s);
                 }
             }
+            Effect::Reveal { what } => self.selector(what),
             Effect::Shuffle { who } => self.selector(who),
             Effect::LookAndSort { who, count, .. } => {
                 self.selector(who);
@@ -604,6 +607,8 @@ impl Visitor<'_> {
             | ObjectFilter::DealtDamageBySelfThisTurn
             | ObjectFilter::HasKeyword(_)
             | ObjectFilter::HasCounter(_)
+            | ObjectFilter::HasAnyCounter
+            | ObjectFilter::DealtDamageThisTurn
             | ObjectFilter::EnteredThisTurn
             | ObjectFilter::Token
             | ObjectFilter::AttachedToSource
@@ -632,6 +637,9 @@ impl Visitor<'_> {
             | Value::Power(s)
             | Value::Toughness(s)
             | Value::LeastToughness(s)
+            | Value::GreatestPower(s)
+            | Value::GreatestToughness(s)
+            | Value::GreatestManaValue(s)
             | Value::ManaValue(s)
             | Value::CardTypesAmong(s)
             | Value::PartySize(s)

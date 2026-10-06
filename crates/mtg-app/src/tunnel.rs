@@ -47,7 +47,12 @@ async fn during_startup<T>(
 }
 
 impl Tunnel {
-    pub fn start(port: u16, token: &str, cancel: &AtomicBool) -> Result<Self, String> {
+    pub fn start(
+        port: u16,
+        token: &str,
+        domain: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<Self, String> {
         if token.trim().is_empty() {
             return Err("Paste your ngrok authtoken in hosting setup first.".into());
         }
@@ -59,14 +64,23 @@ impl Tunnel {
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
+        let domain = domain
+            .filter(|domain| !domain.trim().is_empty())
+            .map(normalize_domain)
+            .transpose()?;
         let startup = async {
             let session = Session::builder().authtoken(token.trim()).connect().await
                 .map_err(|_| "Could not connect to ngrok. Check your token, connection, and ngrok account status.".to_owned())?;
             let upstream =
                 url::Url::parse(&format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?;
-            let forwarder = session.http_endpoint().scheme(Scheme::HTTPS)
+            let mut endpoint = session.http_endpoint();
+            endpoint.scheme(Scheme::HTTPS);
+            if let Some(domain) = &domain {
+                endpoint.domain(domain);
+            }
+            let forwarder = endpoint
                 .listen_and_forward(upstream).await
-                .map_err(|_| "Ngrok could not open a tunnel. Check your account limits and close any other tunnel using this account.".to_owned())?;
+                .map_err(|_| "Ngrok could not open a tunnel. Check your account limits and close any other tunnel using this account. If your account requires a domain, enter its assigned domain under Advanced connection settings.".to_owned())?;
             let url = websocket_url(forwarder.url())?;
             Ok((session, forwarder, url))
         };
@@ -87,6 +101,31 @@ impl Tunnel {
     pub fn is_running(&mut self) -> bool {
         !self.forwarder.join().is_finished()
     }
+}
+
+/// Accept either the dashboard hostname or its HTTPS URL, without routing or credentials.
+fn normalize_domain(input: &str) -> Result<String, String> {
+    let input = input.trim();
+    let address = if input.contains("://") {
+        input.to_owned()
+    } else {
+        format!("https://{input}")
+    };
+    let url = url::Url::parse(&address)
+        .map_err(|_| "Enter your ngrok domain from the dashboard.".to_owned())?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("Enter only your ngrok domain or its HTTPS address.".into());
+    }
+    url.host_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "The ngrok domain is missing.".into())
 }
 
 fn websocket_url(public_url: &str) -> Result<String, String> {
@@ -137,6 +176,21 @@ mod tests {
             "garbage",
         ] {
             assert!(websocket_url(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn dashboard_domains_accept_https_and_reject_credentials_or_routing() {
+        for input in ["my-game.ngrok-free.app", "https://my-game.ngrok-free.app/"] {
+            assert_eq!(normalize_domain(input).unwrap(), "my-game.ngrok-free.app");
+        }
+        for input in [
+            "https://secret@game.example",
+            "http://game.example",
+            "https://game.example/path",
+            "game.example?q=1",
+        ] {
+            assert!(normalize_domain(input).is_err());
         }
     }
 

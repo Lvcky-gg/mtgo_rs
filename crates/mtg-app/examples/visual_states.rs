@@ -198,6 +198,34 @@ fn fixtures() -> Vec<Fixture> {
         }),
         default: Some(Answer::Pass),
     });
+    let candidates = state.objects_in(ZoneRef::of(Zone::Library, me));
+    state
+        .objects
+        .get_mut(candidates.last().unwrap())
+        .unwrap()
+        .card = COLOSSUS;
+    result.push(Fixture {
+        before: None,
+        name: "11-tutor-library-selection",
+        view: mtg_engine::view::project_showing(&state, me, &candidates),
+        kind: Some(ChoiceKind::ChooseObjects {
+            from: candidates,
+            min: 1,
+            max: 1,
+        }),
+        default: None,
+    });
+    let before = mtg_engine::view::project(&state, me);
+    state.place(COLOSSUS, me, ZoneRef::of(Zone::Hand, me));
+    result.push(Fixture {
+        before: Some(before),
+        name: "12-tutored-card-in-hand",
+        view: mtg_engine::view::project(&state, me),
+        kind: Some(ChoiceKind::Priority {
+            legal: Default::default(),
+        }),
+        default: Some(Answer::Pass),
+    });
     result
 }
 
@@ -328,16 +356,25 @@ impl eframe::App for CaptureApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         if self.scrolled && !self.scroll_sent {
             let rect = ctx.content_rect();
+            let pointer_y = if self.index == 10 {
+                rect.bottom() - 270.0
+            } else {
+                rect.bottom() - 60.0
+            };
             input.events.extend([
-                egui::Event::PointerMoved(egui::pos2(rect.center().x, rect.bottom() - 60.0)),
+                egui::Event::PointerMoved(egui::pos2(rect.left() + 300.0, pointer_y)),
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
-                    delta: egui::vec2(-2000.0, -2000.0),
+                    delta: egui::vec2(-20000.0, -20000.0),
                     phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::NONE,
                 },
             ]);
             self.scroll_sent = true;
+        } else if self.scroll_sent && self.index == 10 {
+            input
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(5.0, 5.0)));
         }
     }
 
@@ -367,7 +404,7 @@ impl eframe::App for CaptureApp {
             )
             .unwrap();
             println!("{}", path.display());
-            if !self.scrolled && self.index <= 5 {
+            if !self.scrolled && (self.index <= 5 || self.index >= 10) {
                 self.scrolled = true;
                 self.requested = false;
                 self.since = Instant::now();

@@ -843,3 +843,101 @@ Claude (2026-10-06, card coverage, round 3): 14,750 → 14,918 / 34,913 (42.7%).
   with the other per-turn sets.
 - Ability words added: corrupted, disappear, infusion, opus, renew.
 - Tests: `tests/compiled/written_out.rs` (37).
+
+Claude (2026-10-06, card coverage, round 4): 14,918 → 14,972 / 34,913 (42.9%).
+- Statics: "As long as enchanted creature / equipped creature / enchanted permanent is …,
+  it …" ("it" is the host); condition "enchanted permanent is a creature".
+- `Value::CardsDrawnThisTurn` (from `state.draws_this_turn`): "you've drawn two or more
+  cards this turn", "for each card you've drawn this turn".
+- `Value::{GreatestPower, GreatestToughness, GreatestManaValue}` and `value_phrase` for "the
+  greatest power/toughness/mana value among …" and "the total power/toughness of …".
+- Self cost: "This spell costs {X} less to cast, where X is <value>".
+- Tests: `tests/compiled/written_out.rs` (41). Note: `mtg-app` currently fails to build on
+  `play_with_cancel` in `net.rs` — another session's work in progress, not these changes.
+
+Codex (2026-10-06, automatic hosting): implemented nearby mDNS lobby discovery
+and embedded ngrok HTTPS tunnels with one-time host token setup, optional assigned
+domain, signed tunnel invites, WSS certificate validation, and user instructions
+in `docs/hosting.md` linked from the README. Added cancellation of blocked peer
+reads so leaving closes the tunnel promptly. The temporary `play_with_cancel`
+build failure noted above is resolved. App/net tests: 333 passed, 6 ignored;
+real multicast discovery/removal smoke test passed separately. Clippy, formatting,
+and GUI build pass. Public ngrok E2E is an explicit ignored test requiring
+`NGROK_AUTHTOKEN` (optional `NGROK_DOMAIN`), not run without credentials.
+
+Codex (2026-10-06, tutor resolution): Gamble's whole spell effect was unparsed
+because search expected an immediate shuffle after its hand transfer. Search now
+preserves intermediate clauses, including random discard; shuffle is a standalone
+clause. Also fixed mandatory unrestricted searches, Worldly Tutor's printed "put
+the card on top", exact multi-card counts, and "shuffle your library" wording.
+Changed `compile/clauses.rs`; six new regressions in `tests/compiled/search.rs`.
+Ten search tests and 1,003 engine/oracle/policy tests pass (38 ignored), Clippy
+passes. See `docs/sessions/2026-10-06-tutor-resolution.md`. No engine or policy
+edits were needed; their existing random-discard implementation works once the
+printed effect compiles.
+
+Claude (2026-10-06, card coverage, round 5): 14,972 → 15,065 / 34,913 (43.2%; includes
+another session's Gamble work landing meanwhile).
+- `ObjectFilter::HasAnyCounter` ("with a counter on it", "counters on them", "no counters
+  on it") and `ObjectFilter::DealtDamageThisTurn` ("creature that was dealt damage this
+  turn", from `state.damaged_by_this_turn`); "with +1/+1 counters on them".
+- `clauses::grants`: "loses all abilities"; "gains K and gets +N/+N"; one-shot effects can
+  grant quoted activated/triggered abilities (`quoted_grant`, using `compile::grantable`,
+  so "when this dies" grants stay refused); quotes containing "~" are refused.
+- Tests: `tests/compiled/written_out.rs` (45).
+
+## 2026-10-06 tutor audit (Codex)
+
+Audited 1,192 distinct library-search faces: 442 compile completely, 750 remain
+unsupported. Fixed skipped tutor reveals, public reveal journal projection and
+undo boundary, plus duplicate object selection sanitization. Added search edge
+case and rendered picker tests; native tutor fixtures and reusable compiler audit
+example. See `docs/sessions/2026-10-06-tutor-audit.md` for scope and checks.
+
+Claude (2026-10-06, card coverage, round 6): 15,065 → 15,124 / 34,913 (43.3%).
+- `Restriction::AttackDespiteDefender` ("can attack (this turn) as though it/they didn't
+  have defender"; checked in `combat` next to the defender test) and "can block an
+  additional creature this turn" (`BlockAdditional(Some(1))`, one-shot).
+- `Modification::LoseKeyword(k)` (layer 6): removes granted k and printed keyword abilities
+  of kind k. `layers::apply_one` now takes the object. Grammar: "loses flying", "lose
+  hexproof and indestructible", in one-shot effects and statics.
+- Tests: `tests/compiled/written_out.rs` (48).
+
+Claude (2026-10-06, card coverage, round 7): 15,124 → 15,156 / 34,913 (43.4%).
+- Nouns: plural three-item "and" lists ("artifacts, creatures, and lands").
+- One-shot "<object> can't be regenerated this turn".
+- After "return … to the battlefield", "it" is the new permanent (`Binding::It`, which
+  `MoveZone` already records).
+- A one-shot grant with no duration ("It gains haste.", "gets +2/+2 and gains
+  horsemanship") is `Duration::Permanent` (CR 611.2a) — unless the sentence began "Until end
+  of turn, …": `Cx::until_eot` carries that through "… and <subject> gets …", reset per
+  sentence and per `clauses::effect` call.
+- Tests: `tests/compiled/written_out.rs` (50).
+
+## 2026-10-06 release pipeline (Codex)
+
+Added `.github/workflows/release.yml`: each main push computes a conventional
+commit semantic version (patch fallback), runs workspace checks, builds Windows
+x64 and macOS Intel/Apple Silicon, builds offline in the Flatpak SDK, and publishes
+all four assets plus checksums. Whole-workflow queued concurrency prevents version
+collisions; retries reuse commit tags. No version-only commits are pushed.
+
+Added `scripts/release.py`, macOS and Flatpak packaging helpers, Flatpak manifest,
+AppStream/desktop/icon metadata, and `docs/releases.md`. Windows builds use static
+CRT and the GUI subsystem. Apple bundles are ad-hoc signed; developer signing and
+notarization need credentials. Local validation: five helper tests, stamped Cargo
+metadata with locked dependencies, GUI cargo check, shell syntax, desktop and
+AppStream validation, and actionlint. actionlint 1.7.12 lacks GitHub's documented
+`concurrency.queue` key; only that known schema error was exempted. Native hosted
+platform builds and an actual GitHub release await the first push with these files.
+
+Claude (2026-10-06, card coverage, round 8): 15,156 → 15,175 / 34,913 (43.5%).
+- **Tool:** `mtg-cards coverage 0 --blame` prints, for each line that is a card's only
+  obstacle, the first sentence at which it stops compiling (`BLAME\t…`). Group them with
+  `grep ^BLAME | cut -f2 | sort | uniq -c | sort -rn` to find what to teach next.
+- "Choose target <noun> [and target <noun>]." — announces targets, does nothing itself
+  (`clauses::choose_target`).
+- "… loses N life. You gain life equal to the life lost this way." (amount × players).
+- Reveal-and-choose: "a noncreature, nonland card", "a card from it with mana value N or
+  greater", ", you choose …, then that player discards that card".
+- Tests: `tests/compiled/written_out.rs` (53).

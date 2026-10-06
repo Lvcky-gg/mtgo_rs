@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.lvcky_gg.MtgoRs</id>
+  <name>MTGO RS</name>
+  <summary>A native card game client for offline and peer-to-peer play</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <developer id="io.github.lvcky_gg">
+    <name>Lvcky-gg and contributors</name>
+  </developer>
+  <description>
+    <p>Build decks, play against a bot, and host games with friends. The client
+    stores your decks locally and downloads card data on request.</p>
+    <p>Nearby games use automatic discovery. Internet hosting uses an embedded
+    tunnel and requires an ngrok account for the host.</p>
+  </description>
+  <launchable type="desktop-id">io.github.lvcky_gg.MtgoRs.desktop</launchable>
+  <url type="homepage">https://github.com/Lvcky-gg/mtgo_rs</url>
+  <url type="bugtracker">https://github.com/Lvcky-gg/mtgo_rs/issues</url>
+  <url type="vcs-browser">https://github.com/Lvcky-gg/mtgo_rs</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-10-06" />
+  </releases>
+</component>

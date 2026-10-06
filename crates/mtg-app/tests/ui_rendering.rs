@@ -21,6 +21,7 @@ fn empty_view(player: PlayerId) -> PlayerView {
         players: Default::default(),
         visible: Default::default(),
         stack: Default::default(),
+        revealed_cards: Vec::new(),
         prevent_combat_damage: false,
         prevent_damage_to: Default::default(),
     }

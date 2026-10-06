@@ -123,6 +123,12 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
             let (f, r) = with_clause(r)?;
             parts.push(f);
             rest = r;
+        } else if let Some(r) = rest
+            .strip_prefix(" that was dealt damage this turn")
+            .or_else(|| rest.strip_prefix(" dealt damage this turn"))
+        {
+            parts.push(ObjectFilter::DealtDamageThisTurn);
+            rest = r;
         } else if let Some(r) = rest.strip_prefix(" dealt damage by ~ this turn") {
             parts.push(ObjectFilter::DealtDamageBySelfThisTurn);
             rest = r;
@@ -251,7 +257,10 @@ fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> 
     }
     if let Some(r) = rest.strip_prefix(", ")
         && let Some((second, _, _, r2)) = one_head(r, cx)
-        && let Some(r3) = r2.strip_prefix(", or ")
+        // "artifact, creature, or land"; "artifacts, creatures, and lands" (plural only).
+        && let Some(r3) = r2
+            .strip_prefix(", or ")
+            .or_else(|| r2.strip_prefix(", and ").filter(|_| plural))
         && let Some((third, zone3, plural3, rest3)) = one_head(r3, cx)
     {
         return Some((
@@ -437,6 +446,26 @@ pub fn with_clause(s: &str) -> Option<(ObjectFilter, &str)> {
         && let Some(r) = r.strip_prefix("s on it")
     {
         return Some((ObjectFilter::HasCounter(kind), r));
+    }
+    // "creatures you control with +1/+1 counters on them"
+    if let Some((kind, r)) = words::counter(s)
+        && let Some(r) = r.strip_prefix("s on them")
+    {
+        return Some((ObjectFilter::HasCounter(kind), r));
+    }
+    // "with a counter on it", "with counters on them": any kind.
+    for (phrase, f) in [
+        ("a counter on it", ObjectFilter::HasAnyCounter),
+        ("one or more counters on it", ObjectFilter::HasAnyCounter),
+        ("counters on them", ObjectFilter::HasAnyCounter),
+        (
+            "no counters on it",
+            ObjectFilter::Not(Box::new(ObjectFilter::HasAnyCounter)),
+        ),
+    ] {
+        if let Some(r) = s.strip_prefix(phrase) {
+            return Some((f, r));
+        }
     }
     for (prefix, kind) in [("power ", 0u8), ("toughness ", 1), ("mana value ", 2)] {
         let Some(r) = s.strip_prefix(prefix) else {

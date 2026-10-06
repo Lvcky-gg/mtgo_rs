@@ -6036,7 +6036,8 @@ fn trigger_label(cards: &dyn PrintedCards, t: &PendingTrigger) -> Box<str> {
 /// either of which makes an undo across it unfair.
 fn reveals_information(event: &Event, who: PlayerId) -> bool {
     match event {
-        Event::Shuffled { .. }
+        Event::Revealed { .. }
+        | Event::Shuffled { .. }
         | Event::Drew { .. }
         | Event::MillLike { .. }
         | Event::AttemptedDrawFromEmptyLibrary { .. }

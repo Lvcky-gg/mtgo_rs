@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MTGO RS
+Comment=Play a native card game offline or with friends
+Exec=mtg-gui
+Icon=io.github.lvcky_gg.MtgoRs
+Terminal=false
+Categories=Game;CardGame;
+Keywords=cards;deck;multiplayer;

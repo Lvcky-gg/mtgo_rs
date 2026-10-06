@@ -14,8 +14,9 @@ messages. Existing invite expiry and single-use behavior are preserved.
 
 Tunnel startup is cancellable and bounded to 30 seconds. The owner retains the
 SDK session and forwarding runtime for the whole hosted match, then closes both
-on completion, cancellation, or error. Provider failures are summarized without
-logging credentials. Optional remembered tokens use the game's local database
+on completion, cancellation, or error. A cancellation watcher shuts down the
+active socket so leaving also interrupts a blocked peer read. Provider failures
+are summarized without logging credentials. Optional remembered tokens use the game's local database
 and are not encrypted at rest; remembering is off by default.
 
 The ngrok SDK currently requires aws-lc compiled in even with its ring feature,
@@ -32,3 +33,31 @@ ngrok validation requires an account token and is an explicit ignored test.
 
 A separate self-hosted relay is deferred in favor of the requested embedded
 tunnel. LAN and internet hosting use the same match protocol.
+
+Checks:
+
+```sh
+cargo test -p mtg-net --features transport -p mtg-app --offline --quiet
+cargo test -p mtg-net --features transport a_lobby_is_discovered_and_removed_over_mdns --offline -- --ignored
+cargo clippy -p mtg-app -p mtg-net --features mtg-net/transport --all-targets --offline -- -D warnings
+cargo fmt --check -p mtg-app -p mtg-net
+cargo build -p mtg-app --bin mtg-gui --offline
+```
+
+The real multicast test found and removed a lobby. Inspected the native online
+hosting form at 847 pixels wide: token masking, setup links, remembering/forgetting,
+advanced settings, and the Host control are visible. No live ngrok endpoint was
+opened because an account token was not supplied for validation. Developers can
+set `NGROK_AUTHTOKEN` (and optionally `NGROK_DOMAIN`) and explicitly run:
+
+```sh
+cargo test -p mtg-app a_live_ngrok_tunnel_plays_a_complete_match -- --ignored
+```
+
+That test advertises only the public tunnel, preventing LAN fallback from hiding
+an internet-connection failure.
+
+Final results: 333 tests passed in the app/net suite (6 ignored), plus the explicit
+multicast test passed. Clippy with warnings denied, formatting, and the GUI build
+passed. The final suite includes assigned-domain validation and cancellation
+while an authenticated peer is silent.

@@ -37,6 +37,17 @@ pub fn changes(before: &PlayerView, after: &PlayerView, texts: &CardTexts) -> Ve
             .get(object)
             .map_or_else(|| "(hidden)".into(), name),
     };
+    for revealed in after
+        .revealed_cards
+        .iter()
+        .skip(before.revealed_cards.len())
+    {
+        out.push(format!(
+            "{} reveals {}",
+            who(revealed.owner),
+            texts.face_name(Some(revealed.card), revealed.face)
+        ));
+    }
     for target in &after.prevent_damage_to {
         if !before.prevent_damage_to.contains(target) {
             out.push(format!(
@@ -608,6 +619,7 @@ mod tests {
             .map(|o| o.id)
             .collect();
         PlayerView {
+            revealed_cards: Vec::new(),
             prevent_combat_damage: false,
             prevent_damage_to: Vec::new(),
             viewer: ME,
@@ -619,6 +631,23 @@ mod tests {
             visible: objects.into_iter().map(|o| (o.id, o)).collect(),
             stack,
         }
+    }
+
+    #[test]
+    fn public_reveals_are_announced_once_without_exposing_a_hidden_zone() {
+        let before = view(vec![], [20, 20]);
+        let mut after = before.clone();
+        after.revealed_cards.push(mtg_engine::view::RevealedCard {
+            owner: THEM,
+            card: mtg_core::CardId(1),
+            face: 0,
+        });
+        assert_eq!(
+            changes(&before, &after, &texts()),
+            vec!["Opponent reveals Stone Bear"]
+        );
+        assert!(changes(&after, &after, &texts()).is_empty());
+        assert!(after.visible.is_empty());
     }
 
     #[test]

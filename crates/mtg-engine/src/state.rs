@@ -95,6 +95,8 @@ pub struct GameState {
     /// top card is revealed to everyone — refreshed with `no_life_gain`, read by the view.
     pub sees_top: Vec<PlayerId>,
     pub top_revealed: Vec<PlayerId>,
+    /// Announced identities retained for projected views, without hidden-zone positions.
+    pub revealed_cards: Vec<crate::view::RevealedCard>,
     pub monarch_emblem: Option<ObjectId>,
     /// Prevention shields until cleanup, oldest first (see [`crate::prevention`]).
     pub damage_shields: Vec<mtg_core::DamageShield>,
@@ -589,6 +591,7 @@ impl GameState {
             priority: None,
             consecutive_passes: 0,
             continuous: Vec::new(),
+            revealed_cards: Vec::new(),
             prevent_combat_damage: false,
             prevent_damage_to: Vec::new(),
             upkeeps: BTreeMap::new(),

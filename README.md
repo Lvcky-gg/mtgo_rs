@@ -9,6 +9,11 @@ Full architecture and the reasoning behind each decision:
 
 ## Status
 
+Pushes to `main` automatically create semantically versioned Windows, macOS
+(Apple Silicon and Intel), and Linux Flatpak releases. See
+[release downloads](https://github.com/Lvcky-gg/mtgo_rs/releases) and
+[release setup and installation](docs/releases.md).
+
 The engine plays a turn. Turn structure, priority passing, state-based actions, the
 layer system, the evaluator and trigger placement all work and are tested. What is
 missing is listed honestly below.

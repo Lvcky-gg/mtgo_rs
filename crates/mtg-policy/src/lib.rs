@@ -222,6 +222,7 @@ mod tests {
 
     fn a_view() -> PlayerView {
         PlayerView {
+            revealed_cards: Vec::new(),
             prevent_combat_damage: false,
             prevent_damage_to: Vec::new(),
             viewer: PlayerId(0),

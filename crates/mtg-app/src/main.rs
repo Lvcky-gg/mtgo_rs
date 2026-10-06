@@ -1,6 +1,8 @@
 //! `mtg-gui` — the application window: menu, decks, and matches against the bot or over the
 //! network. See [`mtg_app::app`].
 
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 fn main() -> eframe::Result {
     eframe::run_native(
         "mtgo_rs",

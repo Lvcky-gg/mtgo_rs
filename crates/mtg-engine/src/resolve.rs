@@ -611,6 +611,13 @@ pub fn resolve(
             Ok(())
         }
 
+        Effect::Reveal { what } => {
+            for object in objects_asking(state, cards, rc, what)? {
+                apply::apply(state, cause, Event::Revealed { object }, log);
+            }
+            Ok(())
+        }
+
         Effect::MoveZone {
             what,
             to,
@@ -2397,11 +2404,15 @@ fn ask_objects(
             // Only offered objects count, and never more than asked for. An answer
             // that under-delivers on a mandatory choice is topped up in order, so a
             // malformed answer cannot skip a mandatory discard.
-            let mut out: Vec<ObjectId> = picked
-                .into_iter()
-                .filter(|o| from.contains(o))
-                .take(max as usize)
-                .collect();
+            let mut out = Vec::new();
+            for object in picked {
+                if out.len() >= max as usize {
+                    break;
+                }
+                if from.contains(&object) && !out.contains(&object) {
+                    out.push(object);
+                }
+            }
             for candidate in &from {
                 if out.len() as u32 >= min {
                     break;
@@ -2585,7 +2596,7 @@ pub(crate) fn layer_of(m: &mtg_ir::effect::Modification) -> u8 {
         | M::RemoveSupertype(_) => layer::TYPE,
         M::NoManaCost => layer::COPY,
         M::AddColors(_) | M::SetColors(_) => layer::COLOR,
-        M::GrantAbility(_) | M::LoseAllAbilities => layer::ABILITY,
+        M::GrantAbility(_) | M::LoseAllAbilities | M::LoseKeyword(_) => layer::ABILITY,
         M::SetBasePowerToughness { .. } | M::SetBasePower(_) => layer::PT_SET,
         M::ModifyPowerToughness { .. } => layer::PT_MODIFY,
         M::SwitchPowerToughness => layer::PT_SWITCH,

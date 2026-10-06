@@ -41,6 +41,10 @@ pub enum Value {
     /// The least toughness among the objects a selector picks out (bolster, CR 701.39a);
     /// 0 when it picks out none.
     LeastToughness(Box<Selector>),
+    /// The greatest power, toughness or mana value among these objects; 0 for none.
+    GreatestPower(Box<Selector>),
+    GreatestToughness(Box<Selector>),
+    GreatestManaValue(Box<Selector>),
     /// How many card types there are among the objects a selector picks out (delirium).
     CardTypesAmong(Box<Selector>),
     /// CR 702.40a — how many spells were cast before the source spell this turn (storm).

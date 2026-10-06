@@ -155,7 +155,7 @@ pub fn compute(
 
     // Layers 1 through 7c.
     for effect in effects.iter().filter(|e| e.layer <= layer::PT_MODIFY) {
-        apply_one(&mut ch, effect, state, printed, &chars);
+        apply_one(&mut ch, effect, state, printed, &chars, obj);
     }
 
     // Layer 7d — counters.
@@ -171,7 +171,7 @@ pub fn compute(
 
     // Layer 7e — switching, which must see the post-counter values.
     for effect in effects.iter().filter(|e| e.layer >= layer::PT_SWITCH) {
-        apply_one(&mut ch, effect, state, printed, &chars);
+        apply_one(&mut ch, effect, state, printed, &chars, obj);
     }
 
     Some(ch)
@@ -388,6 +388,7 @@ fn apply_one(
     state: &GameState,
     printed: &dyn PrintedCards,
     chars: &dyn CharacteristicsSource,
+    obj: &crate::state::GameObject,
 ) {
     use mtg_ir::effect::Modification as M;
 
@@ -431,6 +432,16 @@ fn apply_one(
             ch.abilities.clear();
             ch.granted_keywords.clear();
             ch.granted_abilities.clear();
+        }
+        M::LoseKeyword(k) => {
+            ch.granted_keywords.retain(|g| g != k);
+            if let Some(face) = printed.face(obj.card, obj.face) {
+                ch.abilities.retain(|id| {
+                    !face.abilities.iter().any(|a| {
+                        a.id == *id && matches!(a.kind, mtg_ir::AbilityKind::Keyword(x) if x == *k)
+                    })
+                });
+            }
         }
         // A granted ability's id cannot index the object's printed ability list, so a
         // non-keyword grant is recorded by where its text lives (see

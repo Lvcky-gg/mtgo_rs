@@ -120,6 +120,10 @@ pub enum ObjectFilter {
     SharesColorWith(Box<Selector>),
     ManaValueAtMost(Value),
     HasCounter(CounterKind),
+    /// One or more counters of any kind: "with a counter on it".
+    HasAnyCounter,
+    /// Dealt damage this turn, by anything: "creature that was dealt damage this turn".
+    DealtDamageThisTurn,
     /// Of the creature type / color the source chose as it entered ("creatures you control
     /// of the chosen type").
     HasChosenSubtype,

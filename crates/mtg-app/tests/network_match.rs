@@ -28,6 +28,7 @@ fn a_hosted_match_is_joined_by_link_and_played_to_the_end() {
             deck: demo_deck(),
             port: 0,
             tunnel_token: None,
+            tunnel_domain: None,
             name: "Test game".into(),
             public_address: None,
             identity: &identity,

@@ -113,7 +113,11 @@ pub fn eligible_attackers(
                 return false;
             }
             // Defender (CR 702.3b).
-            if has(state, cards, *id, Keyword::Defender) {
+            if has(state, cards, *id, Keyword::Defender)
+                && !restricted(state, cards, *id, |r| {
+                    matches!(r, Restriction::AttackDespiteDefender)
+                })
+            {
                 return false;
             }
             if restricted(state, cards, *id, |r| matches!(r, Restriction::CantAttack)) {

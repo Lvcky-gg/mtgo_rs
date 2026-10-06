@@ -1,1 +1,8 @@
 /target
+/dist
+/vendor
+/build-dir
+/flatpak-repo
+/.flatpak-builder
+/scripts/__pycache__
+/scripts/tests/__pycache__

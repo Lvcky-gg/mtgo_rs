@@ -32,6 +32,12 @@ app, run terminal commands, or forward a port.
 5. Optionally check **Remember token on this device** to skip this step next
    time. Leave it unchecked on a shared computer.
 
+If ngrok asks you to use your assigned domain, copy it from
+[Domains in the ngrok dashboard](https://dashboard.ngrok.com/domains). Open
+**Advanced connection settings**, paste it into **Ngrok domain**, and host
+again. You can paste the hostname or its HTTPS address. This setting is saved
+for next time; leave it blank to let ngrok choose automatically.
+
 Keep the token private. Send your friend the game's **invite link**, never your
 token. If you choose to remember it, the game saves it in its local database;
 it is not encrypted at rest. **Forget token** removes that saved copy.
@@ -64,7 +70,7 @@ The guest never needs to install ngrok or enter the host's public address.
 | --- | --- |
 | The game asks for a token | Copy **Your Authtoken** from the ngrok dashboard and paste it in hosting setup. |
 | Could not connect to ngrok | Check your internet connection, token, and account verification. A revoked token must be replaced. |
-| Ngrok could not open a tunnel | Close another tunnel using this account, check the account's usage limits in the dashboard, and try again. |
+| Ngrok could not open a tunnel | Close another tunnel using this account and check its usage limits. If a domain is required, paste the domain from the dashboard into **Advanced connection settings → Ngrok domain**. |
 | Internet hosting timed out | Check your internet connection and retry. You can leave while it is connecting. |
 | The invite cannot be used | Ask the host to start again and send a fresh invite. |
 | Could not reach the host | Check that the host still has the game open and that both computers have internet access. |

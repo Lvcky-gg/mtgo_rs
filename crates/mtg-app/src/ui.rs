@@ -2648,6 +2648,7 @@ mod target_tests {
                 undo: false,
             },
             view: PlayerView {
+                revealed_cards: Vec::new(),
                 prevent_combat_damage: false,
                 prevent_damage_to: Vec::new(),
                 viewer,
@@ -2956,6 +2957,43 @@ mod target_tests {
         assert_eq!(app.picked, vec![first]);
         click_question_label(&mut app, &ctx, "Confirm");
         assert!(matches!(answers.try_recv().unwrap(), Answer::Objects(ids) if ids == vec![first]));
+    }
+
+    #[test]
+    fn library_tutor_confirmation_obeys_mandatory_and_optional_counts() {
+        use mtg_headless::cards::{DUMMY, DemoCards};
+        let cards = DemoCards::default();
+        let mut state = mtg_engine::state::GameState::new(&[PlayerId(0), PlayerId(1)], 20);
+        let selected = state.place(
+            DUMMY,
+            PlayerId(0),
+            mtg_core::ZoneRef::of(mtg_core::Zone::Library, PlayerId(0)),
+        );
+        for min in [0, 1] {
+            let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseObjects {
+                from: vec![selected],
+                min,
+                max: 1,
+            });
+            app.texts = CardTexts::snapshot(&cards, [DUMMY]);
+            app.current.as_mut().unwrap().view =
+                mtg_engine::view::project_showing(&state, PlayerId(0), &[selected]);
+            click_question_label(&mut app, &ctx, "Confirm");
+            if min == 0 {
+                assert!(
+                    matches!(answers.try_recv().unwrap(), Answer::Objects(ids) if ids.is_empty())
+                );
+            } else {
+                assert!(answers.try_recv().is_err());
+                let name = app.texts.name(Some(DUMMY));
+                click_question_label(&mut app, &ctx, &name);
+                assert_eq!(app.picked, vec![selected]);
+                click_question_label(&mut app, &ctx, "Confirm");
+                assert!(
+                    matches!(answers.try_recv().unwrap(), Answer::Objects(ids) if ids == vec![selected])
+                );
+            }
+        }
     }
 
     #[test]
@@ -3438,6 +3476,7 @@ mod target_tests {
     fn view_backlogs_are_bounded_and_drained_before_a_new_question() {
         let viewer = PlayerId(0);
         let mut view = PlayerView {
+            revealed_cards: Vec::new(),
             prevent_combat_damage: false,
             prevent_damage_to: Vec::new(),
             viewer,
@@ -3529,6 +3568,7 @@ mod target_tests {
             object(4, ZoneRef::of(Zone::Graveyard, viewer)),
         ];
         let view = PlayerView {
+            revealed_cards: Vec::new(),
             prevent_combat_damage: false,
             prevent_damage_to: Vec::new(),
             viewer,

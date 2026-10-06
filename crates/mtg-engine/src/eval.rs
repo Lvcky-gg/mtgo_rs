@@ -425,6 +425,21 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             .sum(),
         Value::Power(sel) => sum_characteristic(ctx, sel, |c| c.power)?,
         Value::Toughness(sel) => sum_characteristic(ctx, sel, |c| c.toughness)?,
+        Value::GreatestPower(sel)
+        | Value::GreatestToughness(sel)
+        | Value::GreatestManaValue(sel) => {
+            let mut most = 0;
+            for id in objects(ctx, sel)? {
+                let c = ctx.characteristics(id)?;
+                let n = match v {
+                    Value::GreatestPower(_) => c.power.unwrap_or(0),
+                    Value::GreatestToughness(_) => c.toughness.unwrap_or(0),
+                    _ => c.mana_cost.mana_value() as i32,
+                };
+                most = most.max(n);
+            }
+            most
+        }
         Value::LeastToughness(sel) => {
             let mut least = None::<i32>;
             for id in objects(ctx, sel)? {
@@ -786,6 +801,10 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
         }
 
         ObjectFilter::HasCounter(kind) => obj.counters.get(kind).copied().unwrap_or(0) > 0,
+        ObjectFilter::HasAnyCounter => obj.counters.values().any(|n| *n > 0),
+        ObjectFilter::DealtDamageThisTurn => {
+            ctx.state.damaged_by_this_turn.iter().any(|(_, o)| *o == id)
+        }
         // Summoning sickness is set on entry and cleared at the start of its
         // controller's turn, so it is exactly "entered this turn" for a creature.
         ObjectFilter::EnteredThisTurn => obj.summoning_sick,

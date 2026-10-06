@@ -727,8 +727,14 @@ fn perform(state: &mut GameState, event: &Event) {
                 order.extend(bottom);
             }
         }
-        Event::Revealed { .. } => {
-            // Recorded for the log and the players; revealing changes nothing in play.
+        Event::Revealed { object } => {
+            if let Some(card) = state.objects.get(object) {
+                state.revealed_cards.push(crate::view::RevealedCard {
+                    owner: card.owner,
+                    card: card.card,
+                    face: card.face,
+                });
+            }
         }
         Event::ExileIfLeaves { object } => {
             if let Some(o) = state.objects.get_mut(object) {

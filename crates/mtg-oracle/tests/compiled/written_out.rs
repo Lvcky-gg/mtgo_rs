@@ -1054,3 +1054,366 @@ fn aura_bonus_as_long_as_enchanted_creature_is_green() {
         assert_eq!(g.has(h, mtg_core::Keyword::Trample), green);
     }
 }
+
+#[test]
+fn bonus_as_long_as_you_drew_two_cards() {
+    let mut t = Table::default();
+    let sphinx = t.card(
+        "{2}{U}",
+        "Creature — Wizard",
+        Some((1, 1)),
+        "This creature gets +2/+0 as long as you've drawn two or more cards this turn.",
+    );
+    let opt = t.card("{U}", "Instant", None, "Draw a card.");
+    let mut g = Game::new(t);
+    g.lands(1);
+    let s = g.put(sphinx, P0, Zone::Battlefield);
+    let o = g.put(opt, P0, Zone::Hand);
+    g.main();
+    assert_eq!(g.pt(s), (1, 1), "one card drawn for the turn");
+    g.cast(o, &[]);
+    assert_eq!(g.pt(s), (3, 1));
+}
+
+#[test]
+fn costs_less_by_the_greatest_power_you_control() {
+    let mut t = Table::default();
+    let titan = t.card(
+        "{6}{G}",
+        "Creature — Bear",
+        Some((7, 7)),
+        "This spell costs {X} less to cast, where X is the greatest power among creatures \
+         you control.",
+    );
+    let ogre = t.card("{3}", "Creature — Bear", Some((4, 4)), "");
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(3);
+    g.put(bear, P0, Zone::Battlefield);
+    let c = g.put(titan, P0, Zone::Hand);
+    let actions = g.main();
+    assert!(
+        !actions.contains(&Action::Cast { object: c }),
+        "7 - 2 is 5 > 3"
+    );
+    g.put(ogre, P0, Zone::Battlefield);
+    g.pending = None;
+    let actions = g.until(P0, Step::PostcombatMain);
+    assert!(actions.contains(&Action::Cast { object: c }), "7 - 4 is 3");
+    g.cast(c, &[]);
+    assert!(g.find(titan).is_some());
+}
+
+#[test]
+fn gain_life_equal_to_the_greatest_toughness() {
+    let mut t = Table::default();
+    let healer = t.card(
+        "{1}{W}",
+        "Creature — Soldier",
+        Some((1, 1)),
+        "When this creature enters, you gain life equal to the greatest toughness among \
+         other creatures you control.",
+    );
+    let wall = t.card("{2}", "Creature — Wall", Some((0, 5)), "");
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(2);
+    g.put(wall, P0, Zone::Battlefield);
+    g.put(bear, P0, Zone::Battlefield);
+    let h = g.put(healer, P0, Zone::Hand);
+    g.main();
+    g.cast(h, &[]);
+    assert_eq!(g.life(P0), 25);
+}
+
+#[test]
+fn destroy_target_creature_that_was_dealt_damage_this_turn() {
+    let mut t = Table::default();
+    let finisher = t.card(
+        "{B}",
+        "Instant",
+        None,
+        "Destroy target creature that was dealt damage this turn.",
+    );
+    let shock = t.card("{R}", "Instant", None, "~ deals 1 damage to any target.");
+    let ogre = t.card("{3}", "Creature — Bear", Some((4, 4)), "");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let o = g.put(ogre, P1, Zone::Battlefield);
+    let f = g.put(finisher, P0, Zone::Hand);
+    let s = g.put(shock, P0, Zone::Hand);
+    let actions = g.main();
+    assert!(
+        !actions.contains(&Action::Cast { object: f }),
+        "no creature was dealt damage: no legal target"
+    );
+    g.cast(s, &[Target::Object(o)]);
+    let actions = g.until(P0, Step::PostcombatMain);
+    assert!(actions.contains(&Action::Cast { object: f }));
+    g.cast(f, &[Target::Object(o)]);
+    assert!(!g.engine.state.objects.contains_key(&o));
+}
+
+#[test]
+fn creatures_with_counters_on_them_have_trample() {
+    let mut t = Table::default();
+    let anthem = t.card(
+        "{2}{G}",
+        "Enchantment",
+        None,
+        "Creatures you control with +1/+1 counters on them have trample.",
+    );
+    let pump = t.card(
+        "{G}",
+        "Instant",
+        None,
+        "Put a +1/+1 counter on target creature.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    g.put(anthem, P0, Zone::Battlefield);
+    let a = g.put(bear, P0, Zone::Battlefield);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let p = g.put(pump, P0, Zone::Hand);
+    g.main();
+    g.cast(p, &[Target::Object(a)]);
+    assert!(g.has(a, mtg_core::Keyword::Trample));
+    assert!(!g.has(b, mtg_core::Keyword::Trample));
+}
+
+#[test]
+fn granted_ability_until_end_of_turn() {
+    let mut t = Table::default();
+    let gift = t.card(
+        "{U}",
+        "Instant",
+        None,
+        "Until end of turn, target creature gains \"{T}: Tap target creature.\"",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let foe = g.put(bear, P1, Zone::Battlefield);
+    let s = g.put(gift, P0, Zone::Hand);
+    let actions = g.main();
+    assert!(!offers(&actions, b));
+    g.cast(s, &[Target::Object(b)]);
+    let actions = g.until(P0, Step::PostcombatMain);
+    let tap = actions
+        .iter()
+        .find(|a| matches!(a, Action::ActivateAbility { source, .. } if *source == b))
+        .cloned()
+        .expect("the granted ability");
+    g.act(tap, &[Target::Object(foe)], &[]);
+    assert!(g.engine.state.objects[&foe].tapped);
+    // Gone next turn.
+    let actions = g.until(P1, Step::PrecombatMain);
+    assert!(!offers(&actions, b));
+}
+
+#[test]
+fn loses_all_abilities_and_reversed_pump() {
+    let mut t = Table::default();
+    let hush = t.card(
+        "{U}",
+        "Instant",
+        None,
+        "Target creature loses all abilities until end of turn.",
+    );
+    let rage = t.card(
+        "{R}",
+        "Instant",
+        None,
+        "Until end of turn, target creature gains trample and gets +2/+2.",
+    );
+    let flier = t.card("{1}{U}", "Creature — Bear", Some((1, 1)), "Flying");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let f = g.put(flier, P1, Zone::Battlefield);
+    let h = g.put(hush, P0, Zone::Hand);
+    let r = g.put(rage, P0, Zone::Hand);
+    g.main();
+    assert!(g.has(f, mtg_core::Keyword::Flying));
+    g.cast(h, &[Target::Object(f)]);
+    assert!(!g.has(f, mtg_core::Keyword::Flying));
+    g.cast(r, &[Target::Object(f)]);
+    assert_eq!(g.pt(f), (3, 3));
+    assert!(g.has(f, mtg_core::Keyword::Trample));
+}
+
+#[test]
+fn loses_flying_until_end_of_turn() {
+    let mut t = Table::default();
+    let net = t.card(
+        "{G}",
+        "Instant",
+        None,
+        "Target creature loses flying until end of turn.",
+    );
+    let bird = t.card("{U}", "Creature — Bear", Some((1, 1)), "Flying");
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bird, P1, Zone::Battlefield);
+    let n = g.put(net, P0, Zone::Hand);
+    g.main();
+    g.cast(n, &[Target::Object(b)]);
+    assert!(!g.has(b, mtg_core::Keyword::Flying));
+    g.until(P1, Step::PrecombatMain);
+    assert!(g.has(b, mtg_core::Keyword::Flying), "back next turn");
+}
+
+#[test]
+fn wall_attacks_once_it_loses_defender() {
+    for activated in [false, true] {
+        let mut t = Table::default();
+        let wall = t.card(
+            "{1}{R}",
+            "Creature — Wall",
+            Some((3, 3)),
+            "Defender\n{R}: This creature loses defender until end of turn.",
+        );
+        let mut g = Game::new(t);
+        g.lands(1);
+        let w = g.put(wall, P0, Zone::Battlefield);
+        g.main();
+        if activated {
+            g.act(activate(w, 1), &[], &[]);
+        }
+        g.combat(&[w], &[], &[], &[]);
+        assert_eq!(g.life(P1), if activated { 17 } else { 20 });
+    }
+}
+
+#[test]
+fn creatures_with_defender_can_attack_as_though_they_didnt() {
+    let mut t = Table::default();
+    let drum = t.card(
+        "{2}",
+        "Artifact",
+        None,
+        "Creatures you control can attack as though they didn't have defender.",
+    );
+    let wall = t.card("{1}", "Creature — Wall", Some((2, 2)), "Defender");
+    let mut g = Game::new(t);
+    g.put(drum, P0, Zone::Battlefield);
+    let w = g.put(wall, P0, Zone::Battlefield);
+    g.main();
+    g.combat(&[w], &[], &[], &[]);
+    assert_eq!(g.life(P1), 18);
+}
+
+#[test]
+fn reanimated_creature_gains_haste_and_is_sacrificed_later() {
+    let mut t = Table::default();
+    let rite = t.card(
+        "{2}{B}",
+        "Sorcery",
+        None,
+        "Return target creature card from your graveyard to the battlefield. It gains haste. \
+         Sacrifice it at the beginning of the next end step.",
+    );
+    let ogre = t.card("{4}", "Creature — Bear", Some((4, 4)), "");
+    let mut g = Game::new(t);
+    g.lands(3);
+    let o = g.put(ogre, P0, Zone::Graveyard);
+    let r = g.put(rite, P0, Zone::Hand);
+    g.main();
+    g.cast(r, &[Target::Object(o)]);
+    let back = g.find(ogre).expect("returned");
+    assert!(g.has(back, mtg_core::Keyword::Haste));
+    g.combat(&[back], &[], &[], &[]);
+    assert_eq!(g.life(P1), 16, "attacked the turn it returned");
+    g.until(P1, Step::Upkeep);
+    assert_eq!(g.find(ogre), None, "sacrificed at the end step");
+}
+
+#[test]
+fn leading_until_end_of_turn_covers_the_whole_sentence() {
+    let mut t = Table::default();
+    let spell = t.card(
+        "{B}",
+        "Instant",
+        None,
+        "Until end of turn, creatures you control get +1/+1 and creatures your opponents \
+         control get -1/-1.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let mine = g.put(bear, P0, Zone::Battlefield);
+    let theirs = g.put(bear, P1, Zone::Battlefield);
+    let s = g.put(spell, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[]);
+    assert_eq!((g.pt(mine), g.pt(theirs)), ((3, 3), (1, 1)));
+    g.until(P1, Step::PrecombatMain);
+    assert_eq!((g.pt(mine), g.pt(theirs)), ((2, 2), (2, 2)));
+}
+
+#[test]
+fn drain_gains_the_life_lost() {
+    let mut t = Table::default();
+    let drain = t.card(
+        "{2}{B}",
+        "Sorcery",
+        None,
+        "Each opponent loses 3 life. You gain life equal to the life lost this way.",
+    );
+    let mut g = Game::new(t);
+    g.lands(3);
+    let d = g.put(drain, P0, Zone::Hand);
+    g.main();
+    g.cast(d, &[]);
+    assert_eq!((g.life(P0), g.life(P1)), (23, 17));
+}
+
+#[test]
+fn choose_target_then_act_on_it() {
+    let mut t = Table::default();
+    let spell = t.card(
+        "{G}",
+        "Sorcery",
+        None,
+        "Choose target creature you control. Put two +1/+1 counters on it.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let s = g.put(spell, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[Target::Object(b)]);
+    assert_eq!(g.pt(b), (4, 4));
+}
+
+#[test]
+fn reveal_hand_choose_a_noncreature_nonland_card() {
+    let mut t = Table::default();
+    let probe = t.card(
+        "{B}",
+        "Sorcery",
+        None,
+        "Target opponent reveals their hand. You choose a noncreature, nonland card from it. \
+         That player discards that card.",
+    );
+    let bear = t.bear();
+    let forest = t.card("", "Basic Land — Forest", None, "");
+    let blast = t.card("{R}", "Sorcery", None, "~ deals 1 damage to any target.");
+    let mut g = Game::new(t);
+    g.lands(1);
+    let s = g.put(probe, P0, Zone::Hand);
+    let b = g.put(bear, P1, Zone::Hand);
+    let f = g.put(forest, P1, Zone::Hand);
+    let x = g.put(blast, P1, Zone::Hand);
+    g.main();
+    // Only the sorcery may be chosen, so the default choice is it.
+    g.act(Action::Cast { object: s }, &[Target::Player(P1)], &[]);
+    assert!(
+        !g.engine.state.objects.contains_key(&x),
+        "the sorcery was discarded"
+    );
+    assert!(g.engine.state.objects.contains_key(&b));
+    assert!(g.engine.state.objects.contains_key(&f));
+}

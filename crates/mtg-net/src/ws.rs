@@ -194,6 +194,12 @@ impl WsChannel {
         Ok(())
     }
 
+    /// A handle for interrupting blocked socket I/O when its owner cancels a match.
+    /// The caller should only use `shutdown`; messages still go through the channel.
+    pub fn shutdown_handle(&self) -> Result<TcpStream, WireError> {
+        self.stream().try_clone().map_err(WireError::Io)
+    }
+
     /// Close politely, so the other side sees a clean end rather than a reset.
     pub fn close(&mut self) {
         let _ = self.socket.close(None);

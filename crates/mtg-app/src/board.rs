@@ -426,6 +426,7 @@ mod tests {
         }
 
         PlayerView {
+            revealed_cards: Vec::new(),
             prevent_combat_damage: false,
             prevent_damage_to: Vec::new(),
             viewer: ME,

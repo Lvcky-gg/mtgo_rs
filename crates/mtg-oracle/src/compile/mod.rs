@@ -1898,6 +1898,9 @@ pub(crate) struct Cx<'a> {
     /// Whether the last clause moved "it" to another zone (exile), so "return it" means
     /// the card where it went, not the object it was.
     pub moved: bool,
+    /// Whether this sentence began "Until end of turn, …", so a later "and <subject>
+    /// gets …" in it lasts until end of turn too.
+    pub until_eot: bool,
     /// Whether "that much" / "that many" means the triggering event's amount.
     pub that_much: bool,
     /// Whether the trigger is "one or more …": once per batch of events.
@@ -1918,6 +1921,7 @@ impl<'a> Cx<'a> {
             x: false,
             that_player: None,
             moved: false,
+            until_eot: false,
             that_much: false,
             batch: false,
             while_: None,
@@ -4209,9 +4213,14 @@ fn statics(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>>
     } else if let Some(r) = line.strip_prefix("as long as ") {
         // "As long as ~ is equipped, it gets +2/+2": "it" is this. "As long as equipped
         // creature is a Human, it has lifelink": "it" is the equipped creature.
-        let about = ["~", "enchanted creature", "equipped creature", "enchanted permanent"]
-            .into_iter()
-            .find(|host| r.starts_with(&format!("{host} ")));
+        let about = [
+            "~",
+            "enchanted creature",
+            "equipped creature",
+            "enchanted permanent",
+        ]
+        .into_iter()
+        .find(|host| r.starts_with(&format!("{host} ")));
         let (cond, r) = conditions::condition(r, cx)?;
         let r = r.strip_prefix(", ")?;
         let r = match (r.strip_prefix("it "), about) {
@@ -4771,7 +4780,7 @@ fn quoted_grants(r: &str, plural: bool, face: &FaceText, cx: &Cx) -> Option<Vec<
 }
 
 /// Whether the engine carries out an ability of this kind when it is granted.
-fn grantable(kind: &AbilityKind) -> bool {
+pub(crate) fn grantable(kind: &AbilityKind) -> bool {
     match kind {
         AbilityKind::Activated { functions_from, .. } => *functions_from == Zone::Battlefield,
         AbilityKind::Triggered { trigger, .. } => {
@@ -4907,6 +4916,23 @@ fn self_cost(line: &str, cx: &Cx) -> Option<AbilityKind> {
     } else {
         let r = line.strip_prefix("~ costs ")?;
         let (mana, r) = mana_cost(r)?;
+        // "This spell costs {X} less to cast, where X is the greatest power among creatures
+        // you control."
+        if let [mtg_core::ManaSymbol::Variable] = mana.symbols.as_slice()
+            && let Some(what) = r
+                .strip_prefix(" less to cast, where x is ")
+                .map(|r| r.trim_end_matches('.'))
+            && let Some((count, "")) = clauses::value_phrase(what, cx)
+        {
+            return Some(AbilityKind::Static {
+                what: Selector::SelfSource,
+                modification: Modification::Restriction(Restriction::CostModifier {
+                    what: ObjectFilter::IsSelf,
+                    delta: Value::Negate(Box::new(count)),
+                }),
+                condition: None,
+            });
+        }
         let [mtg_core::ManaSymbol::Generic(n)] = mana.symbols.as_slice() else {
             return None;
         };
@@ -5094,6 +5120,10 @@ fn restriction_predicate(r: &str, cx: &Cx) -> Option<Vec<Modification>> {
             return one(R::CantBeBlockedByMoreThanOne);
         }
         " can't block" => return one(R::CantBlock),
+        " can attack as though it didn't have defender"
+        | " can attack as though they didn't have defender" => {
+            return one(R::AttackDespiteDefender);
+        }
         " can't block and can't be blocked" => {
             return Some(vec![
                 Modification::Restriction(R::CantBlock),

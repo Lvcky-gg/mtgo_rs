@@ -109,6 +109,8 @@ pub struct HostConfig<'a> {
     pub public_address: Option<String>,
     /// None for LAN hosting; an ngrok authtoken for an automatic internet tunnel.
     pub tunnel_token: Option<String>,
+    /// Optional assigned domain for ngrok accounts requiring an explicit endpoint.
+    pub tunnel_domain: Option<String>,
     /// Name shown to players on the same network.
     pub name: String,
     pub identity: &'a Identity,
@@ -128,6 +130,7 @@ pub fn host(
         port,
         public_address: extra_address,
         tunnel_token,
+        tunnel_domain,
         name,
         identity,
         source,
@@ -139,7 +142,12 @@ pub fn host(
     check_cancel(cancel)?;
     let mut tunnel = if let Some(token) = tunnel_token {
         let _ = events.send(MatchEvent::Status("opening your internet tunnel…".into()));
-        Some(crate::tunnel::Tunnel::start(port, &token, cancel)?)
+        Some(crate::tunnel::Tunnel::start(
+            port,
+            &token,
+            tunnel_domain.as_deref(),
+            cancel,
+        )?)
     } else {
         None
     };
@@ -197,7 +205,9 @@ pub fn host(
     let guest = secure.peer().fingerprint().to_grouped_string();
     let _ = events.send(MatchEvent::Status(format!("playing {guest}")));
 
-    host_match(&mut secure, settings, deck, source, shuffle, seat).map_err(|e| e.to_string())
+    play_with_cancel(&mut secure, cancel, |secure| {
+        host_match(secure, settings, deck, source, shuffle, seat).map_err(|e| e.to_string())
+    })
 }
 
 /// Failed attempts may be retried only before a valid Join consumes the invite.
@@ -330,7 +340,41 @@ pub fn join_with_cancel(
         invite.host_key.fingerprint().to_grouped_string()
     )));
 
-    guest_match(&mut secure, deck, seat).map_err(|e| e.to_string())
+    play_with_cancel(&mut secure, cancel, |secure| {
+        guest_match(secure, deck, seat).map_err(|e| e.to_string())
+    })
+}
+
+/// Leaving interrupts a blocked peer read as well as the local seat, so all owned
+/// resources (including an internet tunnel) can be dropped promptly.
+fn play_with_cancel<T>(
+    secure: &mut NoiseChannel<WsChannel>,
+    cancel: &AtomicBool,
+    play: impl FnOnce(&mut NoiseChannel<WsChannel>) -> Result<T, String>,
+) -> Result<T, String> {
+    let socket = secure
+        .inner_mut()
+        .shutdown_handle()
+        .map_err(|e| e.to_string())?;
+    std::thread::scope(|scope| {
+        let (finished, waiting) = std::sync::mpsc::channel::<()>();
+        scope.spawn(move || {
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                    break;
+                }
+                match waiting.recv_timeout(Duration::from_millis(100)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+            }
+        });
+        let result = play(secure);
+        drop(finished);
+        check_cancel(cancel)?;
+        result
+    })
 }
 
 /// Only an authenticated endpoint counts as reaching the invited host. No Join is
@@ -524,6 +568,43 @@ mod tests {
     }
 
     #[test]
+    fn leaving_interrupts_a_blocked_peer_read() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let host = Identity::generate();
+        let host_key = host.public();
+        let (release, waiting) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let plain = WsChannel::accept(&listener).unwrap();
+            plain.set_io_timeout(Some(Duration::from_secs(2))).unwrap();
+            let _secure = NoiseChannel::respond(plain, &host).unwrap();
+            let _ = waiting.recv_timeout(Duration::from_secs(3));
+        });
+        let plain = WsChannel::connect("127.0.0.1", port).unwrap();
+        plain.set_io_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut secure = NoiseChannel::initiate(plain, &Identity::generate(), host_key).unwrap();
+        secure.inner_mut().set_io_timeout(None).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancel);
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            trigger.store(true, Ordering::Relaxed);
+        });
+        let start = std::time::Instant::now();
+        let result = play_with_cancel(&mut secure, &cancel, |secure| {
+            secure.recv().map_err(|e| e.to_string())
+        });
+        drop(release);
+        server.join().unwrap();
+        canceller.join().unwrap();
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "leave should not wait for the silent opponent"
+        );
+    }
+
+    #[test]
     #[ignore = "requires NGROK_AUTHTOKEN and connects to the public ngrok service"]
     fn a_live_ngrok_tunnel_plays_a_complete_match() {
         let token = std::env::var("NGROK_AUTHTOKEN")
@@ -531,7 +612,13 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let cancel = Arc::new(AtomicBool::new(false));
-        let tunnel = crate::tunnel::Tunnel::start(port, &token, &cancel).unwrap();
+        let tunnel = crate::tunnel::Tunnel::start(
+            port,
+            &token,
+            std::env::var("NGROK_DOMAIN").ok().as_deref(),
+            &cancel,
+        )
+        .unwrap();
         // Only the public tunnel is advertised, so LAN fallback cannot mask a failure.
         let identity = Identity::generate();
         let invite = Invite::issue(

@@ -148,6 +148,10 @@ pub enum Effect {
         /// Under whose control it arrives, if not its owner's.
         under_control_of: Option<Selector>,
     },
+    /// Reveal selected cards to all players before subsequent effects.
+    Reveal {
+        what: Selector,
+    },
     Shuffle {
         who: Selector,
     },
@@ -519,6 +523,8 @@ pub enum Modification {
     /// Layer 6 — ability adding and removing.
     GrantAbility(Box<crate::ability::Ability>),
     LoseAllAbilities,
+    /// "Loses flying": the keyword, printed or granted earlier in the layer.
+    LoseKeyword(mtg_core::Keyword),
     /// Layer 7a — characteristic-defining power/toughness.
     /// Layer 7a/7b — power alone set: "~'s power is equal to the number of creatures you
     /// control" (a characteristic-defining ability; toughness is printed).
@@ -542,6 +548,8 @@ pub enum Modification {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Restriction {
     CantAttack,
+    /// "Can attack as though it didn't have defender" (CR 702.3b).
+    AttackDespiteDefender,
     CantBlock,
     CantBeBlockedExceptBy(ObjectFilter),
     /// "Can block only creatures with flying": what this creature may block.
