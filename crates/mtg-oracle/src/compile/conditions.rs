@@ -1,7 +1,7 @@
 //! Conditions: "if you control a Swamp", "as long as you have 10 or less life", "during
 //! your turn". The whole condition must be understood; nothing is approximated.
 
-use mtg_core::Zone;
+use mtg_core::{CardType, Zone};
 use mtg_ir::{ObjectFilter, Selector, Value, trigger::Condition};
 
 use super::{Cx, nouns, words};
@@ -16,9 +16,15 @@ fn your_graveyard() -> Selector {
 
 /// A condition, and the rest of the input.
 pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    // "It" is this object unless the line has bound it to another ("whenever you cast a
+    // spell, if it was bargained" is about that spell).
+    let it_is_self = matches!(cx.it, None | Some(Selector::SelfSource));
     if let Some(r) = s
         .strip_prefix("~ was kicked")
-        .or_else(|| s.strip_prefix("it was kicked"))
+        .or_else(|| s.strip_prefix("it was kicked").filter(|_| it_is_self))
+        // Bargain is read as a kicker (see `compile_line`).
+        .or_else(|| s.strip_prefix("~ was bargained"))
+        .or_else(|| s.strip_prefix("it was bargained").filter(|_| it_is_self))
     {
         return Some((Condition::Kicked, r));
     }
@@ -135,6 +141,9 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     if let Some(r) = s.strip_prefix("an opponent lost life this turn") {
         return Some((Condition::OpponentLostLifeThisTurn, r));
     }
+    if let Some(r) = s.strip_prefix("you gained life this turn") {
+        return Some((Condition::YouGainedLifeThisTurn, r));
+    }
     if let Some(r) = s.strip_prefix("a creature died this turn") {
         return Some((Condition::CreatureDiedThisTurn, r));
     }
@@ -171,14 +180,63 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     if let Some(r) = s.strip_prefix("it's not your turn") {
         return Some((Condition::Not(Box::new(Condition::YourTurn)), r));
     }
+    // Formidable: "creatures you control have total power 8 or greater".
+    if let Some(r) = s.strip_prefix("creatures you control have total power ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or greater")
+    {
+        return Some((
+            Condition::ValueAtLeast {
+                lhs: Value::Power(Box::new(Selector::All {
+                    zone: Zone::Battlefield,
+                    filter: ObjectFilter::And(vec![
+                        ObjectFilter::HasType(CardType::Creature),
+                        ObjectFilter::ControlledBy(Box::new(Selector::You)),
+                    ]),
+                })),
+                rhs: Value::Fixed(n),
+            },
+            r,
+        ));
+    }
     if let Some(r) = s.strip_prefix("you control ") {
         return controls(r, Selector::You, cx);
+    }
+    // "its surge cost was paid", "this spell's spectacle cost was paid".
+    for lead in ["its ", "~'s ", "this spell's "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            use mtg_ir::ability::AltCost;
+            for (word, alt) in [
+                ("surge", AltCost::Surge),
+                ("spectacle", AltCost::Spectacle),
+                ("blitz", AltCost::Blitz),
+                ("dash", AltCost::Dash),
+                ("evoke", AltCost::Evoke),
+            ] {
+                if let Some(r) = r
+                    .strip_prefix(word)
+                    .and_then(|r| r.strip_prefix(" cost was paid"))
+                {
+                    return Some((Condition::CastFor(alt), r));
+                }
+            }
+        }
     }
     if let Some(r) = s.strip_prefix("an opponent controls ") {
         return controls(r, Selector::Opponents, cx);
     }
     // "as long as you've cast a spell this turn". ("Another spell" depends on when it is
     // read, so only `cast_only` accepts it.)
+    // "you've drawn two or more cards this turn"
+    if let Some(r) = s.strip_prefix("you've drawn ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more cards this turn")
+    {
+        return Some((
+            at_least(Value::CardsDrawnThisTurn(Box::new(Selector::You)), n),
+            r,
+        ));
+    }
     if let Some(r) = s.strip_prefix("you've cast a spell this turn") {
         return Some((
             Condition::ValueAtLeast {
@@ -301,20 +359,39 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     if let Some(r) = s.strip_prefix("~ is monstrous") {
         return Some((Condition::Monstrous, r));
     }
-    // "~ has three or more +1/+1 counters on it"
-    if let Some(r) = s.strip_prefix("~ has ")
-        && let Some((n, r)) = words::number(r)
-        && let Some(r) = r.strip_prefix(" or more ")
-        && let Some((kind, r)) = words::counter(r)
-        && let Some(r) = r.strip_prefix("s on it")
+    // "~ has three or more +1/+1 counters on it", "it has a divinity counter on it" ("it"
+    // only while it means this object).
+    let it_is_self = matches!(cx.it, None | Some(Selector::SelfSource));
+    if let Some(r) = s
+        .strip_prefix("~ has ")
+        .or_else(|| s.strip_prefix("it has ").filter(|_| it_is_self))
     {
-        return Some((
-            at_least(Value::Counters(Box::new(Selector::SelfSource), kind), n),
-            r,
-        ));
+        if let Some((n, r)) = words::number(r)
+            && let Some(r) = r.strip_prefix(" or more ")
+            && let Some((kind, r)) = words::counter(r)
+            && let Some(r) = r.strip_prefix("s on it")
+        {
+            return Some((
+                at_least(Value::Counters(Box::new(Selector::SelfSource), kind), n),
+                r,
+            ));
+        }
+        if let Some(r) = r.strip_prefix("a ").or_else(|| r.strip_prefix("an "))
+            && let Some((kind, r)) = words::counter(r)
+            && let Some(r) = r.strip_prefix(" on it")
+        {
+            return Some((
+                at_least(Value::Counters(Box::new(Selector::SelfSource), kind), 1),
+                r,
+            ));
+        }
     }
     // "enchanted creature is red", "equipped creature is a Human", "… is legendary".
-    for host in ["enchanted creature is ", "equipped creature is "] {
+    for host in [
+        "enchanted creature is ",
+        "equipped creature is ",
+        "enchanted permanent is ",
+    ] {
         let Some(r) = s.strip_prefix(host) else {
             continue;
         };

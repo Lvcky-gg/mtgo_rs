@@ -444,6 +444,10 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             }
             types.len() as i32
         }
+        Value::CardsDrawnThisTurn(who) => players(ctx, who)?
+            .iter()
+            .map(|p| ctx.state.draws_this_turn.get(p).copied().unwrap_or(0) as i32)
+            .sum(),
         Value::SpellsCastThisTurn(who) => players(ctx, who)?
             .iter()
             .map(|p| ctx.state.spells_by_player.get(p).copied().unwrap_or(0) as i32)
@@ -597,17 +601,19 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
             .objects
             .get(&ctx.source)
             .is_some_and(|o| o.renowned),
-        Condition::CastFor(alt) => ctx
-            .state
-            .objects
-            .get(&ctx.source)
-            .is_some_and(|o| o.cast_for == Some(*alt)),
+        Condition::CastFor(alt) => ctx.state.objects.get(&ctx.source).is_some_and(|o| {
+            o.cast_for == Some(*alt)
+                || o.cast_context.as_ref().and_then(|c| c.alt_cost) == Some(*alt)
+        }),
         Condition::YouAreAttacked => ctx.state.combat.attackers.values().any(|t| match t {
             mtg_core::Target::Player(p) => *p == ctx.controller,
             mtg_core::Target::Object(o) => {
                 crate::layers::controller(ctx.state, *o) == Some(ctx.controller)
             }
         }),
+        Condition::YouGainedLifeThisTurn => {
+            ctx.state.gained_life_this_turn.contains(&ctx.controller)
+        }
         Condition::OpponentLostLifeThisTurn => ctx
             .state
             .lost_life_this_turn
@@ -737,6 +743,9 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             .blocks
             .get(&ctx.source)
             .is_some_and(|bs| bs.contains(&id)),
+        ObjectFilter::DealtDamageBySelfThisTurn => {
+            ctx.state.damaged_by_this_turn.contains(&(ctx.source, id))
+        }
         ObjectFilter::AttachedToSelf => ctx
             .state
             .objects
@@ -755,6 +764,16 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             crate::layers::controller(ctx.state, id).is_some_and(|p| who.contains(&p))
         }
         ObjectFilter::OwnedBy(sel) => players(ctx, sel)?.contains(&obj.owner),
+        ObjectFilter::SharesColorWith(sel) => {
+            let mine = ctx.characteristics(id)?.colors;
+            let mut shares = false;
+            for other in objects(ctx, sel)? {
+                shares |= !mine
+                    .intersect(ctx.characteristics(other)?.colors)
+                    .is_colorless();
+            }
+            shares
+        }
 
         ObjectFilter::PowerAtMost(v) => {
             ctx.characteristics(id)?.power.unwrap_or(0) <= value(ctx, v)?

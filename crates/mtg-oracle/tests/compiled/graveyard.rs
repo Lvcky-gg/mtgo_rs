@@ -347,3 +347,25 @@ fn scavenge_exiles_the_card_for_counters_equal_to_its_power() {
     assert_eq!(g.pt(b), (5, 5), "three counters, its power");
     assert_eq!(g.count(Zone::Graveyard, P0), 0, "exiled as the cost");
 }
+
+#[test]
+fn encore_makes_a_hasty_token_copy_that_attacks_and_is_sacrificed() {
+    let mut t = Table::default();
+    let pirate = t.card("{3}{R}", "Creature — Goblin", Some((3, 3)), "Encore {1}{R}");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let p = g.put(pirate, P0, Zone::Graveyard);
+    let actions = g.main();
+    assert!(offers(&actions, p));
+    g.act(activate(p, 0), &[], &[]);
+    assert_eq!(g.count(Zone::Graveyard, P0), 0, "exiled");
+    let token = g.find(pirate).expect("a token copy");
+    assert!(g.has(token, mtg_core::Keyword::Haste));
+    assert_eq!(g.pt(token), (3, 3));
+    let must = mtg_engine::combat::must_attack(&g.engine.state, &g.table, P0);
+    assert_eq!(must, vec![token], "it attacks this turn if able");
+    g.combat(&[token], &[], &[], &[]);
+    assert_eq!(g.life(P1), 17);
+    g.until(P1, mtg_core::Step::Upkeep);
+    assert!(g.find(pirate).is_none(), "sacrificed at the end step");
+}

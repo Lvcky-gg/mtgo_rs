@@ -288,6 +288,9 @@ fn perform(state: &mut GameState, event: &Event) {
             if *delta < 0 {
                 state.lost_life_this_turn.insert(*player);
             }
+            if *delta > 0 {
+                state.gained_life_this_turn.insert(*player);
+            }
         }
 
         Event::Drew { player, .. } => {
@@ -344,13 +347,16 @@ fn perform(state: &mut GameState, event: &Event) {
         }
 
         Event::DamageMarked {
+            source,
             object,
             amount,
             deathtouch,
             counters,
             recipient,
-            ..
         } => {
+            if *amount > 0 {
+                state.damaged_by_this_turn.insert((*source, *object));
+            }
             if let Some(o) = state.objects.get_mut(object) {
                 if !matches!(recipient, mtg_core::ObjectDamageKind::Creature) {
                     *o.counters

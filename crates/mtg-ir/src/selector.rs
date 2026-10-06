@@ -103,6 +103,9 @@ pub enum ObjectFilter {
     /// The object this ability's source is attached to: "enchanted creature",
     /// "equipped creature", "fortified land".
     AttachedToSelf,
+    /// Dealt damage this turn by this ability's source: "a creature dealt damage by this
+    /// creature this turn".
+    DealtDamageBySelfThisTurn,
     /// Has a keyword, printed or granted: "creature with flying".
     HasKeyword(crate::ability::Keyword),
     ToughnessAtMost(Value),
@@ -112,6 +115,9 @@ pub enum ObjectFilter {
     OwnedBy(Box<Selector>),
     PowerAtMost(Value),
     PowerAtLeast(Value),
+    /// Shares at least one color with one of these objects (conspire: "that share a color
+    /// with it").
+    SharesColorWith(Box<Selector>),
     ManaValueAtMost(Value),
     HasCounter(CounterKind),
     /// Of the creature type / color the source chose as it entered ("creatures you control

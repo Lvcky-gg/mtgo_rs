@@ -1,9 +1,9 @@
 //! Session establishment and transport.
 //!
-//! There is **no server**. No account service, no matchmaker, no lobby, nothing
-//! to sign up for and nothing to go offline. A game is two peers that found each
-//! other, and the only thing standing in for an account system is a keypair
-//! generated on first run.
+//! A game is two peers that found each other. Player identity is a keypair
+//! generated on first run, with no game account service or matchmaker. LAN games
+//! can discover each other locally; an optional provider tunnel makes the host
+//! reachable over the internet without changing the encrypted peer protocol.
 //!
 //! What that leaves to solve:
 //!
@@ -18,6 +18,8 @@ pub mod invite;
 pub mod session;
 pub mod wire;
 
+#[cfg(feature = "transport")]
+pub mod discovery;
 #[cfg(feature = "transport")]
 pub mod noise;
 #[cfg(feature = "transport")]

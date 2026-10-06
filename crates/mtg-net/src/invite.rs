@@ -61,6 +61,8 @@ pub enum Endpoint {
     /// A relay the *user* chose to run or trust, which forwards bytes it cannot
     /// read. Opt-in, and the only reason it exists is NAT.
     Relay { url: Box<str> },
+    /// A provider-managed tunnel directly forwarding to the host WebSocket.
+    Tunnel { url: Box<str> },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -136,6 +138,10 @@ impl Invite {
                 }
                 Endpoint::Relay { url } => {
                     out.push(2);
+                    push_str(&mut out, url);
+                }
+                Endpoint::Tunnel { url } => {
+                    out.push(3);
                     push_str(&mut out, url);
                 }
             }
@@ -216,6 +222,7 @@ impl Invite {
                     instance: r.take_str()?,
                 },
                 2 => Endpoint::Relay { url: r.take_str()? },
+                3 => Endpoint::Tunnel { url: r.take_str()? },
                 _ => return Err(InviteError::Malformed),
             });
         }
@@ -300,6 +307,9 @@ mod tests {
             },
             Endpoint::Relay {
                 url: "wss://relay.example/mtgors".into(),
+            },
+            Endpoint::Tunnel {
+                url: "wss://game.example/".into(),
             },
         ]
     }

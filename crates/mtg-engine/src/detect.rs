@@ -1182,6 +1182,10 @@ fn eval_filter(
         // carry; no printed trigger condition asks it.
         // "Enchanted creature", "equipped creature": what the source is (or was, as it
         // left) attached to.
+        ObjectFilter::DealtDamageBySelfThisTurn => selves
+            .iter()
+            .flatten()
+            .any(|s| state.damaged_by_this_turn.contains(&(*s, id))),
         ObjectFilter::AttachedToSelf => selves.iter().flatten().any(|s| {
             lookup(state, *s)
                 .is_some_and(|o| o.attached_to == Some(id) || o.was_attached_to == Some(id))
@@ -1201,6 +1205,8 @@ fn eval_filter(
             selector_covers_player(state, sel, obj.controller, controller)
         }
         ObjectFilter::OwnedBy(sel) => selector_covers_player(state, sel, obj.owner, controller),
+        // Not something a trigger's event filter asks.
+        ObjectFilter::SharesColorWith(_) => false,
         ObjectFilter::PowerAtLeast(v) => chars.power.unwrap_or(0) >= static_value(v),
         ObjectFilter::PowerAtMost(v) => chars.power.unwrap_or(0) <= static_value(v),
         ObjectFilter::ManaValueAtMost(v) => chars.mana_cost.mana_value() as i32 <= static_value(v),

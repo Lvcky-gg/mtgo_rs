@@ -60,6 +60,8 @@ pub struct GuiApp {
     rejected_answer: bool,
     /// The last position seen, so the board stays drawn between questions.
     last_view: Option<PlayerView>,
+    /// A newly added land to bring into view after the battlefield is laid out.
+    focus_land: Option<ObjectId>,
     /// Targets or objects picked so far, for a multi-select question.
     picked: Vec<ObjectId>,
     /// Modes picked so far, for a modal spell that takes more than one.
@@ -121,6 +123,7 @@ impl GuiApp {
             last_answered_question: None,
             rejected_answer: false,
             last_view: None,
+            focus_land: None,
             picked: Vec::new(),
             picked_modes: Vec::new(),
             picked_x: 0,
@@ -155,6 +158,21 @@ impl GuiApp {
     /// Move the board to `view`, logging what changed on the way.
     fn advance_to(&mut self, view: PlayerView) {
         if let Some(before) = &self.last_view {
+            for object in view.visible.values() {
+                if object.zone.zone == mtg_core::Zone::Battlefield
+                    && object.controller == view.viewer
+                    && self
+                        .texts
+                        .object_text(object)
+                        .is_some_and(|text| text.is_land)
+                    && before.visible.get(&object.id).is_none_or(|old| {
+                        old.zone.zone != mtg_core::Zone::Battlefield
+                            || old.controller != view.viewer
+                    })
+                {
+                    self.focus_land = Some(object.id);
+                }
+            }
             if !self.silence_next_update
                 && let Some(cue) = crate::sound::cue_for(before, &view)
             {
@@ -527,11 +545,31 @@ impl GuiApp {
                 });
         }
 
+        let compact_question = self.current.as_ref().is_none_or(|question| {
+            matches!(
+                question.choice.kind,
+                ChoiceKind::Priority { .. }
+                    | ChoiceKind::Confirm
+                    | ChoiceKind::KeepOrMulligan { .. }
+                    | ChoiceKind::ChooseX { .. }
+            )
+        });
+        let decision_height = if compact_question {
+            120.0
+        } else {
+            (ui.available_height() - HAND_CARD.y - 42.0 - 184.0).clamp(120.0, 360.0)
+        };
         egui::Panel::bottom("question")
             .frame(crate::theme::panel())
-            .min_size(120.0)
+            .exact_size(decision_height + 24.0)
+            .resizable(false)
             .show(ui, |ui| {
-                self.draw_question(ui);
+                // Long target lists and object choices must remain reachable without
+                // pushing the hand and battlefield out of the window.
+                egui::ScrollArea::vertical()
+                    .id_salt("decision-scroll")
+                    .max_height(decision_height)
+                    .show(ui, |ui| self.draw_question(ui));
             });
 
         // Declared after the question panel, so it sits just above it: the hand is next to the
@@ -854,25 +892,47 @@ impl GuiApp {
                 .size(10.0)
                 .color(crate::theme::MUTED),
             );
-            ui.horizontal_wrapped(|ui| {
-                for id in row {
-                    // A question about the board is answered on the board: attackers,
-                    // blockers and targets are clicked, not picked from a list of names.
-                    let pick = self.board_pick(id);
-                    let options = self.permanent_options(id);
-                    let response =
-                        self.draw_card(ui, view, id, !options.is_empty() || pick.is_some());
-                    if let Some(pick) = pick {
-                        self.mark_pick(ui, view, id, &response);
-                        pointer_cursor(&response);
-                        if response.clicked() {
-                            self.click_pick(id, pick);
+            // Wrapped horizontal layouts do not wrap composite card widgets.
+            // Use explicit grid rows so later lands cannot be clipped off to the right.
+            let width = row
+                .iter()
+                .map(|id| {
+                    let tapped = board::object(view, *id).is_some_and(|object| object.tapped);
+                    (if tapped { ART_SIZE.y } else { ART_SIZE.x }) * self.board_scale
+                })
+                .fold(166.0_f32, f32::max);
+            let gap = ui.spacing().item_spacing.x;
+            let columns = ((ui.available_width() + gap) / (width + gap))
+                .floor()
+                .max(1.0) as usize;
+            egui::Grid::new(("battlefield-row", side.player, lands))
+                .num_columns(columns)
+                .show(ui, |ui| {
+                    for (index, id) in row.into_iter().enumerate() {
+                        // A question about the board is answered on the board: attackers,
+                        // blockers and targets are clicked, not picked from a list of names.
+                        let pick = self.board_pick(id);
+                        let options = self.permanent_options(id);
+                        let response =
+                            self.draw_card(ui, view, id, !options.is_empty() || pick.is_some());
+                        if self.focus_land == Some(id) {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                            self.focus_land = None;
                         }
-                    } else {
-                        self.offer_permanent_actions(view, &response, options);
+                        if let Some(pick) = pick {
+                            self.mark_pick(ui, view, id, &response);
+                            pointer_cursor(&response);
+                            if response.clicked() {
+                                self.click_pick(id, pick);
+                            }
+                        } else {
+                            self.offer_permanent_actions(view, &response, options);
+                        }
+                        if (index + 1) % columns == 0 {
+                            ui.end_row();
+                        }
                     }
-                }
-            });
+                });
         }
     }
 
@@ -1412,7 +1472,9 @@ impl GuiApp {
         id: ObjectId,
         actionable: bool,
     ) -> egui::Response {
-        let click_id = egui::Id::new(("permanent", id));
+        // The same object can appear on the board and in several target slots.
+        // Each presentation needs its own interaction identity.
+        let click_id = ui.make_persistent_id(("permanent", id));
         let obj = board::object(view, id);
         let text = obj.and_then(|o| self.texts.object_text(o)).cloned();
         let tapped = obj.is_some_and(|o| o.tapped);
@@ -1872,46 +1934,68 @@ impl GuiApp {
                     if options.is_empty() {
                         ui.label(RichText::new("No legal targets").weak());
                     }
-                    ui.horizontal_wrapped(|ui| {
-                        for target in options {
-                            let label = match target {
-                                mtg_core::Target::Object(o) => self.name_of(view, *o),
-                                mtg_core::Target::Player(p) => format::player_name(view, *p),
-                            };
-                            let chosen = self.picked_targets.get(&i) == Some(target);
-                            let clicked = ui
-                                .vertical(|ui| {
-                                    let card_clicked =
-                                        if let mtg_core::Target::Object(object) = target {
-                                            self.draw_card(ui, view, *object, true).clicked()
-                                        } else {
-                                            false
-                                        };
-                                    let response = ui.selectable_label(chosen, label);
-                                    let response = if let mtg_core::Target::Object(object) = target
-                                    {
-                                        self.object_hover(response, view, *object)
-                                    } else {
-                                        response
+                    egui::ScrollArea::horizontal()
+                        .id_salt(("target-options", i))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for (option_index, target) in options.iter().enumerate() {
+                                    let label = match target {
+                                        mtg_core::Target::Object(o) => self.name_of(view, *o),
+                                        mtg_core::Target::Player(p) => {
+                                            format::player_name(view, *p)
+                                        }
                                     };
-                                    response.clicked() || card_clicked
-                                })
-                                .inner;
-                            if clicked {
-                                if slots.len() == 1 {
-                                    self.answer(Answer::Targets(vec![vec![*target]]));
-                                    return;
+                                    let chosen = self.picked_targets.get(&i) == Some(target);
+                                    let clicked = ui
+                                        .push_id(("target-option", i, option_index), |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.set_width(
+                                                    if matches!(target, mtg_core::Target::Object(_))
+                                                    {
+                                                        166.0
+                                                    } else {
+                                                        100.0
+                                                    },
+                                                );
+                                                let card_clicked = if let mtg_core::Target::Object(
+                                                    object,
+                                                ) = target
+                                                {
+                                                    self.draw_card(ui, view, *object, true)
+                                                        .clicked()
+                                                } else {
+                                                    false
+                                                };
+                                                let response = ui.selectable_label(chosen, label);
+                                                let response = if let mtg_core::Target::Object(
+                                                    object,
+                                                ) = target
+                                                {
+                                                    self.object_hover(response, view, *object)
+                                                } else {
+                                                    response
+                                                };
+                                                response.clicked() || card_clicked
+                                            })
+                                            .inner
+                                        })
+                                        .inner;
+                                    if clicked {
+                                        if slots.len() == 1 {
+                                            self.answer(Answer::Targets(vec![vec![*target]]));
+                                            return;
+                                        }
+                                        self.target_pick_order.retain(|slot| *slot != i);
+                                        if chosen {
+                                            self.picked_targets.remove(&i);
+                                        } else {
+                                            self.picked_targets.insert(i, *target);
+                                            self.target_pick_order.push(i);
+                                        }
+                                    }
                                 }
-                                self.target_pick_order.retain(|slot| *slot != i);
-                                if chosen {
-                                    self.picked_targets.remove(&i);
-                                } else {
-                                    self.picked_targets.insert(i, *target);
-                                    self.target_pick_order.push(i);
-                                }
-                            }
-                        }
-                    });
+                            })
+                        });
                 }
                 if slots.len() != 1 || slots[0].is_empty() {
                     let answer = selected_target_answer(&slots, &self.picked_targets);
@@ -2031,35 +2115,40 @@ impl GuiApp {
                     format!("{min}–{max}")
                 };
                 ui.label(RichText::new(format!("choose {range}")).small());
-                ui.horizontal_wrapped(|ui| {
-                    for id in &from {
-                        let chosen = self.picked.contains(id);
-                        let label = RichText::new(self.name_of(view, *id));
-                        let label = if chosen {
-                            label.color(ACCENT).strong()
-                        } else {
-                            label
-                        };
-                        // A full selection disables the rest rather than silently replacing one.
-                        let enabled = chosen || self.picked.len() < max;
-                        ui.vertical(|ui| {
-                            let card = self.draw_card(ui, view, *id, enabled);
-                            if chosen {
-                                ui.painter().rect_stroke(
-                                    card.rect,
-                                    4.0,
-                                    Stroke::new(3.0, TAPPED_EDGE),
-                                    egui::StrokeKind::Outside,
-                                );
+                egui::ScrollArea::horizontal()
+                    .id_salt("object-options")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for id in &from {
+                                let chosen = self.picked.contains(id);
+                                let label = RichText::new(self.name_of(view, *id));
+                                let label = if chosen {
+                                    label.color(ACCENT).strong()
+                                } else {
+                                    label
+                                };
+                                // A full selection disables the rest rather than silently replacing one.
+                                let enabled = chosen || self.picked.len() < max;
+                                ui.vertical(|ui| {
+                                    ui.set_width(166.0);
+                                    let card = self.draw_card(ui, view, *id, enabled);
+                                    if chosen {
+                                        ui.painter().rect_stroke(
+                                            card.rect,
+                                            4.0,
+                                            Stroke::new(3.0, TAPPED_EDGE),
+                                            egui::StrokeKind::Outside,
+                                        );
+                                    }
+                                    let button = ui.add_enabled(enabled, egui::Button::new(label));
+                                    let button = self.object_hover(button, view, *id);
+                                    if enabled && (card.clicked() || button.clicked()) {
+                                        toggle(&mut self.picked, *id);
+                                    }
+                                });
                             }
-                            let button = ui.add_enabled(enabled, egui::Button::new(label));
-                            let button = self.object_hover(button, view, *id);
-                            if enabled && (card.clicked() || button.clicked()) {
-                                toggle(&mut self.picked, *id);
-                            }
-                        });
-                    }
-                });
+                        })
+                    });
                 let ready = (min..=max).contains(&self.picked.len());
                 if ui
                     .add_enabled(ready, egui::Button::new("Confirm"))
@@ -2614,6 +2703,222 @@ mod target_tests {
 
     fn click_question_label(app: &mut GuiApp, ctx: &egui::Context, label: &str) {
         click_label(ctx, label, |ui| app.draw_question(ui));
+    }
+
+    #[test]
+    fn a_fetched_land_at_the_end_of_a_long_row_stays_inside_the_board_width() {
+        use mtg_core::{Zone, ZoneRef};
+        use mtg_headless::cards::{DUAL, DemoCards, PLAINS};
+        let viewer = PlayerId(0);
+        let mut state = mtg_engine::state::GameState::new(&[viewer, PlayerId(1)], 20);
+        for _ in 0..6 {
+            state.place(PLAINS, viewer, ZoneRef::shared(Zone::Battlefield));
+        }
+        let fetched = state.place(DUAL, viewer, ZoneRef::shared(Zone::Battlefield));
+        let view = mtg_engine::view::project(&state, viewer);
+        let (mut app, _, ctx) = question_app(ChoiceKind::Confirm);
+        app.texts = CardTexts::snapshot(&DemoCards::default(), [PLAINS, DUAL]);
+        let board = board::arrange(&view);
+        assert!(board.mine.battlefield.contains(&fetched));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(650.0, 1000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.draw_side(ui, &view, &board.mine),
+        );
+        output.textures_delta.clear();
+        let rect = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::epaint::Shape::Text(text) = &shape.shape
+                    && text.galley.text() == "Verdant Well"
+                {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
+                } else {
+                    None
+                }
+            })
+            .expect("fetched land is rendered");
+        output.textures_delta.clear();
+        assert!(
+            rect.right() <= 650.0,
+            "fetched land is clipped outside the board: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn a_newly_fetched_land_is_scrolled_into_the_visible_battlefield() {
+        use mtg_core::{Zone, ZoneRef};
+        use mtg_headless::cards::{DUAL, DemoCards, PLAINS};
+        let viewer = PlayerId(0);
+        let mut state = mtg_engine::state::GameState::new(&[viewer, PlayerId(1)], 20);
+        for _ in 0..6 {
+            state.place(PLAINS, viewer, ZoneRef::shared(Zone::Battlefield));
+        }
+        let (mut app, _, ctx) = question_app(ChoiceKind::Priority {
+            legal: Default::default(),
+        });
+        app.texts = CardTexts::snapshot(&DemoCards::default(), [PLAINS, DUAL]);
+        app.advance_to(mtg_engine::view::project(&state, viewer));
+        state.place(DUAL, viewer, ZoneRef::shared(Zone::Battlefield));
+        app.advance_to(mtg_engine::view::project(&state, viewer));
+        let mut visible = false;
+        for frame in 0..10 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(frame as f64 * 0.1),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(847.0, 689.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.show(ui),
+            );
+            output.textures_delta.clear();
+            visible = output.shapes.iter().any(|shape| {
+                if let egui::epaint::Shape::Text(text) = &shape.shape
+                    && text.galley.text() == "Verdant Well"
+                {
+                    shape
+                        .clip_rect
+                        .contains(text.pos + text.galley.rect.center().to_vec2())
+                } else {
+                    false
+                }
+            });
+        }
+        assert!(
+            visible,
+            "the fetched land must be visible without manually scrolling the battlefield"
+        );
+    }
+
+    #[test]
+    fn repeated_card_presentations_have_independent_click_targets() {
+        use mtg_headless::cards::{DUMMY, DemoCards};
+        let viewer = PlayerId(0);
+        let mut state = mtg_engine::state::GameState::new(&[viewer, PlayerId(1)], 20);
+        let object = state.place(
+            DUMMY,
+            viewer,
+            mtg_core::ZoneRef::shared(mtg_core::Zone::Battlefield),
+        );
+        let view = mtg_engine::view::project(&state, viewer);
+        let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            slots: vec![vec![Target::Object(object)], vec![Target::Object(object)]],
+        });
+        app.texts = CardTexts::snapshot(&DemoCards::default(), [DUMMY]);
+        let mut cards = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for slot in 0..2 {
+                cards.push(
+                    ui.push_id(slot, |ui| app.draw_card(ui, &view, object, true))
+                        .inner,
+                );
+            }
+        });
+        output.textures_delta.clear();
+        assert_ne!(
+            cards[0].id, cards[1].id,
+            "target slots must not share a card widget"
+        );
+        let pos = cards[1].rect.center();
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        cards.clear();
+        let mut output = ctx.run_ui(input, |ui| {
+            for slot in 0..2 {
+                cards.push(
+                    ui.push_id(slot, |ui| app.draw_card(ui, &view, object, true))
+                        .inner,
+                );
+            }
+        });
+        output.textures_delta.clear();
+        assert!(!cards[0].clicked());
+        assert!(cards[1].clicked());
+        assert!(answers.try_recv().is_err());
+    }
+
+    #[test]
+    fn clicking_a_repeated_card_selects_only_its_target_slot() {
+        use mtg_headless::cards::{DUMMY, DemoCards};
+        let viewer = PlayerId(0);
+        let mut state = mtg_engine::state::GameState::new(&[viewer, PlayerId(1)], 20);
+        let object = state.place(
+            DUMMY,
+            viewer,
+            mtg_core::ZoneRef::shared(mtg_core::Zone::Battlefield),
+        );
+        let target = Target::Object(object);
+        let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            slots: vec![vec![target], vec![target]],
+        });
+        app.current.as_mut().unwrap().view = mtg_engine::view::project(&state, viewer);
+        app.texts = CardTexts::snapshot(&DemoCards::default(), [DUMMY]);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw_question(ui));
+        let positions: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                if let egui::epaint::Shape::Text(text) = &shape.shape
+                    && text.galley.text() == "Practice Dummy"
+                {
+                    Some(text.pos + text.galley.rect.center().to_vec2())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        output.textures_delta.clear();
+        assert_eq!(positions.len(), 4, "each slot shows a card and a label");
+        let pos = positions[2];
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| app.draw_question(ui),
+        );
+        output.textures_delta.clear();
+        assert_eq!(app.picked_targets, BTreeMap::from([(1, target)]));
+        assert!(answers.try_recv().is_err());
     }
 
     #[test]

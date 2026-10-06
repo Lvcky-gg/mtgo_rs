@@ -312,6 +312,8 @@ pub enum Condition {
     OpponentDamagedThisTurn,
     /// An opponent of the controller lost life this turn, by damage or otherwise.
     OpponentLostLifeThisTurn,
+    /// The controller gained life this turn.
+    YouGainedLifeThisTurn,
     /// A creature is attacking the controller or a planeswalker they control: "if you've
     /// been attacked this step".
     YouAreAttacked,

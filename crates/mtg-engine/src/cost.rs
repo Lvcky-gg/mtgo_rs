@@ -478,7 +478,8 @@ pub fn additional_payable(
     let Some(obj) = state.objects.get(&source) else {
         return false;
     };
-    if !cost.timing.is_empty() {
+    // "Activate only if you control a Swamp" (CR 602.5b): checked as it is activated.
+    if !conditions_hold(state, cards, source, who, &cost.timing) {
         return false;
     }
     cost.additional.iter().all(|c| match c {
@@ -632,6 +633,14 @@ pub fn cost_candidates(
         } if *filter != mtg_ir::ObjectFilter::IsSelf => {
             (mtg_core::ZoneRef::of(mtg_core::Zone::Hand, who), filter, *n)
         }
+        // "Exile a blue card from your hand" (an alternative cost).
+        A::ExileFrom {
+            zone: mtg_core::Zone::Hand,
+            filter,
+            count: Value::Fixed(n),
+        } if *filter != mtg_ir::ObjectFilter::IsSelf => {
+            (mtg_core::ZoneRef::of(mtg_core::Zone::Hand, who), filter, *n)
+        }
         // "Exile three other cards from your graveyard" (escape).
         A::ExileFrom {
             zone: mtg_core::Zone::Graveyard,
@@ -657,6 +666,46 @@ pub fn cost_candidates(
         .filter(|id| eval::matches(&ctx, filter, *id).unwrap_or(false))
         .collect();
     Some((from, n.max(0) as u32))
+}
+
+/// Everything a spell on the stack costs besides mana: its additional casting cost, what
+/// casting it from a graveyard adds (retrace's land, escape's cards), and the non-mana
+/// parts of an alternative cost it was cast for ("pay 1 life and exile a blue card").
+pub fn spell_extra_cost(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+) -> Option<mtg_ir::Cost> {
+    let o = state.objects.get(&object).filter(|o| !o.face_down)?;
+    let face = cards.face(o.card, o.face)?;
+    let cc = o.cast_context.as_ref();
+    let mut cost = additional_cast_cost(face);
+    let mut extend = |more: Vec<mtg_ir::AdditionalCost>| {
+        if !more.is_empty() {
+            cost.get_or_insert_with(mtg_ir::Cost::free)
+                .additional
+                .extend(more);
+        }
+    };
+    if cc.and_then(|c| c.cast_from) == Some(mtg_core::Zone::Graveyard) {
+        extend(cast_from_additional(face, mtg_core::Zone::Graveyard).additional);
+    }
+    if cc.and_then(|c| c.alt_cost) == Some(mtg_ir::ability::AltCost::Pay) {
+        extend(
+            face.abilities
+                .iter()
+                .find_map(|a| match &a.kind {
+                    mtg_ir::AbilityKind::AlternativeCost {
+                        cost,
+                        kind: mtg_ir::ability::AltCost::Pay,
+                        ..
+                    } => Some(cost.additional.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+        );
+    }
+    cost
 }
 
 /// A spell's additional casting cost ("As an additional cost to cast this spell, …").
@@ -746,11 +795,26 @@ pub fn is_entwine(face: &mtg_ir::CardFace) -> bool {
         .any(|a| matches!(a.kind, mtg_ir::AbilityKind::Kicker { entwine: true, .. }))
 }
 
-/// A face's kicker mana cost, if it has one.
+/// A face's kicker mana cost, if it has one the engine can pay: mana, and parts chosen as
+/// it is paid ("kicker—sacrifice an artifact or creature", casualty).
 pub fn kicker(face: &mtg_ir::CardFace) -> Option<ManaCost> {
+    kicker_cost(face).map(|c| c.mana)
+}
+
+/// A face's whole kicker cost, when every non-mana part is a chosen part.
+pub fn kicker_cost(face: &mtg_ir::CardFace) -> Option<mtg_ir::Cost> {
+    use mtg_ir::AdditionalCost as A;
     face.abilities.iter().find_map(|a| match &a.kind {
-        mtg_ir::AbilityKind::Kicker { cost, .. } if cost.additional.is_empty() => {
-            Some(cost.mana.clone())
+        mtg_ir::AbilityKind::Kicker { cost, .. }
+            if cost.timing.is_empty()
+                && cost.additional.iter().all(|p| {
+                    matches!(
+                        p,
+                        A::Sacrifice { .. } | A::TapUntapped { .. } | A::Discard { .. }
+                    )
+                }) =>
+        {
+            Some(cost.clone())
         }
         _ => None,
     })

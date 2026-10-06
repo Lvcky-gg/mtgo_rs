@@ -758,7 +758,7 @@ Full app: 208 passed, 3 ignored; store: 27 passed; app/store Clippy and whitespa
 checks pass. Imports are local; no automatic event crawler or corpus shipped.
 Handoff: `docs/sessions/2026-10-05-tournament-builder-profiles.md`.
 
-Claude (2026-10-05 evening, card coverage): coverage 14,008 → 14,284 / 34,913 (40.9%).
+Claude (2026-10-05/06, card coverage): coverage 14,008 → 14,398 / 34,913 (41.2%).
 Engine/IR/compiler only, plus one arm in `mtg-policy/src/bot/mod.rs`. New:
 - Block requirements (CR 509.1c): `Restriction::{MustBlock, MustBlockSource, MustBeBlocked,
   MustBeBlockedByAll}`; `combat::validate_blocks` now rejects a declaration when a one-step
@@ -780,3 +780,66 @@ Engine/IR/compiler only, plus one arm in `mtg-policy/src/bot/mod.rs`. New:
   their library"; "activated abilities of <noun> can't be activated"; "defending player
   controls …" conditions; "whenever you attack with N or more <noun>".
 - Tests: `tests/compiled/{block_requirements,tap_costs,divided_damage,cast_restrictions}.rs`.
+- 2026-10-06: dredge (`AbilityKind::Dredge`; the draw step can now ask questions via
+  `Suspended::Drawing`), blitz, scavenge, encore, surge/spectacle (`AltCost` variants, condition
+  in `cost.timing`), awaken (`AltCost::Awaken`; targets on the alternative cost), devour
+  (`ReplacementKind::Devour`), casualty/conspire and "Kicker—Sacrifice …" (kicker costs may
+  now contain chosen parts), `ObjectFilter::SharesColorWith`. **mtg-app:** four `AltCost`
+  labels added in `cards_text.rs` (blitz, surge, spectacle, awaken) to keep it compiling.
+
+Claude (2026-10-06, card coverage): coverage 14,398 → 14,616 / 34,913 (41.9%).
+Engine/IR/compiler, plus one `AltCost::Pay` label in `mtg-app/src/cards_text.rs`. New:
+- **"Activate only if …"** on any activated ability, mana abilities included: the condition
+  goes in `cost.timing`, and `cost::additional_payable` now *evaluates* `cost.timing`
+  (`conditions_hold`) instead of refusing any cost that has one. `mana::sources` skips a
+  mana ability whose condition fails, so auto-payment won't tap a Tainted land without a
+  Swamp. Formidable ("creatures you control have total power N or greater") is a condition.
+- **Plain alternative costs** (CR 118.9), `AltCost::Pay`: "You may pay 1 life and exile a blue
+  card from your hand / sacrifice two Mountains / tap an untapped creature you control rather
+  than pay this spell's mana cost", optionally "If <condition>, …". Its non-mana parts are paid
+  like additional costs through the new `cost::spell_extra_cost` (now the single source for
+  additional + graveyard-cast + alternative parts). A face has at most one `Pay`.
+- `AdditionalCost::ExileFrom { zone: Hand }` is a chosen cost part; announcement exiles those
+  (`Announced::exiled`) instead of discarding them.
+- Exploit (+ its "when ~ exploits a creature" line → one ETB with a reflexive trigger), For
+  Mirrodin!, living metal (static "~ is an artifact creature" for Vehicles; "during turns other
+  than yours"), bargain (a kicker whose cost is "sacrifice an artifact, enchantment, or token";
+  "if it was bargained" = kicked). "it was kicked/bargained" now refuses when "it" is bound to
+  something other than this object.
+- Nouns: "token(s)" as a head noun; cost parts no longer split "an artifact, enchantment, or
+  token" at its commas; "another creature you control" as a chosen permanent; sacrifice-unless
+  accepts "return a land you control to its owner's hand" (Karoos).
+- Tests: `crates/mtg-oracle/tests/compiled/written_out.rs` (19). Harness gained a "Rebel"
+  subtype.
+
+Claude (2026-10-06, card coverage, continued): 14,616 → 14,750 / 34,913 (42.2%).
+- Generic suffixes on any *single* effect (`clauses::guard_suffix`): "… unless you pay {B}{B}"
+  (`UnlessPays`), "… unless you pay 2 life", "… unless you <action>" (offered only when
+  possible), "… unless <condition>", "… if <condition>" (read on resolution). Compound
+  effects (`Sequence`, `Let`, …) are refused, so "discard your hand, then draw that many
+  cards if …" stays unparsed.
+- Nouns: "<type> token(s)" ("creature tokens you control", "artifact token").
+- Mana: "{T}: Add {G} for each creature you control" (`ManaOutput::Repeated` with a counted
+  amount; `clauses::scale` handles `AddMana`). `mana::sources` now evaluates such amounts, so
+  the planner sees 0 mana from an empty Cradle instead of guessing 1.
+- Conditions: "it has a divinity counter on it" / "it has N or more … counters on it".
+- **Engine:** random discard now uses `state.rng` (seeded) instead of the first cards in
+  hand; the compiler accepts "discard(s) N card(s) at random".
+- `compile/tests.rs::mana_lines_with_anything_more_are_left_alone` updated: the "for each Elf"
+  line is now compiled. Tests: `tests/compiled/written_out.rs` (29).
+
+Claude (2026-10-06, card coverage, round 3): 14,750 → 14,918 / 34,913 (42.7%).
+- `clauses::may`: a subject-less clause gets "you" ("you may gain 3 life"); "you may have X
+  deal/get/lose/gain/discard/mill/fight/draw/sacrifice …" is read as "X deals/gets/…"
+  (`have_to_does`); "you may pay N life / {E}{E} / {2}. If you do | When you do, …" share one
+  branch (`MayPay`).
+- "tap or untap <object>": `May { then: Tap, otherwise: Untap }`.
+- Trigger subjects: "<noun> deals (combat) damage to an opponent / damage to a player",
+  "<noun> becomes the target of a spell or ability an opponent controls", and the same
+  damage phrases for "enchanted/equipped creature".
+- **Engine:** `state.gained_life_this_turn` + `Condition::YouGainedLifeThisTurn`;
+  `state.damaged_by_this_turn` (source, object) + `ObjectFilter::DealtDamageBySelfThisTurn`
+  ("a creature dealt damage by this creature this turn dies", noun qualifier). Both cleared
+  with the other per-turn sets.
+- Ability words added: corrupted, disappear, infusion, opus, renew.
+- Tests: `tests/compiled/written_out.rs` (37).

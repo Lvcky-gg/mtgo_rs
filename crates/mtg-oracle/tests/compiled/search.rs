@@ -4,6 +4,28 @@ use mtg_core::{Zone, ZoneRef};
 use mtg_engine::{actions::Action, choice::Answer};
 
 #[test]
+fn sacrificed_fetch_land_puts_the_selected_land_onto_the_battlefield() {
+    let mut t = Table::default();
+    let fetch = t.card("", "Land", None,
+        "{T}, Pay 1 life, Sacrifice this land: Search your library for a Mountain or Forest card, put it onto the battlefield, then shuffle.");
+    let mountain = t.card("", "Basic Land — Mountain", None, "");
+    let forest = t.card("", "Basic Land — Forest", None, "");
+    let mut g = Game::new(t);
+    let source = g.put(fetch, P0, Zone::Battlefield);
+    let pick = g.put(forest, P0, Zone::Library);
+    g.put(mountain, P0, Zone::Library);
+    g.main();
+    g.act(activate(source, 0), &[], &[Answer::Objects(vec![pick])]);
+    assert_eq!(g.life(P0), 19);
+    assert!(g.find(fetch).is_none());
+    let found = g
+        .find(forest)
+        .expect("selected forest reaches the battlefield");
+    assert!(!g.engine.state.objects[&found].tapped);
+    assert_eq!(g.engine.state.objects[&found].controller, P0);
+}
+
+#[test]
 fn a_tutor_to_the_top_puts_the_card_on_top_after_shuffling() {
     let mut t = Table::default();
     let tutor = t.card(

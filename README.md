@@ -213,7 +213,11 @@ menus are Scryfall's SVGs, cached the same way, with a plain drawn disc until th
 **Join a game**, and **Decks**. Decks are pasted in (Moxfield, Archidekt, Arena, MTGO or plain
 text) and saved locally, and the card database downloads from Scryfall with one button. A match
 is Constructed or **Commander**, and best of 1 or **best of 3** with sideboarding. Hosting shows
-an invite link to send; joining takes that link. See ADR-012.
+an invite link to send; joining takes that link or selects a discovered nearby game.
+Choose **Nearby players** for automatic LAN discovery, or **Friends online** to open an
+embedded ngrok HTTPS tunnel. Only the host needs an ngrok account and authtoken; no separate
+ngrok install, local address entry, or port forwarding is needed. See [hosting setup](docs/hosting.md)
+and ADR-012.
 
 **Imported decks play.** Every card's rules text goes through the compiler on import, and the deck
 screens show how much of each deck is fully playable as printed.
@@ -231,7 +235,7 @@ shows who is attacking and blocking. A phase bar, a Pass button that says where 
 and a log narrated from what changed ("Opponent attacked with…", "You lose 3 life (17)"),
 including everything that happened while auto-pass was handling your priority.
 
-**Still unbuilt:** relay and mDNS discovery (internet play needs a forwarded port),
+**Still unbuilt:** a self-hosted relay,
 redacted event streaming instead of whole snapshots, and reconnect exercised rather than designed.
 
 Unimplemented primitives return a named error rather than a silent no-op, so a gap

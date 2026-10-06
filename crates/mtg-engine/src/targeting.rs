@@ -290,6 +290,20 @@ pub fn specs_of(state: &GameState, cards: &dyn PrintedCards, object: ObjectId) -
     if obj.bestowed() {
         return bestow_targets(face);
     }
+    // Cast for awaken: the spell's targets and then the land (all on the alternative cost).
+    if obj.cast_context.as_ref().and_then(|c| c.alt_cost) == Some(mtg_ir::ability::AltCost::Awaken)
+        && let Some(a) = face.abilities.iter().find(|a| {
+            matches!(
+                a.kind,
+                mtg_ir::AbilityKind::AlternativeCost {
+                    kind: mtg_ir::ability::AltCost::Awaken,
+                    ..
+                }
+            )
+        })
+    {
+        return a.targets.clone();
+    }
 
     face.abilities
         .iter()

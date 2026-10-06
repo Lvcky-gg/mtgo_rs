@@ -63,6 +63,10 @@ pub struct GameState {
     pub damaged_this_turn: BTreeSet<PlayerId>,
     /// Players who lost life this turn, by damage or otherwise (CR 119.3).
     pub lost_life_this_turn: BTreeSet<PlayerId>,
+    /// Players who gained life this turn.
+    pub gained_life_this_turn: BTreeSet<PlayerId>,
+    /// (source, object) for each object dealt damage this turn, by what dealt it.
+    pub damaged_by_this_turn: BTreeSet<(ObjectId, ObjectId)>,
     /// Spells cast this turn, by anyone (storm).
     pub spells_cast_this_turn: u32,
     /// Spells each player cast this turn and last turn (werewolves, CR 702.145).
@@ -603,6 +607,8 @@ impl GameState {
             monarch_emblem: None,
             damaged_this_turn: BTreeSet::new(),
             lost_life_this_turn: BTreeSet::new(),
+            gained_life_this_turn: BTreeSet::new(),
+            damaged_by_this_turn: BTreeSet::new(),
             attacked_this_turn: BTreeSet::new(),
             day: None,
             exiled_instead_of_graveyard: BTreeSet::new(),

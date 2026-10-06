@@ -197,6 +197,8 @@ struct Announced {
     tapped_for: Vec<ObjectId>,
     /// Unblocked attackers returned to hand to pay for ninjutsu.
     returned: Vec<ObjectId>,
+    /// Cards exiled from the hand to pay ("exile a blue card from your hand").
+    exiled: Vec<ObjectId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -571,6 +573,17 @@ impl Engine {
             }
             if let (Some(a), Answer::Bool(b)) = (self.announcing.as_mut(), &answer) {
                 a.kicked = Some(*b);
+                // A kicker's chosen parts are paid with the rest of the cost.
+                if *b
+                    && let Some(k) = self
+                        .state
+                        .objects
+                        .get(&a.object)
+                        .and_then(|o| cards.face(o.card, o.face))
+                        .and_then(crate::cost::kicker_cost)
+                {
+                    a.cost_parts.extend(k.additional);
+                }
                 // Entwined: every mode (CR 702.42b).
                 let entwine = self
                     .state
@@ -2453,8 +2466,21 @@ impl Engine {
                 continue;
             }
             for a in &face.abilities {
-                if let mtg_ir::AbilityKind::AlternativeCost { cost, .. } = &a.kind
-                    && cost.additional.is_empty()
+                if let mtg_ir::AbilityKind::AlternativeCost { cost, kind, .. } = &a.kind
+                    // Only a plain alternative cost has parts besides mana
+                    // (`cost::spell_extra_cost` pays them), and they need enough to pay with.
+                    && (cost.additional.is_empty()
+                        || (*kind == mtg_ir::ability::AltCost::Pay
+                            && crate::cost::additional_payable(
+                                &self.state,
+                                cards,
+                                id,
+                                who,
+                                &mtg_ir::Cost {
+                                    additional: cost.additional.clone(),
+                                    ..mtg_ir::Cost::free()
+                                },
+                            )))
                     && crate::cost::conditions_hold(&self.state, cards, id, who, &cost.timing)
                     && crate::mana::plan_spell(&self.state, cards, who, &cost.mana, 0, id).is_some()
                     && (a.targets.is_empty()
@@ -2990,20 +3016,7 @@ impl Engine {
             return Vec::new();
         };
         let cost = if spell {
-            let face = cards.face(obj.card, obj.face).filter(|_| !obj.face_down);
-            let mut cost = face.and_then(crate::cost::additional_cast_cost);
-            // Cast from the graveyard: retrace's land, escape's exiled cards.
-            if obj.cast_context.as_ref().and_then(|c| c.cast_from) == Some(Zone::Graveyard)
-                && let Some(face) = face
-            {
-                let extra = crate::cost::cast_from_additional(face, Zone::Graveyard).additional;
-                if !extra.is_empty() {
-                    cost.get_or_insert_with(mtg_ir::Cost::free)
-                        .additional
-                        .extend(extra);
-                }
-            }
-            cost
+            crate::cost::spell_extra_cost(&self.state, cards, object)
         } else {
             obj.cast_context
                 .as_ref()
@@ -3084,13 +3097,23 @@ impl Engine {
         if obj.face_down {
             return false;
         }
-        let Some(k) = cards.face(obj.card, obj.face).and_then(crate::cost::kicker) else {
+        let Some(k) = cards
+            .face(obj.card, obj.face)
+            .and_then(crate::cost::kicker_cost)
+        else {
             return false;
         };
+        // Chosen parts need enough to choose from.
+        if !k.additional.iter().all(|p| {
+            crate::cost::cost_candidates(&self.state, cards, object, who, p)
+                .is_some_and(|(from, n)| from.len() as u32 >= n)
+        }) {
+            return false;
+        }
         let Some(mut total) = crate::cost::total_cost(&self.state, cards, object, who) else {
             return false;
         };
-        total.symbols.extend(k.symbols);
+        total.symbols.extend(k.mana.symbols);
         crate::mana::plan_spell(&self.state, cards, who, &total, 0, object).is_some()
     }
 
@@ -3377,6 +3400,25 @@ impl Engine {
                         mtg_ir::AdditionalCost::TapCreaturesWithPower { .. }
                             | mtg_ir::AdditionalCost::TapUntapped { .. }
                             | mtg_ir::AdditionalCost::ReturnUnblockedAttacker
+                            | mtg_ir::AdditionalCost::ExileFrom {
+                                zone: Zone::Hand,
+                                ..
+                            }
+                    )
+                })
+                .flat_map(|(_, c)| c.iter().copied())
+                .collect(),
+            exiled: a
+                .cost_parts
+                .iter()
+                .zip(&a.cost_chosen)
+                .filter(|(p, _)| {
+                    matches!(
+                        p,
+                        mtg_ir::AdditionalCost::ExileFrom {
+                            zone: Zone::Hand,
+                            ..
+                        }
                     )
                 })
                 .flat_map(|(_, c)| c.iter().copied())
@@ -3436,35 +3478,26 @@ impl Engine {
             // Reserve cards already committed to other costs, and life required
             // separately from mana (including flashback), before planning payment.
             let mut payment_state = self.state.clone();
-            for id in done.paid_with.iter().chain(&done.tapped_for) {
+            for id in done
+                .paid_with
+                .iter()
+                .chain(&done.tapped_for)
+                .chain(&done.exiled)
+            {
                 payment_state.objects.remove(id);
             }
-            let extra_life = self
-                .state
-                .objects
-                .get(&object)
-                .filter(|o| !o.face_down)
-                .and_then(|o| {
-                    let face = cards.face(o.card, o.face)?;
-                    let mut extra = crate::cost::additional_cast_cost(face).unwrap_or_default();
-                    if o.cast_context.as_ref().and_then(|cc| cc.cast_from) == Some(Zone::Graveyard)
-                    {
-                        extra.additional.extend(
-                            crate::cost::cast_from_additional(face, Zone::Graveyard).additional,
-                        );
-                    }
-                    Some(
-                        extra
-                            .additional
-                            .iter()
-                            .filter_map(|part| match part {
-                                mtg_ir::AdditionalCost::PayLife {
-                                    amount: mtg_ir::Value::Fixed(n),
-                                } => Some(i64::from(*n)),
-                                _ => None,
-                            })
-                            .sum::<i64>(),
-                    )
+            let extra_life = crate::cost::spell_extra_cost(&self.state, cards, object)
+                .map(|extra| {
+                    extra
+                        .additional
+                        .iter()
+                        .filter_map(|part| match part {
+                            mtg_ir::AdditionalCost::PayLife {
+                                amount: mtg_ir::Value::Fixed(n),
+                            } => Some(i64::from(*n)),
+                            _ => None,
+                        })
+                        .sum::<i64>()
                 })
                 .unwrap_or(0);
             let remaining = i64::from(payment_state.player(controller).life) - extra_life;
@@ -3593,6 +3626,23 @@ impl Engine {
                 );
             }
         }
+        for id in &done.exiled {
+            if let Some(from) = self.state.objects.get(id).map(|o| o.zone) {
+                let new_object = self.state.new_object_id();
+                apply::apply(
+                    &mut self.state,
+                    Cause::CostPayment(object),
+                    Event::ZoneChange {
+                        object: *id,
+                        new_object,
+                        from,
+                        to: ZoneRef::shared(Zone::Exile),
+                        index: None,
+                    },
+                    &mut self.log,
+                );
+            }
+        }
         // Ninjutsu: the returned attacker goes to its owner's hand, and what it was
         // attacking is remembered on the ability for its effect.
         for id in &done.returned {
@@ -3635,24 +3685,7 @@ impl Engine {
             );
         }
         // A spell's additional casting cost in life (CR 119.4).
-        if pay_cost
-            && let Some(extra) = self
-                .state
-                .objects
-                .get(&object)
-                .filter(|o| !o.face_down)
-                .and_then(|o| {
-                    let face = cards.face(o.card, o.face)?;
-                    let mut cost = crate::cost::additional_cast_cost(face).unwrap_or_default();
-                    if o.cast_context.as_ref().and_then(|cc| cc.cast_from) == Some(Zone::Graveyard)
-                    {
-                        cost.additional.extend(
-                            crate::cost::cast_from_additional(face, Zone::Graveyard).additional,
-                        );
-                    }
-                    Some(cost)
-                })
-        {
+        if pay_cost && let Some(extra) = crate::cost::spell_extra_cost(&self.state, cards, object) {
             for part in &extra.additional {
                 if let mtg_ir::AdditionalCost::PayLife {
                     amount: mtg_ir::Value::Fixed(n),
@@ -5241,6 +5274,8 @@ impl Engine {
                 }
                 self.state.damaged_this_turn.clear();
                 self.state.lost_life_this_turn.clear();
+                self.state.gained_life_this_turn.clear();
+                self.state.damaged_by_this_turn.clear();
                 self.state.attacked_this_turn.clear();
                 self.state.activated_this_turn.clear();
                 self.state.loyalty_activated_this_turn.clear();

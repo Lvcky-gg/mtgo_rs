@@ -138,10 +138,12 @@ impl CardTexts {
                                     AltCost::Blitz => "blitz",
                                     AltCost::Surge => "surge",
                                     AltCost::Spectacle => "spectacle",
+                                    AltCost::Awaken => "awaken",
                                     AltCost::Evoke => "evoke",
                                     AltCost::Overload => "overload",
                                     AltCost::Warp => "warp",
                                     AltCost::Bestow => "bestow",
+                                    AltCost::Pay => "alternative cost",
                                 };
                                 let mana = crate::format::mana_cost(&cost.mana);
                                 Some((

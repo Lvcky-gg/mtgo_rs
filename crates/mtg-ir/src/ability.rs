@@ -283,6 +283,9 @@ pub enum AltCost {
     Surge,
     /// CR 702.137 — spectacle: castable for this cost if an opponent lost life this turn.
     Spectacle,
+    /// CR 702.113 — awaken: the spell also animates a land (its `instead` effect, with the
+    /// alternative cost's targets).
+    Awaken,
     /// CR 702.74 — evoke: when it enters, if it was evoked, its controller sacrifices it
     /// (a trigger compiled beside this ability).
     Evoke,
@@ -294,6 +297,9 @@ pub enum AltCost {
     /// CR 702.103 — bestow: cast as an Aura spell with enchant creature (the ability's
     /// target), and a creature again once it is unattached.
     Bestow,
+    /// CR 118.9 — "You may sacrifice a Mountain rather than pay this spell's mana cost":
+    /// the cost's other parts are paid as additional costs are (`cost::spell_extra_cost`).
+    Pay,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

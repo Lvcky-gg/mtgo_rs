@@ -53,6 +53,8 @@ pub enum Value {
     BasicLandTypesAmong(Box<Selector>),
     /// How many spells these players have cast this turn.
     SpellsCastThisTurn(Box<Selector>),
+    /// How many cards these players have drawn this turn.
+    CardsDrawnThisTurn(Box<Selector>),
     /// A number the controller announces on resolution, within bounds.
     ChosenByController {
         min: Box<Value>,

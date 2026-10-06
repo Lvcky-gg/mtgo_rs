@@ -40,6 +40,7 @@ mod tap_costs;
 mod target_discount;
 mod tokens;
 mod triggers;
+mod written_out;
 
 use harness::*;
 use mtg_core::{Keyword, Step, Target, Zone};

@@ -750,6 +750,9 @@ pub enum ReplacementKind {
     EntersWithCounterIfChosen,
     /// Riot (CR 702.136a): it enters with your choice of a +1/+1 counter or haste.
     EntersWithCounterOrHaste,
+    /// Devour N (CR 702.82a): as it enters, its controller may sacrifice any number of
+    /// creatures; it enters with N +1/+1 counters for each.
+    Devour(u8),
     /// CR 614.1c — "<this> enters with N <kind> counters on it."
     /// With `condition`, only if it holds as it enters (bloodthirst, CR 702.54).
     EntersWithCounters {

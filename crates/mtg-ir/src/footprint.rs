@@ -465,6 +465,7 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
         | C::OpponentDamagedThisTurn
         | C::YouAreAttacked
         | C::OpponentLostLifeThisTurn
+        | C::YouGainedLifeThisTurn
         | C::CastFor(_)
         | C::Renowned
         | C::YouAttackedThisTurn
@@ -510,7 +511,8 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         | Value::CardTypesAmong(s)
         | Value::PartySize(s)
         | Value::BasicLandTypesAmong(s)
-        | Value::SpellsCastThisTurn(s) => selector_read(s, r),
+        | Value::SpellsCastThisTurn(s)
+        | Value::CardsDrawnThisTurn(s) => selector_read(s, r),
         Value::Power(s) | Value::Toughness(s) | Value::LeastToughness(s) => objects_read(s, r),
         Value::LifeTotal(s) => players_read(s, r, Resource::Life),
         Value::Counters(s, kind) => {

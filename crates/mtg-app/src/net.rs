@@ -7,8 +7,8 @@
 //! # Reachability
 //!
 //! A host listens on all interfaces and puts its LAN address, and the loopback address for
-//! testing on one machine, in the invite. Over the internet the host needs its port forwarded
-//! and the public address added; relays and mDNS discovery are designed but not built.
+//! testing on one machine, in the invite. Internet hosting uses an embedded ngrok HTTPS
+//! tunnel. Noise still authenticates the host and encrypts game messages end to end.
 
 use std::net::{IpAddr, TcpListener, UdpSocket};
 use std::sync::{
@@ -107,6 +107,10 @@ pub struct HostConfig<'a> {
     pub port: u16,
     /// A public address to put in the invite, for play over the internet.
     pub public_address: Option<String>,
+    /// None for LAN hosting; an ngrok authtoken for an automatic internet tunnel.
+    pub tunnel_token: Option<String>,
+    /// Name shown to players on the same network.
+    pub name: String,
     pub identity: &'a Identity,
     pub source: &'a dyn CardSource,
 }
@@ -123,6 +127,8 @@ pub fn host(
         deck,
         port,
         public_address: extra_address,
+        tunnel_token,
+        name,
         identity,
         source,
     } = config;
@@ -130,7 +136,23 @@ pub fn host(
         .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
-    let mut endpoints = Vec::new();
+    check_cancel(cancel)?;
+    let mut tunnel = if let Some(token) = tunnel_token {
+        let _ = events.send(MatchEvent::Status("opening your internet tunnel…".into()));
+        Some(crate::tunnel::Tunnel::start(port, &token, cancel)?)
+    } else {
+        None
+    };
+    check_cancel(cancel)?;
+    let session = SessionId::random();
+    let mut endpoints = vec![Endpoint::Mdns {
+        instance: mtg_net::discovery::instance(session).into(),
+    }];
+    if let Some(tunnel) = &tunnel {
+        endpoints.push(Endpoint::Tunnel {
+            url: tunnel.url().into(),
+        });
+    }
     if let Some(public) = extra_address.filter(|a| !a.trim().is_empty()) {
         endpoints.push(Endpoint::Direct {
             host: public.trim().into(),
@@ -148,20 +170,30 @@ pub fn host(
         port,
     });
 
-    let invite = Invite::issue(
-        identity,
-        SessionId::random(),
-        endpoints,
-        now() + INVITE_LIFETIME,
-    );
+    let invite = Invite::issue(identity, session, endpoints, now() + INVITE_LIFETIME);
+    let advertisement = match mtg_net::discovery::Advertisement::publish(&invite, port, &name) {
+        Ok(advertisement) => Some(advertisement),
+        Err(_) => {
+            let _ = events.send(MatchEvent::Status(
+                "Nearby discovery is unavailable. Share the invite link instead.".into(),
+            ));
+            None
+        }
+    };
     let _ = events.send(MatchEvent::Invite(invite.to_url()));
-    let _ = events.send(MatchEvent::Status(format!(
-        "waiting for someone to join on port {port}…"
-    )));
+    let _ = events.send(MatchEvent::Status("waiting for someone to join…".into()));
 
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let (mut secure, shuffle) =
-        wait_for_guest(&listener, identity, &invite, &deck, events, cancel)?;
+    let (mut secure, shuffle) = wait_for_guest_with_tunnel(
+        &listener,
+        identity,
+        &invite,
+        &deck,
+        events,
+        cancel,
+        tunnel.as_mut(),
+    )?;
+    drop(advertisement);
     let guest = secure.peer().fingerprint().to_grouped_string();
     let _ = events.send(MatchEvent::Status(format!("playing {guest}")));
 
@@ -169,6 +201,7 @@ pub fn host(
 }
 
 /// Failed attempts may be retried only before a valid Join consumes the invite.
+#[cfg(test)]
 fn wait_for_guest(
     listener: &TcpListener,
     identity: &Identity,
@@ -177,11 +210,28 @@ fn wait_for_guest(
     events: &Sender<MatchEvent>,
     cancel: &AtomicBool,
 ) -> Result<(NoiseChannel<WsChannel>, Seed), String> {
+    wait_for_guest_with_tunnel(listener, identity, invite, deck, events, cancel, None)
+}
+
+fn wait_for_guest_with_tunnel(
+    listener: &TcpListener,
+    identity: &Identity,
+    invite: &Invite,
+    deck: &DeckSpec,
+    events: &Sender<MatchEvent>,
+    cancel: &AtomicBool,
+    mut tunnel: Option<&mut crate::tunnel::Tunnel>,
+) -> Result<(NoiseChannel<WsChannel>, Seed), String> {
     let seed = Seed::random();
     let commitment = commit(&seed, deck);
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
+        }
+        if tunnel.as_mut().is_some_and(|tunnel| !tunnel.is_running()) {
+            return Err(
+                "Your internet tunnel stopped. Check your connection and host again.".into(),
+            );
         }
         invite
             .verify(now())
@@ -298,11 +348,29 @@ fn connect_to_host(
         invite
             .verify(now())
             .map_err(|e| format!("the invite cannot be used: {e:?}"))?;
-        let Endpoint::Direct { host, port } = endpoint else {
-            continue;
+        let (address, connection) = match endpoint {
+            Endpoint::Direct { host, port } => {
+                let address = format!("{host}:{port}");
+                let _ = events.send(MatchEvent::Status("connecting to the host…".into()));
+                (address, WsChannel::connect(host, *port))
+            }
+            Endpoint::Tunnel { url } => {
+                let _ = events.send(MatchEvent::Status(
+                    "connecting through the internet tunnel…".into(),
+                ));
+                (url.to_string(), WsChannel::connect_url(url))
+            }
+            Endpoint::Mdns { instance } => {
+                let _ = events.send(MatchEvent::Status("looking for the host nearby…".into()));
+                let found = resolve_nearby(instance, cancel)?;
+                let Some((address, connection)) = found else {
+                    continue;
+                };
+                (address, Ok(connection))
+            }
+            _ => continue,
         };
-        let _ = events.send(MatchEvent::Status(format!("connecting to {host}:{port}…")));
-        let attempt = WsChannel::connect(host, *port).and_then(|plain| {
+        let attempt = connection.and_then(|plain| {
             if cancel.load(Ordering::Relaxed) {
                 return Err(WireError::Refused("cancelled".into()));
             }
@@ -313,10 +381,36 @@ fn connect_to_host(
         check_cancel(cancel)?;
         match attempt {
             Ok(channel) => return Ok(channel),
-            Err(error) => last_error = format!("{host}:{port}: {error}"),
+            Err(error) => last_error = format!("{address}: {error}"),
         }
     }
     Err(format!("could not reach the host ({last_error})"))
+}
+
+fn resolve_nearby(
+    instance: &str,
+    cancel: &AtomicBool,
+) -> Result<Option<(String, WsChannel)>, String> {
+    let Ok(mut browser) = mtg_net::discovery::Browser::new() else {
+        return Ok(None);
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        check_cancel(cancel)?;
+        browser.poll();
+        if let Some(game) = browser.find(instance) {
+            for address in &game.addresses {
+                check_cancel(cancel)?;
+                let connection = WsChannel::connect(&address.to_string(), game.port);
+                if let Ok(connection) = connection {
+                    return Ok(Some((format!("{address}:{}", game.port), connection)));
+                }
+            }
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(None)
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
@@ -427,6 +521,121 @@ mod tests {
             NoiseChannel::respond(channel, &identity).unwrap();
         });
         (port, worker)
+    }
+
+    #[test]
+    #[ignore = "requires NGROK_AUTHTOKEN and connects to the public ngrok service"]
+    fn a_live_ngrok_tunnel_plays_a_complete_match() {
+        let token = std::env::var("NGROK_AUTHTOKEN")
+            .expect("set NGROK_AUTHTOKEN to run this explicit live test");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tunnel = crate::tunnel::Tunnel::start(port, &token, &cancel).unwrap();
+        // Only the public tunnel is advertised, so LAN fallback cannot mask a failure.
+        let identity = Identity::generate();
+        let invite = Invite::issue(
+            &identity,
+            SessionId::random(),
+            vec![Endpoint::Tunnel {
+                url: tunnel.url().into(),
+            }],
+            now() + 60,
+        );
+        let link = invite.to_url();
+        listener.set_nonblocking(true).unwrap();
+        let host_cancel = Arc::clone(&cancel);
+        let host = std::thread::spawn(move || {
+            let deck = crate::decks::demo_deck();
+            let (events, _) = std::sync::mpsc::channel();
+            let (mut channel, shuffle) =
+                wait_for_guest(&listener, &identity, &invite, &deck, &events, &host_cancel)?;
+            host_match(
+                &mut channel,
+                MatchSettings {
+                    format: mtg_session::game::Format::Constructed,
+                    best_of: 1,
+                },
+                deck,
+                &crate::decks::LocalSource::new(None),
+                shuffle,
+                &mut crate::seat::BotSeat::default(),
+            )
+            .map_err(|e| e.to_string())
+        });
+        let (events, _) = std::sync::mpsc::channel();
+        let guest = join(
+            &link,
+            crate::decks::demo_deck(),
+            &Identity::generate(),
+            &mut crate::seat::BotSeat::default(),
+            &events,
+        );
+        cancel.store(true, Ordering::Relaxed);
+        let hosted = host.join().unwrap();
+        let guest = guest.expect("guest played through the public tunnel");
+        let hosted = hosted.expect("host played through the public tunnel");
+        assert_eq!(hosted.score, guest.score);
+        assert_eq!(hosted.winner, guest.winner);
+        drop(tunnel);
+    }
+
+    #[test]
+    fn a_tunnel_authenticates_the_invited_host() {
+        let host = Identity::generate();
+        let issuer = Identity::from_seed(&host.to_backup());
+        let (port, server) = identity_server(host);
+        let invite = Invite::issue(
+            &issuer,
+            SessionId::random(),
+            vec![Endpoint::Tunnel {
+                url: format!("ws://127.0.0.1:{port}/").into(),
+            }],
+            now() + 60,
+        );
+        let (events, _) = std::sync::mpsc::channel();
+        let channel = connect_to_host(
+            &invite,
+            &Identity::generate(),
+            &events,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(channel.peer(), issuer.public());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_impostor_tunnel_is_rejected_before_a_direct_fallback() {
+        let host = Identity::generate();
+        let issuer = Identity::from_seed(&host.to_backup());
+        let (wrong_port, wrong_server) = identity_server(Identity::generate());
+        let (port, server) = identity_server(host);
+        let invite = Invite::issue(
+            &issuer,
+            SessionId::random(),
+            vec![
+                Endpoint::Tunnel {
+                    url: format!("ws://127.0.0.1:{wrong_port}/").into(),
+                },
+                Endpoint::Direct {
+                    host: "127.0.0.1".into(),
+                    port,
+                },
+            ],
+            now() + 60,
+        );
+        let (events, _) = std::sync::mpsc::channel();
+        let channel = connect_to_host(
+            &invite,
+            &Identity::generate(),
+            &events,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(channel.peer(), issuer.public());
+        wrong_server.join().unwrap();
+        server.join().unwrap();
     }
 
     #[test]

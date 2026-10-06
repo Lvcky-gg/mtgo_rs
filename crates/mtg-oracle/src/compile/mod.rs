@@ -152,6 +152,8 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
     // An instant's or sorcery's effect lines as text, and its overload cost.
     let mut spell_texts: Vec<&str> = Vec::new();
     let mut overload: Option<(mtg_core::ManaCost, String)> = None;
+    // "Awaken 3—{4}{W}": the counters, its cost, and the printed line.
+    let mut awaken: Option<(i32, mtg_core::ManaCost, String)> = None;
     while i < lines.len() {
         let line = lines[i];
         if backup.is_none()
@@ -176,6 +178,49 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
                 .unwrap_or_default();
             overload = Some((mana, original));
             i += 1;
+            continue;
+        }
+        if is_spell
+            && let Some(r) = line.strip_prefix("awaken ")
+            && let Some((n, r)) = r.split_once('—')
+            && let Ok(n) = n.parse::<i32>()
+            && let Some((mana, "")) = mana_cost(r.trim_end_matches('.'))
+        {
+            let original = printed
+                .get(i)
+                .map(|l| strip_reminder(l))
+                .unwrap_or_default();
+            awaken = Some((n, mana, original));
+            i += 1;
+            continue;
+        }
+        // CR 702.110 — exploit, and the "when ~ exploits a creature" ability that reads it:
+        // one ability, "you may sacrifice a creature. When you do, …", whose second half
+        // chooses its targets after the sacrifice, as the separate trigger would.
+        if line == "exploit"
+            && face.card_types.contains(&CardType::Creature)
+            && let Some(then) = lines
+                .get(i + 1)
+                .and_then(|l| l.strip_prefix("when ~ exploits a creature, "))
+        {
+            let whole = printed
+                .get(i..i + 2)
+                .unwrap_or_default()
+                .iter()
+                .map(|l| strip_reminder(l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let text = format!("when ~ enters, you may sacrifice a creature. when you do, {then}");
+            let mut cx = Cx::new(subtypes);
+            match compile_line(&text, face, &mut cx) {
+                Some(Line::Abilities(list)) => {
+                    for kind_targets in list {
+                        push(&mut out.abilities, kind_targets, Some(&whole));
+                    }
+                }
+                _ => out.unparsed.push(whole),
+            }
+            i += 2;
             continue;
         }
         let original = printed
@@ -287,6 +332,22 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
         }
     }
 
+    // The engine pays a plain alternative cost's other parts by finding it on the face, so
+    // a face has at most one.
+    let plain = |a: &&Ability| {
+        matches!(
+            a.kind,
+            AbilityKind::AlternativeCost {
+                kind: mtg_ir::ability::AltCost::Pay,
+                ..
+            }
+        )
+    };
+    if out.abilities.iter().filter(plain).count() > 1 {
+        out.unparsed
+            .push("more than one alternative cost to pay rather than the mana cost".into());
+    }
+
     if let Some((n, from, original)) = backup {
         match backup_trigger(n, &out.abilities[from..], face, subtypes) {
             Some(kt) => push(&mut out.abilities, kt, Some(&original)),
@@ -346,6 +407,70 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
                             instead: instead.map(Box::new),
                         },
                         Vec::new(),
+                    ),
+                    Some(&original),
+                );
+            }
+            _ => out.unparsed.push(original),
+        }
+    }
+
+    // CR 702.113 — awaken: cast for this cost, the spell also puts N +1/+1 counters on
+    // target land you control, which becomes a 0/0 Elemental creature with haste that is
+    // still a land. Its targets are the spell's and then the land.
+    if let Some((n, mana, original)) = awaken {
+        let mut cx = Cx::new(subtypes);
+        let effects = spell_texts
+            .iter()
+            .map(|l| clauses::effect(l, &mut cx))
+            .collect::<Option<Vec<_>>>();
+        match (effects, cx.subtype("elemental")) {
+            (Some(mut effects), Some(elemental)) if !effects.is_empty() => {
+                let land = cx.target(TargetSpec {
+                    zone: Zone::Battlefield,
+                    filter: ObjectFilter::And(vec![
+                        ObjectFilter::HasType(CardType::Land),
+                        ObjectFilter::ControlledBy(Box::new(Selector::You)),
+                    ]),
+                    allows_players: false,
+                    players: None,
+                    mode: None,
+                    count: Value::ONE,
+                    up_to: false,
+                    distinct_from_other_targets: false,
+                });
+                effects.push(Effect::AddCounters {
+                    what: land.clone(),
+                    kind: mtg_core::CounterKind::PlusOnePlusOne,
+                    amount: Value::Fixed(n),
+                });
+                for modification in [
+                    Modification::AddTypes(vec![CardType::Creature]),
+                    Modification::AddSubtypes(vec![elemental]),
+                    Modification::SetBasePowerToughness {
+                        power: Value::ZERO,
+                        toughness: Value::ZERO,
+                    },
+                    clauses::grant(mtg_core::Keyword::Haste),
+                ] {
+                    effects.push(Effect::Continuous {
+                        what: land.clone(),
+                        modification,
+                        duration: mtg_ir::effect::Duration::Permanent,
+                    });
+                }
+                push(
+                    &mut out.abilities,
+                    (
+                        AbilityKind::AlternativeCost {
+                            cost: Cost {
+                                mana,
+                                ..Cost::free()
+                            },
+                            kind: mtg_ir::ability::AltCost::Awaken,
+                            instead: Some(Box::new(Effect::Sequence(effects))),
+                        },
+                        cx.targets,
                     ),
                     Some(&original),
                 );
@@ -871,6 +996,21 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     if let Some(list) = chapter(line, face, cx) {
         return Some(Line::Abilities(list));
     }
+    // CR 702.82 — devour N.
+    if let Some(n) = line.strip_prefix("devour ")
+        && let Ok(n) = n.trim_end_matches('.').parse::<u8>()
+        && face.card_types.contains(&CardType::Creature)
+    {
+        return one(
+            AbilityKind::ReplacementEffect(Replacement {
+                matches: EventPattern::Enters {
+                    who: ObjectFilter::IsSelf,
+                },
+                kind: ReplacementKind::Devour(n),
+            }),
+            cx,
+        );
+    }
     // CR 702.52 — dredge N.
     if let Some(n) = line.strip_prefix("dredge ")
         && let Ok(n) = n.trim_end_matches('.').parse::<u8>()
@@ -882,6 +1022,15 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     if line == "undaunted" {
         return compile_line(
             "~ costs {1} less to cast for each opponent you have.",
+            face,
+            cx,
+        );
+    }
+    // CR 702.166 — bargain: an optional additional cost, paid and remembered like a kicker
+    // whose cost is a sacrifice.
+    if line == "bargain" {
+        return compile_line(
+            "kicker—sacrifice an artifact, enchantment, or token.",
             face,
             cx,
         );
@@ -965,7 +1114,15 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     if let Some(kind) = scavenge(line, cx) {
         return one(kind, cx);
     }
+    if face.card_types.contains(&CardType::Creature)
+        && let Some(kind) = encore(line)
+    {
+        return one(kind, cx);
+    }
     if let Some(kind) = conditional_alternative_cost(line) {
+        return one(kind, cx);
+    }
+    if let Some(kind) = plain_alternative_cost(line, cx) {
         return one(kind, cx);
     }
     // CR 702.49 — "ninjutsu {1}{U}": {1}{U}, return an unblocked attacker you control to
@@ -1166,6 +1323,88 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
             },
             cx,
         );
+    }
+    // "Kicker—Sacrifice an artifact or creature.": a kicker paid by choosing.
+    if let Some(r) = line.strip_prefix("kicker—")
+        && let Some(cost) = cost(r.trim_end_matches('.'), cx)
+        && !cost.additional.is_empty()
+        && cost.additional.iter().all(|p| {
+            matches!(
+                p,
+                AdditionalCost::Sacrifice {
+                    what: Selector::All { .. },
+                    ..
+                } | AdditionalCost::TapUntapped { .. }
+                    | AdditionalCost::Discard { .. }
+            )
+        })
+    {
+        return one(
+            AbilityKind::Kicker {
+                cost,
+                buyback: false,
+                entwine: false,
+            },
+            cx,
+        );
+    }
+    // CR 702.153 — "casualty 2": as it is cast, its controller may sacrifice a creature with
+    // power 2 or greater; when they do, it is copied. CR 702.78 — conspire: the same, by
+    // tapping two untapped creatures that share a color with it. Both are paid like a kicker.
+    let copy_kicker = if let Some(n) = line.strip_prefix("casualty ")
+        && let Ok(n) = n.trim_end_matches('.').parse::<i32>()
+    {
+        Some(AdditionalCost::Sacrifice {
+            what: Selector::All {
+                zone: Zone::Battlefield,
+                filter: ObjectFilter::And(vec![
+                    ObjectFilter::HasType(CardType::Creature),
+                    ObjectFilter::PowerAtLeast(Value::Fixed(n)),
+                ]),
+            },
+            count: Value::ONE,
+        })
+    } else if line.trim_end_matches('.') == "conspire" {
+        Some(AdditionalCost::TapUntapped {
+            filter: ObjectFilter::And(vec![
+                ObjectFilter::HasType(CardType::Creature),
+                ObjectFilter::SharesColorWith(Box::new(Selector::SelfSource)),
+            ]),
+            count: Value::Fixed(2),
+        })
+    } else {
+        None
+    };
+    if let Some(part) = copy_kicker {
+        let kicker = AbilityKind::Kicker {
+            cost: Cost {
+                additional: vec![part],
+                ..Cost::free()
+            },
+            buyback: false,
+            entwine: false,
+        };
+        let copy = AbilityKind::Triggered {
+            trigger: Trigger {
+                on: EventPattern::Cast {
+                    who: ObjectFilter::IsSelf,
+                    by: Selector::You,
+                },
+                functions_from: Zone::Stack,
+                intervening_if: Some(mtg_ir::trigger::Condition::Kicked),
+                optional: false,
+                limit: None,
+                timing: TriggerTiming::Normal,
+            },
+            effect: Effect::CopySpell {
+                what: Selector::SelfSource,
+                may_change_targets: true,
+            },
+        };
+        return Some(Line::Abilities(vec![
+            (kicker, Vec::new()),
+            (copy, Vec::new()),
+        ]));
     }
     // CR 702.175 — "offspring {1}{U}": an optional additional cost; paid, a 1/1 token copy
     // of it is made as it enters.
@@ -1394,6 +1633,32 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     }
     if let Some(outputs) = mana_line(line) {
         return Some(Line::Abilities(vec![mana_ability(outputs)]));
+    }
+    // "{T}: Add {G} for each creature you control." — a mana ability whose amount is
+    // counted as it resolves.
+    if let Some((input, output)) = line.split_once(": ")
+        && let Some((head, per)) = output.split_once(" for each ")
+        && head.starts_with("add ")
+        && let Some(per) = per.strip_suffix('.')
+        && let Some((by, "")) = clauses::per(per, cx)
+        && let Some(Line::Abilities(mut list)) =
+            compile_line(&format!("{input}: {head}."), face, &mut cx.fresh())
+        && let [
+            (
+                AbilityKind::Activated {
+                    effect: effect @ Effect::AddMana { .. },
+                    is_mana_ability: true,
+                    ..
+                },
+                _,
+            ),
+        ] = list.as_mut_slice()
+        && clauses::scale(effect, by)
+    {
+        return Some(Line::Abilities(list));
+    }
+    if let Some(list) = activate_only_if(line, face, cx) {
+        return Some(Line::Abilities(list));
     }
     // "{T}: Add one mana of any color. Activate only once each turn." — any mana ability,
     // limited. Anything else falls through to the activated-ability grammar.
@@ -3102,6 +3367,30 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
                 },
             ),
             (
+                "deals combat damage to an opponent",
+                EventPattern::DealsDamage {
+                    source: who.clone(),
+                    to: DamageRecipient::Player(Selector::Opponents),
+                    combat_only: true,
+                },
+            ),
+            (
+                "deals damage to an opponent",
+                EventPattern::DealsDamage {
+                    source: who.clone(),
+                    to: DamageRecipient::Player(Selector::Opponents),
+                    combat_only: false,
+                },
+            ),
+            (
+                "deals damage to a player",
+                EventPattern::DealsDamage {
+                    source: who.clone(),
+                    to: DamageRecipient::Player(Selector::EachPlayer),
+                    combat_only: false,
+                },
+            ),
+            (
                 "deals damage",
                 EventPattern::DealsDamage {
                     source: who.clone(),
@@ -3190,6 +3479,13 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
         (" attacks", normal),
         (" becomes blocked", normal),
         (" deals combat damage to a player", normal),
+        (" deals combat damage to an opponent", normal),
+        (" deals damage to an opponent", normal),
+        (" deals damage to a player", normal),
+        (
+            " becomes the target of a spell or ability an opponent controls",
+            normal,
+        ),
     ] {
         let Some(r) = r.strip_prefix(phrase) else {
             continue;
@@ -3223,6 +3519,24 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
                 to: DamageRecipient::Player(Selector::EachPlayer),
                 combat_only: true,
             },
+            " deals combat damage to an opponent" | " deals damage to an opponent" => {
+                EventPattern::DealsDamage {
+                    source: who,
+                    to: DamageRecipient::Player(Selector::Opponents),
+                    combat_only: phrase.contains("combat"),
+                }
+            }
+            " deals damage to a player" => EventPattern::DealsDamage {
+                source: who,
+                to: DamageRecipient::Player(Selector::EachPlayer),
+                combat_only: false,
+            },
+            " becomes the target of a spell or ability an opponent controls" => {
+                EventPattern::BecomesTarget {
+                    who,
+                    by: Selector::Opponents,
+                }
+            }
             _ => EventPattern::Enters { who },
         };
         return Some((pattern, timing, subject, r));
@@ -3231,6 +3545,45 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
 }
 
 // ---- activated abilities ------------------------------------------------------
+
+/// "{T}: Add {U} or {B}. Activate only if you control a Swamp." — any activated ability,
+/// with a condition checked as it is activated (CR 602.5b).
+fn activate_only_if(
+    line: &str,
+    face: &FaceText,
+    cx: &mut Cx,
+) -> Option<Vec<(AbilityKind, Vec<TargetSpec>)>> {
+    let (head, rest) = line.rsplit_once(" activate only if ")?;
+    if !head.ends_with('.') || head.contains('"') {
+        return None;
+    }
+    let rest = rest.strip_suffix('.')?;
+    let (rest, only) = if let Some(r) = rest.strip_suffix(" and only as a sorcery") {
+        (r, Some(ActivationTiming::SorcerySpeed))
+    } else if let Some(r) = rest.strip_suffix(" and only once each turn") {
+        (r, Some(ActivationTiming::InstantOncePerTurn))
+    } else {
+        (rest, None)
+    };
+    let mut inner = cx.fresh();
+    let (condition, "") = conditions::condition(rest, &inner)? else {
+        return None;
+    };
+    let Some(Line::Abilities(mut list)) = compile_line(head, face, &mut inner) else {
+        return None;
+    };
+    let [(AbilityKind::Activated { cost, timing, .. }, _)] = list.as_mut_slice() else {
+        return None;
+    };
+    if let Some(only) = only {
+        if *timing != ActivationTiming::Instant {
+            return None;
+        }
+        *timing = only;
+    }
+    cost.timing.push(condition);
+    Some(list)
+}
 
 /// "<cost>: <effect>", with an optional "Activate only as a sorcery."
 pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
@@ -3407,6 +3760,60 @@ fn return_self(to: Zone, tapped: bool) -> Effect {
     }
 }
 
+/// CR 702.141a — "encore {5}{R}": exile this card from your graveyard: for each opponent,
+/// create a token copy of it that attacks that opponent this turn if able. They gain haste.
+/// Sacrifice them at the beginning of the next end step. Activate only as a sorcery.
+fn encore(line: &str) -> Option<AbilityKind> {
+    let (mana, rest) = mana_cost(line.trim_end_matches('.').strip_prefix("encore ")?)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let made = || Selector::Bound(mtg_ir::selector::Binding::It);
+    Some(AbilityKind::Activated {
+        cost: Cost {
+            mana,
+            additional: vec![AdditionalCost::ExileFrom {
+                zone: Zone::Graveyard,
+                filter: ObjectFilter::IsSelf,
+                count: Value::ONE,
+            }],
+            ..Cost::free()
+        },
+        effect: Effect::Sequence(vec![
+            Effect::CreateTokenCopy {
+                of: Selector::SelfSource,
+                count: Value::Count(Box::new(Selector::Opponents)),
+                controller: Selector::You,
+            },
+            Effect::Continuous {
+                what: made(),
+                modification: clauses::grant(mtg_core::Keyword::Haste),
+                duration: mtg_ir::effect::Duration::Permanent,
+            },
+            // Two players: "attacks that opponent" is attacking the only one there is.
+            Effect::Continuous {
+                what: made(),
+                modification: Modification::Restriction(Restriction::MustAttackIfAble),
+                duration: mtg_ir::effect::Duration::UntilEndOfTurn,
+            },
+            Effect::Delayed {
+                on: EventPattern::StepBegins {
+                    step: Step::End,
+                    whose: Selector::EachPlayer,
+                },
+                effect: Box::new(Effect::Sacrifice {
+                    who: Selector::You,
+                    what: made(),
+                }),
+            },
+        ]),
+        functions_from: Zone::Graveyard,
+        is_mana_ability: false,
+        is_loyalty_ability: false,
+        timing: ActivationTiming::SorcerySpeed,
+    })
+}
+
 /// CR 702.97a — "scavenge {3}{G}{G}": exile this card from your graveyard: put a number of
 /// +1/+1 counters equal to its power on target creature. Scavenge only as a sorcery.
 fn scavenge(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
@@ -3558,15 +3965,28 @@ fn chosen_cost(part: &str, cx: &Cx) -> Option<AdditionalCost> {
             None => (false, r),
         };
         let card = if n == 1 { "card" } else { "cards" };
-        let (mut filter, r) = if let Some(r) = r.strip_prefix(card) {
-            (ObjectFilter::Any, r)
+        // Whether the noun is a card in the hand, which "from your hand" also allows.
+        let (mut filter, r, hand) = if let Some(r) = r.strip_prefix(card) {
+            (ObjectFilter::Any, r, true)
         } else {
             let (noun, r) = nouns::noun(r, cx)?;
             if noun.plural != (n > 1) {
                 return None;
             }
-            (noun.filter, r)
+            (noun.filter, r, noun.zone == Zone::Hand)
         };
+        // "exile a blue card from your hand": an alternative cost's pitched card.
+        if part.ends_with(" from your hand")
+            && !other
+            && (r.is_empty() || r == " from your hand")
+            && hand
+        {
+            return Some(AdditionalCost::ExileFrom {
+                zone: Zone::Hand,
+                filter,
+                count: Value::Fixed(n),
+            });
+        }
         // The noun may have read "from your graveyard" itself.
         if !part.ends_with(" from your graveyard") || !(r.is_empty() || r == " from your graveyard")
         {
@@ -3636,7 +4056,23 @@ fn additional_cast_cost(line: &str, cx: &Cx) -> Option<AbilityKind> {
 /// +1/+1 counter from ~", "sacrifice a creature", "discard a card".
 fn cost(text: &str, cx: &Cx) -> Option<Cost> {
     let mut out = Cost::free();
-    for part in text.split(", ") {
+    // "Sacrifice an artifact, enchantment, or token": a list in one part, not three parts.
+    let mut parts: Vec<String> = Vec::new();
+    let raw: Vec<&str> = text.split(", ").collect();
+    let mut i = 0;
+    while i < raw.len() {
+        let take = if raw.get(i + 2).is_some_and(|p| p.starts_with("or ")) {
+            3
+        } else if raw.get(i + 1).is_some_and(|p| p.starts_with("or ")) {
+            2
+        } else {
+            1
+        };
+        let end = (i + take).min(raw.len());
+        parts.push(raw[i..end].join(", "));
+        i = end;
+    }
+    for part in parts.iter().map(String::as_str) {
         if part == "discard ~" {
             out.additional.push(AdditionalCost::Discard {
                 count: Value::ONE,
@@ -3763,17 +4199,27 @@ fn statics(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>>
     let owned: String;
     let (line, condition) = if let Some(r) = line.strip_prefix("during your turn, ") {
         (r, Some(mtg_ir::trigger::Condition::YourTurn))
+    } else if let Some(r) = line.strip_prefix("during turns other than yours, ") {
+        (
+            r,
+            Some(mtg_ir::trigger::Condition::Not(Box::new(
+                mtg_ir::trigger::Condition::YourTurn,
+            ))),
+        )
     } else if let Some(r) = line.strip_prefix("as long as ") {
-        let about_self = r.starts_with("~ ");
+        // "As long as ~ is equipped, it gets +2/+2": "it" is this. "As long as equipped
+        // creature is a Human, it has lifelink": "it" is the equipped creature.
+        let about = ["~", "enchanted creature", "equipped creature", "enchanted permanent"]
+            .into_iter()
+            .find(|host| r.starts_with(&format!("{host} ")));
         let (cond, r) = conditions::condition(r, cx)?;
         let r = r.strip_prefix(", ")?;
-        // "As long as ~ is equipped, it gets +2/+2": "it" is this.
-        let r = match r.strip_prefix("it ").filter(|_| about_self) {
-            Some(rest) => {
-                owned = format!("~ {rest}");
+        let r = match (r.strip_prefix("it "), about) {
+            (Some(rest), Some(host)) => {
+                owned = format!("{host} {rest}");
                 owned.as_str()
             }
-            None => r,
+            _ => r,
         };
         (r, Some(cond))
     } else if let Some((head, tail)) = line.split_once(" as long as ") {
@@ -3816,6 +4262,15 @@ fn statics(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>>
 }
 
 fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>> {
+    // "During your turn, this Vehicle is an artifact creature": its printed power and
+    // toughness apply, as when it is crewed.
+    if line == "~ is an artifact creature" && face.subtypes.iter().any(|s| s == "Vehicle") {
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::AddTypes(vec![CardType::Creature]),
+            condition: None,
+        }]);
+    }
     // "Enchanted creature gets +2/+2 and can't block": two statics about one subject.
     if let Some((subject, rest)) = line.split_once(" gets ")
         && let Some((pt, tail)) = rest.split_once(" and ")
@@ -4819,6 +5274,62 @@ fn conditional_alternative_cost(line: &str) -> Option<AbilityKind> {
     })
 }
 
+/// CR 118.9 — "You may pay 1 life and exile a blue card from your hand rather than pay this
+/// spell's mana cost.", "If you control a Plains, you may tap an untapped creature you
+/// control rather than pay this spell's mana cost."
+fn plain_alternative_cost(line: &str, cx: &Cx) -> Option<AbilityKind> {
+    let (condition, r) = match line.strip_prefix("if ") {
+        Some(r) => {
+            let (c, r) = conditions::condition(r, cx)?;
+            (Some(c), r.strip_prefix(", ")?)
+        }
+        None => (None, line),
+    };
+    let r = r
+        .strip_prefix("you may ")?
+        .strip_suffix(" rather than pay ~'s mana cost.")?;
+    // "pay {1}{U} and tap an untapped artifact you control": the parts, then the mana.
+    let mut mana = None;
+    let mut rest = Vec::new();
+    for part in r.split(" and ") {
+        match part.strip_prefix("pay ").and_then(mana_cost) {
+            Some((m, "")) if mana.is_none() => mana = Some(m),
+            _ => rest.push(part),
+        }
+    }
+    let mut cost = if rest.is_empty() {
+        Cost::free()
+    } else {
+        cost(&rest.join(", "), cx)?
+    };
+    if !cost.mana.symbols.is_empty()
+        || !cost.additional.iter().all(|p| {
+            matches!(
+                p,
+                AdditionalCost::PayLife { .. }
+                    | AdditionalCost::Sacrifice {
+                        what: Selector::All { .. },
+                        ..
+                    }
+                    | AdditionalCost::TapUntapped { .. }
+                    | AdditionalCost::ExileFrom {
+                        zone: Zone::Hand,
+                        ..
+                    }
+            )
+        })
+    {
+        return None;
+    }
+    cost.mana = mana.unwrap_or_default();
+    cost.timing.extend(condition);
+    Some(AbilityKind::AlternativeCost {
+        cost,
+        kind: mtg_ir::ability::AltCost::Pay,
+        instead: None,
+    })
+}
+
 /// Alternative costs of a permanent card: "dash {2}{R}" (CR 702.109), and "evoke {1}{U}"
 /// (CR 702.74) with its "when it enters, if it was evoked, sacrifice it".
 fn alternative_cost(line: &str, face: &FaceText) -> Option<Vec<(AbilityKind, Vec<TargetSpec>)>> {
@@ -5354,6 +5865,12 @@ fn keyword_expansion(line: &str) -> Option<Vec<String>> {
             "when ~ enters, create a 0/0 black phyrexian germ creature token, then attach ~ \
              to it."
                 .into(),
+        ],
+        // CR 702.161a
+        ("living metal", None) => vec!["during your turn, ~ is an artifact creature.".into()],
+        // CR 702.163a
+        ("for mirrodin!", None) => vec![
+            "when ~ enters, create a 2/2 red rebel creature token, then attach ~ to it.".into(),
         ],
         // CR 702.107
         _ if word.starts_with("outlast ") && n.is_none() => {

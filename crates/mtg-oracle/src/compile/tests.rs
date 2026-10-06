@@ -486,14 +486,19 @@ fn tap_for_mana_lines_become_mana_abilities() {
 
 #[test]
 fn mana_lines_with_anything_more_are_left_alone() {
-    for text in [
-        "{T}: Add {G} for each Elf you control.",
-        "{T}: Add one mana of any color a land an opponent controls could produce.",
-    ] {
-        let c = land(&[], Some(text));
-        assert!(c.abilities.is_empty(), "{text}");
-        assert!(!c.understood(), "{text}");
-    }
+    let text = "{T}: Add one mana of any color a land an opponent controls could produce.";
+    let c = land(&[], Some(text));
+    assert!(c.abilities.is_empty(), "{text}");
+    assert!(!c.understood(), "{text}");
+    // "for each" is counted as the ability resolves.
+    let c = land(&[], Some("{T}: Add {G} for each Elf you control."));
+    assert!(matches!(
+        &produces(&ok(&c)[0])[0],
+        ManaOutput::Repeated {
+            amount: Value::Count(_),
+            ..
+        }
+    ));
 }
 
 #[test]

@@ -123,6 +123,12 @@ pub struct App {
     join_link: String,
     host_port: String,
     host_address: String,
+    host_internet: bool,
+    host_name: String,
+    ngrok_token: String,
+    remember_ngrok: bool,
+    nearby: Option<mtg_net::discovery::Browser>,
+    nearby_error: Option<String>,
     setup_error: Option<String>,
     /// Coverage of the chosen deck, recomputed when the choice changes.
     coverage: Option<(DeckId, usize, usize)>,
@@ -160,6 +166,12 @@ impl App {
             join_link: String::new(),
             host_port: "0".into(),
             host_address: String::new(),
+            host_internet: false,
+            host_name: "Local game".into(),
+            ngrok_token: String::new(),
+            remember_ngrok: false,
+            nearby: None,
+            nearby_error: None,
             setup_error: None,
             coverage: None,
             import_name: String::new(),
@@ -174,6 +186,19 @@ impl App {
             builder: None,
         };
         app.refresh();
+        if let Some(token) = app
+            .store
+            .as_ref()
+            .and_then(|store| store.meta("ngrok_authtoken").ok().flatten())
+            .filter(|token| !token.is_empty())
+        {
+            app.ngrok_token = token;
+            app.remember_ngrok = true;
+            app.host_internet = true;
+        } else if let Ok(token) = std::env::var("NGROK_AUTHTOKEN") {
+            app.ngrok_token = token;
+            app.host_internet = !app.ngrok_token.trim().is_empty();
+        }
         app
     }
 
@@ -222,6 +247,10 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.poll_db_job();
+        if self.screen != Screen::Setup(Mode::Join) {
+            self.nearby = None;
+            self.nearby_error = None;
+        }
         match self.screen {
             Screen::Menu => self.menu(ui),
             Screen::Decks => self.decks_screen(ui),
@@ -857,24 +886,84 @@ impl App {
                     }
 
                     if mode == Mode::Host {
-                        ui.label("Port");
-                        ui.add(egui::TextEdit::singleline(&mut self.host_port).desired_width(80.0))
-                            .on_hover_text(
-                                "0 picks any free port. Over the internet, forward a fixed one.",
-                            );
-                        ui.end_row();
-                        ui.label("Public address");
+                        ui.label("Game name");
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.host_address)
-                                .desired_width(220.0)
-                                .hint_text("optional — for play over the internet"),
+                            egui::TextEdit::singleline(&mut self.host_name).desired_width(220.0),
                         );
+                        ui.end_row();
+                        ui.label("Play with");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.host_internet, false, "Nearby players");
+                            ui.radio_value(&mut self.host_internet, true, "Friends online");
+                        });
                         ui.end_row();
                     }
                 });
 
+            if mode == Mode::Host {
+                if self.host_internet {
+                    ui.label("An internet tunnel opens automatically. Share the invite with your friend.");
+                    ui.horizontal(|ui| {
+                        ui.label("Ngrok authtoken");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.ngrok_token)
+                                .password(true)
+                                .desired_width(300.0),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.hyperlink_to(
+                            "Create a free ngrok account",
+                            "https://dashboard.ngrok.com/signup",
+                        );
+                        ui.hyperlink_to(
+                            "Get your authtoken",
+                            "https://dashboard.ngrok.com/get-started/your-authtoken",
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.remember_ngrok, "Remember token on this device");
+                        if ui.small_button("Forget token").clicked() {
+                            let result = self
+                                .store
+                                .as_ref()
+                                .map_or(Ok(()), |store| store.set_meta("ngrok_authtoken", ""));
+                            match result {
+                                Ok(()) => {
+                                    self.ngrok_token.clear();
+                                    self.remember_ngrok = false;
+                                }
+                                Err(error) => {
+                                    self.setup_error =
+                                        Some(format!("Could not forget token: {error}"))
+                                }
+                            }
+                        }
+                    });
+                    ui.label(RichText::new("Only the host needs an account. No ngrok installation or router setup is needed.").weak());
+                } else {
+                    ui.label("Players on the same network can find this game under Nearby games.");
+                }
+                egui::CollapsingHeader::new("Advanced connection settings").show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Port");
+                        ui.add(egui::TextEdit::singleline(&mut self.host_port).desired_width(80.0))
+                            .on_hover_text("0 chooses a free port automatically.");
+                    });
+                    if !self.host_internet {
+                        ui.horizontal(|ui| {
+                            ui.label("Additional address");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.host_address)
+                                    .desired_width(220.0),
+                            );
+                        });
+                    }
+                });
+            }
             if mode == Mode::Join {
                 ui.label(RichText::new("The host chooses the format and match length.").weak());
+                self.nearby_games(ui);
             }
             if self.format == Format::Commander && mode != Mode::Join {
                 ui.label(
@@ -946,7 +1035,71 @@ impl App {
     }
 
     /// Check what can be checked here, then start the match on a worker thread.
+    fn nearby_games(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Nearby games").strong());
+        if self.nearby.is_none() && self.nearby_error.is_none() {
+            match mtg_net::discovery::Browser::new() {
+                Ok(browser) => self.nearby = Some(browser),
+                Err(_) => {
+                    self.nearby_error = Some(
+                        "Nearby discovery is unavailable. You can still paste an invite link."
+                            .into(),
+                    )
+                }
+            }
+        }
+        if let Some(error) = &self.nearby_error {
+            ui.label(error);
+            if ui.button("Retry discovery").clicked() {
+                self.nearby_error = None;
+            }
+        }
+        if let Some(browser) = &mut self.nearby {
+            browser.poll();
+            let games: Vec<_> = browser.games().cloned().collect();
+            if games.is_empty() {
+                ui.label(RichText::new("Looking for games on your network…").weak());
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("nearby-games")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for game in games {
+                        ui.push_id(game.invite.session.0, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(&game.name);
+                                if ui.button("Join").clicked() {
+                                    self.join_link = game.link;
+                                    self.start(Mode::Join);
+                                }
+                            });
+                        });
+                    }
+                });
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
     fn start(&mut self, mode: Mode) {
+        if mode == Mode::Host && self.host_internet && self.ngrok_token.trim().is_empty() {
+            self.setup_error = Some("Paste your ngrok authtoken to host online.".into());
+            return;
+        }
+        if mode == Mode::Host
+            && let Some(store) = &self.store
+        {
+            let saved = if self.remember_ngrok {
+                self.ngrok_token.trim()
+            } else {
+                ""
+            };
+            if let Err(error) = store.set_meta("ngrok_authtoken", saved) {
+                self.setup_error = Some(format!("Could not save hosting settings: {error}"));
+                return;
+            }
+        }
         self.setup_error = None;
         let settings = MatchSettings {
             format: self.format,
@@ -1038,6 +1191,9 @@ impl App {
 
         let link = self.join_link.clone();
         let address = self.host_address.clone();
+        let tunnel_token = self.host_internet.then(|| self.ngrok_token.clone());
+        let host_name = self.host_name.clone();
+        self.nearby = None;
         let worker_cancel = Arc::clone(&cancel);
         let ctx = self.ctx.clone();
         std::thread::Builder::new()
@@ -1065,6 +1221,8 @@ impl App {
                             deck: mine,
                             port,
                             public_address: Some(address),
+                            tunnel_token,
+                            name: host_name,
                             identity: &identity,
                             source: &source,
                         };
@@ -1369,8 +1527,7 @@ fn waiting(ui: &mut Ui, run: &mut Running) {
             });
             ui.label(
                 RichText::new(
-                    "On the same network this just works. Over the internet, forward the port on your \
-                     router and fill in your public address before hosting.",
+                    "Nearby players can find your game automatically. Online friends can join this invite when internet hosting is enabled.",
                 )
                 .weak(),
             );

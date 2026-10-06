@@ -644,6 +644,10 @@ pub fn mana_sources(
             }) {
                 continue;
             }
+            // "Activate only if you control a Swamp": not a source while it doesn't hold.
+            if !crate::cost::conditions_hold(state, cards, id, player, &cost.timing) {
+                continue;
+            }
             // Only tapping and sacrificing the source are understood so far. An ability
             // with another cost is skipped rather than assumed free, which keeps the
             // available-mana estimate an understatement.
@@ -678,6 +682,7 @@ pub fn mana_sources(
             let outputs: Vec<ManaOutput> = collect_mana_outputs(effect)
                 .iter()
                 .map(|o| with_chosen_color(o, chosen))
+                .map(|o| counted(state, cards, id, player, o))
                 .collect();
             // "The chosen color" with none chosen makes nothing.
             if !outputs.is_empty() && !outputs.iter().any(|o| matches!(o, ManaOutput::ChosenColor))
@@ -790,6 +795,39 @@ pub fn manual_source(
 }
 
 /// Pull the mana an effect produces out of its tree.
+/// "Add {G} for each creature you control", as the number it is now, so the planner
+/// neither counts mana that isn't there nor misses mana that is.
+fn counted(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    player: PlayerId,
+    out: ManaOutput,
+) -> ManaOutput {
+    match out {
+        ManaOutput::Repeated { amount, output } if !matches!(amount, mtg_ir::Value::Fixed(_)) => {
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source,
+                controller: player,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            let n = crate::eval::value(&ctx, &amount).unwrap_or(0).max(0);
+            ManaOutput::Repeated {
+                amount: mtg_ir::Value::Fixed(n),
+                output,
+            }
+        }
+        other => other,
+    }
+}
+
 /// "One mana of the chosen color", as the color its source chose.
 pub(crate) fn with_chosen_color(out: &ManaOutput, chosen: Option<Color>) -> ManaOutput {
     match out {

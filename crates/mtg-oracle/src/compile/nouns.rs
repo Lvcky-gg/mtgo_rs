@@ -123,6 +123,9 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
             let (f, r) = with_clause(r)?;
             parts.push(f);
             rest = r;
+        } else if let Some(r) = rest.strip_prefix(" dealt damage by ~ this turn") {
+            parts.push(ObjectFilter::DealtDamageBySelfThisTurn);
+            rest = r;
         } else if let Some(r) = rest.strip_prefix(" of the chosen type") {
             parts.push(ObjectFilter::HasChosenSubtype);
             rest = r;
@@ -308,6 +311,14 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
         return Some((ObjectFilter::IsAbility, Zone::Stack, false, r));
     } else if word == "spell" || word == "spells" {
         return Some((ObjectFilter::IsSpell, Zone::Stack, word == "spells", rest));
+    } else if word == "token" || word == "tokens" {
+        // "an artifact, enchantment, or token": a token permanent of any type.
+        return Some((
+            ObjectFilter::Token,
+            Zone::Battlefield,
+            word == "tokens",
+            rest,
+        ));
     } else if word == "card" || word == "cards" {
         // A bare "card": its zone comes from a qualifier.
         return card_zone(ObjectFilter::Any, word == "cards", rest);
@@ -357,6 +368,15 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
                 ));
             }
             "card" | "cards" => return card_zone(filter, next == "cards", r2),
+            // "creature tokens you control", "artifact token".
+            "token" | "tokens" => {
+                return Some((
+                    ObjectFilter::And(vec![filter, ObjectFilter::Token]),
+                    Zone::Battlefield,
+                    next == "tokens",
+                    r2,
+                ));
+            }
             _ => {}
         }
     }

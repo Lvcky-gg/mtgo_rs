@@ -59,6 +59,10 @@ pub fn effect(text: &str, cx: &mut Cx) -> Option<Effect> {
             }
             r = after;
         }
+        if let Some((guarded, after)) = guard_suffix(&e, r, cx) {
+            e = guarded;
+            r = after;
+        }
         out.push(e);
         if r.is_empty() {
             break;
@@ -75,6 +79,125 @@ pub fn effect(text: &str, cx: &mut Cx) -> Option<Effect> {
     } else {
         Effect::Sequence(out)
     })
+}
+
+/// "… unless you pay {B}{B}", "… unless you pay 2 life", "… unless you sacrifice another
+/// creature", "… unless you control an Ogre", "… if you control a Forest": a condition or
+/// a choice that decides whether the effect just read happens. `None` leaves `r` alone.
+fn guard_suffix<'s>(e: &Effect, r: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    use mtg_ir::trigger::Condition as C;
+    // Only a single action: a compound one ("discard your hand, then draw that many
+    // cards") would put its earlier steps under the condition too.
+    if matches!(
+        e,
+        Effect::Sequence(_)
+            | Effect::Let { .. }
+            | Effect::If { .. }
+            | Effect::May { .. }
+            | Effect::MayPay { .. }
+            | Effect::UnlessPays { .. }
+            | Effect::Modal { .. }
+            | Effect::ForEach { .. }
+            | Effect::Repeat { .. }
+            | Effect::Reflexive { .. }
+            | Effect::Delayed { .. }
+    ) {
+        return None;
+    }
+    // A condition about "it" means this object only while "it" is not bound to another.
+    let it_elsewhere = !matches!(cx.it, None | Some(Selector::SelfSource));
+    let about_it = |c: &str| {
+        (c.starts_with("it ") || c.starts_with("it's ") || c.starts_with("its ")) && it_elsewhere
+    };
+    // The guarded sentence ends here: no "instead", no more of the same sentence.
+    let ends = |r: &str| r.is_empty() || r.starts_with(". ");
+    if let Some(cost) = r.strip_prefix(" unless you pay ") {
+        if let Some((mana, after)) = super::mana_cost(cost)
+            && ends(after)
+            && !mana.symbols.is_empty()
+        {
+            return Some((
+                Effect::UnlessPays {
+                    cost: mtg_ir::Cost {
+                        mana,
+                        ..mtg_ir::Cost::free()
+                    },
+                    times: Value::ONE,
+                    otherwise: Box::new(e.clone()),
+                },
+                after,
+            ));
+        }
+        if let Some((n, after)) = words::number(cost)
+            && let Some(after) = after.strip_prefix(" life")
+            && ends(after)
+        {
+            let pay = Effect::LoseLife {
+                who: Selector::You,
+                amount: Value::Fixed(n),
+            };
+            return Some((
+                Effect::If {
+                    cond: C::ValueAtLeast {
+                        lhs: Value::LifeTotal(Box::new(Selector::You)),
+                        rhs: Value::Fixed(n),
+                    },
+                    then: Box::new(Effect::May {
+                        prompt: format!("pay {n} life").into(),
+                        then: Box::new(pay),
+                        otherwise: Some(Box::new(e.clone())),
+                    }),
+                    otherwise: Box::new(e.clone()),
+                },
+                after,
+            ));
+        }
+        return None;
+    }
+    if let Some(after) = r.strip_prefix(" unless you ") {
+        let saved = cx.clone();
+        if let Some((first, rest)) = clause(after, cx)
+            && ends(rest)
+            && let Some(possible) = possible(&first)
+        {
+            let prompt = after[..after.len() - rest.len()].to_string();
+            return Some((
+                Effect::If {
+                    cond: possible,
+                    then: Box::new(Effect::May {
+                        prompt: prompt.into(),
+                        then: Box::new(first),
+                        otherwise: Some(Box::new(e.clone())),
+                    }),
+                    otherwise: Box::new(e.clone()),
+                },
+                rest,
+            ));
+        }
+        *cx = saved;
+    }
+    for (lead, negate) in [(" unless ", true), (" if ", false)] {
+        if let Some(c) = r.strip_prefix(lead)
+            && !about_it(c)
+            && let Some((cond, after)) = super::conditions::condition(c, cx)
+            && ends(after)
+        {
+            let (then, otherwise) = if negate {
+                (Effect::Nothing, e.clone())
+            } else {
+                (e.clone(), Effect::Nothing)
+            };
+            return Some((
+                Effect::If {
+                    cond,
+                    then: Box::new(then),
+                    otherwise: Box::new(otherwise),
+                },
+                after,
+            ));
+        }
+    }
+    None
 }
 
 /// The object an effect acts on, for "it" in a sentence that follows.
@@ -362,58 +485,70 @@ fn shielded<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, &'s str)> {
 /// "you may <clause>".
 fn may<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let r = s.strip_prefix("you may ")?;
-    // "You may pay {E}{E}. If you do, …"
-    if let Some((n, after)) = r.strip_prefix("pay ").and_then(words::energy) {
-        let after = after.strip_prefix(". if you do, ")?;
-        let (then, rest) = if_you_do_body(after, cx)?;
-        return Some((
-            Effect::MayPay {
-                cost: mtg_ir::Cost {
+    // "You may pay {2}. If you do, …", "you may pay 2 life. When you do, …", "you may pay
+    // {E}{E}. If you do, …": an optional payment the rest depends on.
+    if let Some(after) = r.strip_prefix("pay ") {
+        let (cost, after) = if let Some((n, after)) = words::energy(after) {
+            (
+                mtg_ir::Cost {
                     additional: vec![mtg_ir::AdditionalCost::PayEnergy {
                         amount: Value::Fixed(n),
                     }],
                     ..mtg_ir::Cost::free()
                 },
-                then: Box::new(then),
-            },
-            rest,
-        ));
-    }
-    // "You may pay {2}. When you do, …" — a reflexive trigger (CR 603.12).
-    if let Some(after) = r.strip_prefix("pay ")
-        && let Some((mana, after)) = super::mana_cost(after)
-        && let Some(after) = after.strip_prefix(". when you do, ")
-    {
-        let (then, rest) = reflexive(after, cx)?;
-        return Some((
-            Effect::MayPay {
-                cost: mtg_ir::Cost {
+                after,
+            )
+        } else if let Some((mana, after)) = super::mana_cost(after) {
+            (
+                mtg_ir::Cost {
                     mana,
                     ..mtg_ir::Cost::free()
                 },
-                then: Box::new(then),
-            },
-            rest,
-        ));
-    }
-    // "You may pay {2}. If you do, …" — an optional payment the rest depends on.
-    if let Some(after) = r.strip_prefix("pay ")
-        && let Some((mana, after)) = super::mana_cost(after)
-    {
-        let after = after.strip_prefix(". if you do, ")?;
-        let (then, rest) = if_you_do_body(after, cx)?;
-        return Some((
-            Effect::MayPay {
-                cost: mtg_ir::Cost {
-                    mana,
+                after,
+            )
+        } else {
+            let (n, after) = words::number(after)?;
+            (
+                mtg_ir::Cost {
+                    additional: vec![mtg_ir::AdditionalCost::PayLife {
+                        amount: Value::Fixed(n),
+                    }],
                     ..mtg_ir::Cost::free()
                 },
+                after.strip_prefix(" life")?,
+            )
+        };
+        let (then, rest) = if let Some(after) = after.strip_prefix(". when you do, ") {
+            reflexive(after, cx)?
+        } else {
+            if_you_do_body(after.strip_prefix(". if you do, ")?, cx)?
+        };
+        return Some((
+            Effect::MayPay {
+                cost,
                 then: Box::new(then),
             },
             rest,
         ));
     }
-    let (first, rest) = clause(r, cx)?;
+    // "you may gain 3 life", "you may lose 2 life": a player verb whose subject the
+    // "you" of "you may" supplies.
+    let (first, rest) = match clause(r, cx) {
+        Some(found) => found,
+        None => {
+            // "you may have it deal 2 damage to …": "it deals 2 damage to …", chosen.
+            let rewritten = match r.strip_prefix("have ") {
+                Some(h) => have_to_does(h)?,
+                None => format!("you {r}"),
+            };
+            let (e, left) = clause(&rewritten, cx)?;
+            let left = left.len();
+            if left > r.len() {
+                return None;
+            }
+            (e, &r[r.len() - left..])
+        }
+    };
     let prompt = r[..r.len() - rest.len()].to_string();
     // "You may sacrifice a creature. When you do, …" — a reflexive trigger.
     if let Some(after) = rest.strip_prefix(". when you do, ") {
@@ -458,6 +593,38 @@ fn may<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         },
         rest,
     ))
+}
+
+/// "it deal 2 damage to any target" → "it deals 2 damage to any target": the first verb
+/// after the subject of "have", in the third person. The rest of the text is unchanged,
+/// so what is left after parsing lines up with the original.
+fn have_to_does(s: &str) -> Option<String> {
+    const VERBS: &[(&str, &str)] = &[
+        ("deal", "deals"),
+        ("get", "gets"),
+        ("lose", "loses"),
+        ("gain", "gains"),
+        ("discard", "discards"),
+        ("mill", "mills"),
+        ("fight", "fights"),
+        ("draw", "draws"),
+        ("sacrifice", "sacrifices"),
+    ];
+    let mut at = 0;
+    for word in s.split(' ') {
+        if let Some((_, does)) = VERBS.iter().find(|(v, _)| *v == word) {
+            // The subject before it must be a few words at most.
+            if at == 0 || s[..at].split(' ').count() > 6 {
+                return None;
+            }
+            return Some(format!("{}{does}{}", &s[..at], &s[at + word.len()..]));
+        }
+        at += word.len() + 1;
+        if at > s.len() {
+            break;
+        }
+    }
+    None
 }
 
 /// The ability after "when you do,": its own effect and targets (CR 603.12), the rest of
@@ -511,7 +678,7 @@ fn possible(e: &Effect) -> Option<mtg_ir::trigger::Condition> {
         Effect::Discard {
             who: Selector::You,
             count,
-            at_random: false,
+            ..
         } => C::CountAtLeast {
             what: Selector::All {
                 zone: Zone::Hand,
@@ -538,6 +705,24 @@ fn possible(e: &Effect) -> Option<mtg_ir::trigger::Condition> {
                 ]),
             },
             at_least: Value::ONE,
+        },
+        // "return a land you control to its owner's hand": one to choose.
+        Effect::MoveZone {
+            what:
+                Selector::ChosenBy {
+                    chooser,
+                    zone: Zone::Battlefield,
+                    filter,
+                    count,
+                    up_to: false,
+                },
+            ..
+        } if **chooser == Selector::You => C::CountAtLeast {
+            what: Selector::All {
+                zone: Zone::Battlefield,
+                filter: filter.clone(),
+            },
+            at_least: count.clone(),
         },
         // Drawing and gaining life always happen when chosen.
         Effect::Draw { .. } | Effect::GainLife { .. } => C::Always,
@@ -676,7 +861,14 @@ fn exile<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
 /// "a land you control", "a creature you control": one permanent the controller chooses
 /// as the effect resolves — not a target.
 fn chosen_permanent_you_control<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, &'s str)> {
-    let r = s.strip_prefix("a ").or_else(|| s.strip_prefix("an "))?;
+    // "another creature you control": not this one.
+    let (another, r) = match s.strip_prefix("another ") {
+        Some(r) => (true, r),
+        None => (
+            false,
+            s.strip_prefix("a ").or_else(|| s.strip_prefix("an "))?,
+        ),
+    };
     // The noun reads "you control" itself.
     let (n, r) = nouns::noun(r, cx)?;
     let yours = mtg_ir::ObjectFilter::ControlledBy(Box::new(Selector::You));
@@ -684,11 +876,19 @@ fn chosen_permanent_you_control<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, &'
     if n.plural || n.zone != Zone::Battlefield || !controlled {
         return None;
     }
+    let filter = if another {
+        mtg_ir::ObjectFilter::And(vec![
+            n.filter,
+            mtg_ir::ObjectFilter::Not(Box::new(mtg_ir::ObjectFilter::IsSelf)),
+        ])
+    } else {
+        n.filter
+    };
     Some((
         Selector::ChosenBy {
             chooser: Box::new(Selector::You),
             zone: Zone::Battlefield,
-            filter: n.filter,
+            filter,
             count: Value::ONE,
             up_to: false,
         },
@@ -1593,6 +1793,19 @@ fn move_zone(what: Selector, to: Zone, position: ZonePosition) -> Effect {
 }
 
 fn tap_untap<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    // "tap or untap target permanent": the controller picks which as it resolves.
+    if let Some(r) = s.strip_prefix("tap or untap ") {
+        let (what, _, r) = nouns::object(r, cx)?;
+        battlefield_only(&what, cx)?;
+        return Some((
+            Effect::May {
+                prompt: "tap it (otherwise untap it)".into(),
+                then: Box::new(Effect::Tap { what: what.clone() }),
+                otherwise: Some(Box::new(Effect::Untap { what })),
+            },
+            r,
+        ));
+    }
     if let Some(r) = s.strip_prefix("tap ") {
         let (what, _, r) = nouns::object(r, cx)?;
         battlefield_only(&what, cx)?;
@@ -1865,13 +2078,12 @@ fn player_verb<'s>(
     }
     if let Some(r) = verb(r, "discard") {
         let r = r.strip_prefix(' ')?;
-        // "At random" is not compiled: the engine's random discard is not yet drawn from
-        // the game's seeded generator.
-        if r.contains("at random") {
-            return None;
-        }
         let (n, r) = count_of(r, "card", cx)?;
-        let at_random = false;
+        // "discards a card at random": the game's seeded generator picks.
+        let (at_random, r) = match r.strip_prefix(" at random") {
+            Some(r) => (true, r),
+            None => (false, r),
+        };
         return Some((
             Effect::Discard {
                 who,
@@ -2945,14 +3157,15 @@ fn discard_you<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         return Some((discard, r));
     }
     let (n, r) = count_of(r, "card", cx)?;
-    if r.starts_with(" at random") {
-        return None;
-    }
+    let (at_random, r) = match r.strip_prefix(" at random") {
+        Some(r) => (true, r),
+        None => (false, r),
+    };
     Some((
         Effect::Discard {
             who: Selector::You,
             count: n,
-            at_random: false,
+            at_random,
         },
         r,
     ))
@@ -2960,7 +3173,7 @@ fn discard_you<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
 
 /// Multiply a clause's number by `by`: "draw a card for each …", "deals 1 damage to …
 /// for each …". Only clauses with one obvious number can be scaled.
-fn scale(e: &mut Effect, by: Value) -> bool {
+pub(crate) fn scale(e: &mut Effect, by: Value) -> bool {
     let times = |v: &mut Value| {
         *v = match std::mem::replace(v, Value::ZERO) {
             Value::Fixed(1) => by.clone(),
@@ -2980,6 +3193,16 @@ fn scale(e: &mut Effect, by: Value) -> bool {
             times(power);
             times(toughness);
         }
+        // "add {G} for each creature you control": one kind of mana, that many.
+        Effect::AddMana { produces, .. } if produces.len() == 1 => match &mut produces[0] {
+            mtg_ir::effect::ManaOutput::Repeated { amount, .. } => times(amount),
+            one => {
+                *one = mtg_ir::effect::ManaOutput::Repeated {
+                    amount: by,
+                    output: Box::new(one.clone()),
+                }
+            }
+        },
         _ => return false,
     }
     true
@@ -3279,6 +3502,9 @@ pub fn per<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
             })),
             r,
         ));
+    }
+    if let Some(r) = s.strip_prefix("card you've drawn this turn") {
+        return Some((Value::CardsDrawnThisTurn(Box::new(Selector::You)), r));
     }
     // Undaunted: "for each opponent you have".
     if let Some(r) = s.strip_prefix("opponent you have") {

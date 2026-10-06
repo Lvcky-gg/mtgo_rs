@@ -1205,7 +1205,105 @@ fn blitz_attacks_with_haste_then_is_sacrificed_and_draws() {
     g.until(P1, mtg_core::Step::Upkeep);
     assert!(g.find(raider).is_none(), "sacrificed at the end step");
     assert_eq!(g.count(Zone::Graveyard, P0), 1);
-    assert_eq!(g.count(Zone::Hand, P0), hand + 1, "and its death drew a card");
+    assert_eq!(
+        g.count(Zone::Hand, P0),
+        hand + 1,
+        "and its death drew a card"
+    );
+}
+
+#[test]
+fn surge_needs_another_spell_first_and_knows_it_was_paid() {
+    let mut t = Table::default();
+    let wave = t.card(
+        "{4}{U}",
+        "Sorcery",
+        None,
+        "Surge {U}\nYou gain 1 life. If this spell's surge cost was paid, you gain 3 life.",
+    );
+    let shock = t.card("{R}", "Instant", None, "~ deals 1 damage to any target.");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let w = g.put(wave, P0, Zone::Hand);
+    let s = g.put(shock, P0, Zone::Hand);
+    let actions = g.main();
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::CastAlternative { object, .. } if *object == w)),
+        "no other spell yet"
+    );
+    g.cast(s, &[mtg_core::Target::Player(P1)]);
+    let actions = g.until(P0, mtg_core::Step::PrecombatMain);
+    g.act(alternative(&actions, w), &[], &[]);
+    assert_eq!(g.life(P0), 24, "1 and the surge bonus 3");
+}
+
+#[test]
+fn spectacle_once_an_opponent_has_lost_life() {
+    let mut t = Table::default();
+    let brute = t.card("{3}{R}", "Creature — Goblin", Some((4, 3)), "Spectacle {R}");
+    let shock = t.card("{R}", "Instant", None, "~ deals 1 damage to any target.");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let b = g.put(brute, P0, Zone::Hand);
+    let s = g.put(shock, P0, Zone::Hand);
+    let actions = g.main();
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::CastAlternative { object, .. } if *object == b))
+    );
+    g.cast(s, &[mtg_core::Target::Player(P1)]);
+    let actions = g.until(P0, mtg_core::Step::PrecombatMain);
+    g.act(alternative(&actions, b), &[], &[]);
+    assert!(g.find(brute).is_some());
+}
+
+#[test]
+fn awaken_also_animates_a_land_after_the_spells_own_targets() {
+    let mut t = Table::default();
+    let bolt = t.card(
+        "{1}{R}",
+        "Sorcery",
+        None,
+        "~ deals 2 damage to any target.\nAwaken 2—{2}{R}",
+    );
+    let mut g = Game::new(t);
+    g.lands(3);
+    let s = g.put(bolt, P0, Zone::Hand);
+    let land = g.engine.state.battlefield()[0];
+    let actions = g.main();
+    g.act(
+        alternative(&actions, s),
+        &[mtg_core::Target::Player(P1), mtg_core::Target::Object(land)],
+        &[],
+    );
+    assert_eq!(g.life(P1), 18);
+    assert_eq!(g.pt(land), (2, 2), "a 0/0 with two counters");
+    assert!(g.has(land, mtg_core::Keyword::Haste));
+    let c = mtg_engine::layers::compute(&g.engine.state, &g.table, land).unwrap();
+    assert!(c.has_type(mtg_core::CardType::Creature) && c.has_type(mtg_core::CardType::Land));
+}
+
+#[test]
+fn cast_normally_an_awaken_spell_animates_nothing() {
+    let mut t = Table::default();
+    let bolt = t.card(
+        "{1}{R}",
+        "Sorcery",
+        None,
+        "~ deals 2 damage to any target.\nAwaken 2—{2}{R}",
+    );
+    let mut g = Game::new(t);
+    g.lands(3);
+    let s = g.put(bolt, P0, Zone::Hand);
+    let land = g.engine.state.battlefield()[0];
+    g.main();
+    g.cast(s, &[mtg_core::Target::Player(P1)]);
+    assert_eq!(g.life(P1), 18);
+    let c = mtg_engine::layers::compute(&g.engine.state, &g.table, land).unwrap();
+    assert!(!c.has_type(mtg_core::CardType::Creature));
 }
 
 #[test]

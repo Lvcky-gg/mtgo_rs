@@ -933,10 +933,10 @@ pub fn resolve(
                     continue;
                 }
                 let chosen = if *at_random {
-                    // A random discard is not a choice, so it must not prompt. Taking
-                    // from the front is deterministic rather than random: real
-                    // randomness needs a seed in the command, which the resolver has
-                    // no access to by design.
+                    // A random discard is not a choice, so it must not prompt. The game's
+                    // seeded generator picks, so a replay discards the same cards.
+                    let mut hand = hand;
+                    state.rng.shuffle(&mut hand);
                     hand.into_iter().take(n as usize).collect()
                 } else {
                     ask_objects(rc, p, hand, n, n, "discard")?
@@ -3048,6 +3048,7 @@ pub(crate) fn entered(
     };
     let mut events = Vec::new();
     let mut haste = false;
+    let mut devoured: Option<(u8, Vec<ObjectId>)> = None;
     // Face-down objects have no own abilities, but other permanents' replacement
     // effects still apply to them (CR 708.2 and 614.12).
     if !obj.face_down {
@@ -3133,6 +3134,12 @@ pub(crate) fn entered(
                     } else {
                         events.push(Event::EnteredTapped { object: id });
                     }
+                }
+                R::Devour(n) => {
+                    devoured = match &answer {
+                        Some(Answer::Objects(chosen)) => Some((*n, chosen.clone())),
+                        _ => None,
+                    };
                 }
                 R::EntersWithCounterIfChosen if yes => {
                     events.push(Event::CountersChanged {
@@ -3232,6 +3239,34 @@ pub(crate) fn entered(
         });
         if tapped {
             events.push(Event::EnteredTapped { object: id });
+        }
+    }
+    // Devour: the chosen creatures are sacrificed as it enters, and it gets its counters.
+    if let Some((n, chosen)) = devoured {
+        let controller = state.objects.get(&id).map(|o| o.controller);
+        let mut eaten = 0;
+        for c in chosen {
+            let ok = c != id
+                && state
+                    .objects
+                    .get(&c)
+                    .is_some_and(|o| o.zone.zone == Zone::Battlefield)
+                && crate::layers::controller(state, c) == controller
+                && crate::layers::compute(state, cards, c)
+                    .is_some_and(|ch| ch.has_type(mtg_core::CardType::Creature));
+            let Some(player) = controller.filter(|_| ok) else {
+                continue;
+            };
+            move_to(state, log, c, Zone::Graveyard, cause);
+            apply::apply(state, cause, Event::Sacrificed { player, object: c }, log);
+            eaten += 1;
+        }
+        if eaten > 0 {
+            events.push(Event::CountersChanged {
+                object: id,
+                kind: mtg_core::CounterKind::PlusOnePlusOne,
+                delta: i32::from(n) * eaten,
+            });
         }
     }
     for e in events {
@@ -3437,6 +3472,27 @@ pub(crate) fn enter_question(
                 ),
                 R::EntersWithCounterOrHaste => {
                     confirm("have it enter with a +1/+1 counter? If not, it has haste".into())
+                }
+                R::Devour(n) => {
+                    let from: Vec<ObjectId> = state
+                        .battlefield()
+                        .into_iter()
+                        .filter(|o| *o != id)
+                        .filter(|o| crate::layers::controller(state, *o) == Some(obj.controller))
+                        .filter(|o| {
+                            crate::layers::compute(state, cards, *o)
+                                .is_some_and(|c| c.has_type(mtg_core::CardType::Creature))
+                        })
+                        .collect();
+                    if from.is_empty() {
+                        return None;
+                    }
+                    let max = from.len() as u32;
+                    Some((
+                        ChoiceKind::ChooseObjects { from, min: 0, max },
+                        format!("devour {n}: sacrifice any number of creatures"),
+                        Answer::Objects(Vec::new()),
+                    ))
                 }
                 R::EntersChoosing(choice) => {
                     let options = entry_options(cards, *choice);

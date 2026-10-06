@@ -12,7 +12,7 @@
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use tungstenite::{Message, WebSocket};
+use tungstenite::{Message, WebSocket, client::IntoClientRequest, stream::MaybeTlsStream};
 
 use crate::wire::{Channel, WireError};
 
@@ -30,7 +30,7 @@ fn websocket_config() -> tungstenite::protocol::WebSocketConfig {
 
 /// A [`Channel`] over a WebSocket.
 pub struct WsChannel {
-    socket: WebSocket<TcpStream>,
+    socket: WebSocket<MaybeTlsStream<TcpStream>>,
 }
 
 impl WsChannel {
@@ -42,21 +42,20 @@ impl WsChannel {
         let (stream, _peer) = listener.accept()?;
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
         stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
-        let socket =
-            tungstenite::accept_with_config(stream, Some(websocket_config())).map_err(|error| {
-                match error {
-                    tungstenite::HandshakeError::Failure(error) => convert(error),
-                    tungstenite::HandshakeError::Interrupted(_) => {
-                        WireError::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "websocket handshake timed out",
-                        ))
-                    }
-                }
-            })?;
-        socket.get_ref().set_read_timeout(None)?;
-        socket.get_ref().set_write_timeout(None)?;
-        Ok(Self { socket })
+        let socket = tungstenite::accept_with_config(
+            MaybeTlsStream::Plain(stream),
+            Some(websocket_config()),
+        )
+        .map_err(|error| match error {
+            tungstenite::HandshakeError::Failure(error) => convert(error),
+            tungstenite::HandshakeError::Interrupted(_) => WireError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "websocket handshake timed out",
+            )),
+        })?;
+        let channel = Self { socket };
+        channel.set_io_timeout(None)?;
+        Ok(channel)
     }
 
     /// Connect directly to a host, with ten-second TCP and upgrade I/O timeouts.
@@ -84,6 +83,37 @@ impl WsChannel {
         Self::connect_addresses(uri, addresses, timeout)
     }
 
+    /// Connect through an HTTPS tunnel, validating its TLS certificate.
+    /// The path and query are retained for providers that route by URL.
+    pub fn connect_url(url: &str) -> Result<Self, WireError> {
+        let uri = url
+            .parse::<tungstenite::http::Uri>()
+            .map_err(|e| WireError::Malformed(e.to_string()))?;
+        let default_port = match uri.scheme_str() {
+            Some("wss") => 443,
+            Some("ws") => 80,
+            _ => {
+                return Err(WireError::Malformed(
+                    "expected a ws:// or wss:// URL".into(),
+                ));
+            }
+        };
+        let host = uri
+            .host()
+            .ok_or_else(|| WireError::Malformed("tunnel URL has no host".into()))?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let addresses = (host, uri.port_u16().unwrap_or(default_port)).to_socket_addrs()?;
+        Self::connect_addresses(uri, addresses, HANDSHAKE_TIMEOUT)
+    }
+
+    fn stream(&self) -> &TcpStream {
+        match self.socket.get_ref() {
+            MaybeTlsStream::Plain(stream) => stream,
+            MaybeTlsStream::Rustls(stream) => &stream.sock,
+            _ => unreachable!("only plain and rustls transports are enabled"),
+        }
+    }
+
     fn connect_addresses(
         uri: tungstenite::http::Uri,
         addresses: impl IntoIterator<Item = SocketAddr>,
@@ -105,10 +135,30 @@ impl WsChannel {
             stream.set_write_timeout(Some(timeout))?;
             // Keep the original WebSocket: rebuilding it from the TCP stream would lose
             // application bytes buffered alongside the HTTP upgrade response.
-            let upgrade = tungstenite::client::client_with_config(
-                uri.clone(),
+            let mut request = uri.clone().into_client_request().map_err(convert)?;
+            request
+                .headers_mut()
+                .insert("ngrok-skip-browser-warning", "1".parse().unwrap());
+            let connector = if uri.scheme_str() == Some("wss") {
+                let roots = rustls::RootCertStore::from_iter(
+                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+                );
+                let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| WireError::Malformed(e.to_string()))?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+                Some(tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+            } else {
+                None
+            };
+            let upgrade = tungstenite::client_tls_with_config(
+                request,
                 stream,
                 Some(websocket_config()),
+                connector,
             )
             .map_err(|error| match error {
                 tungstenite::HandshakeError::Failure(error) => convert(error),
@@ -133,14 +183,14 @@ impl WsChannel {
 
     /// The address this channel is connected to, for logging.
     pub fn peer(&self) -> Option<std::net::SocketAddr> {
-        self.socket.get_ref().peer_addr().ok()
+        self.stream().peer_addr().ok()
     }
 
     /// Bound blocking reads and writes during connection setup. Clear this before play,
     /// when a player may legitimately take longer to answer a choice.
     pub fn set_io_timeout(&self, timeout: Option<Duration>) -> Result<(), WireError> {
-        self.socket.get_ref().set_read_timeout(timeout)?;
-        self.socket.get_ref().set_write_timeout(timeout)?;
+        self.stream().set_read_timeout(timeout)?;
+        self.stream().set_write_timeout(timeout)?;
         Ok(())
     }
 
@@ -211,6 +261,66 @@ mod tests {
             assert!(request.len() < 8192);
         }
         String::from_utf8(request).unwrap()
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback fixes this type.
+    fn tunnel_url_keeps_routing_and_bypasses_the_provider_browser_page() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("ws://{}/game?q=42", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept_hdr(
+                stream,
+                |request: &tungstenite::handshake::server::Request, response| {
+                    assert_eq!(
+                        request.uri().path_and_query().unwrap().as_str(),
+                        "/game?q=42"
+                    );
+                    assert_eq!(request.headers()["ngrok-skip-browser-warning"], "1");
+                    Ok(response)
+                },
+            )
+            .unwrap();
+            socket
+                .send(Message::Binary(b"through tunnel".to_vec().into()))
+                .unwrap();
+        });
+        let mut channel = WsChannel::connect_url(&url).unwrap();
+        channel
+            .set_io_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(channel.recv().unwrap(), b"through tunnel");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn secure_tunnels_attempt_tls_and_do_not_downgrade_to_plaintext() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("wss://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut header = [0; 5];
+            stream.read_exact(&mut header).unwrap();
+            assert_eq!(header[0], 0x16, "TLS handshake, never plaintext HTTP");
+        });
+        assert!(WsChannel::connect_url(&url).is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tunnel_urls_require_a_websocket_scheme() {
+        for url in [
+            "https://localhost/",
+            "file:///tmp/game",
+            "localhost:80",
+            "ws:///game",
+        ] {
+            assert!(WsChannel::connect_url(url).is_err());
+        }
     }
 
     #[test]
@@ -296,8 +406,8 @@ mod tests {
             stream.write_all(&response).unwrap();
         });
         let mut channel = WsChannel::connect("127.0.0.1", port).unwrap();
-        assert_eq!(channel.socket.get_ref().read_timeout().unwrap(), None);
-        assert_eq!(channel.socket.get_ref().write_timeout().unwrap(), None);
+        assert_eq!(channel.stream().read_timeout().unwrap(), None);
+        assert_eq!(channel.stream().write_timeout().unwrap(), None);
         channel
             .set_io_timeout(Some(Duration::from_secs(2)))
             .unwrap();

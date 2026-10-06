@@ -203,6 +203,7 @@ impl Visitor<'_> {
             | ReplacementKind::EntersTappedUnlessPaysLife { .. }
             | ReplacementKind::EntersWithCounterIfChosen
             | ReplacementKind::EntersWithCounterOrHaste
+            | ReplacementKind::Devour(_)
             | ReplacementKind::EntersChoosing(_) => {}
             ReplacementKind::EntersTappedUnless { condition } => self.condition(condition),
             ReplacementKind::Reduce { amount } => self.value(amount),
@@ -574,7 +575,9 @@ impl Visitor<'_> {
     fn filter(&mut self, f: &mut ObjectFilter) {
         (self.filter)(f);
         match f {
-            ObjectFilter::ControlledBy(s) | ObjectFilter::OwnedBy(s) => self.selector(s),
+            ObjectFilter::ControlledBy(s)
+            | ObjectFilter::OwnedBy(s)
+            | ObjectFilter::SharesColorWith(s) => self.selector(s),
             ObjectFilter::PowerAtMost(v)
             | ObjectFilter::PowerAtLeast(v)
             | ObjectFilter::ManaValueAtMost(v)
@@ -598,6 +601,7 @@ impl Visitor<'_> {
             | ObjectFilter::Attacking
             | ObjectFilter::Blocking
             | ObjectFilter::AttachedToSelf
+            | ObjectFilter::DealtDamageBySelfThisTurn
             | ObjectFilter::HasKeyword(_)
             | ObjectFilter::HasCounter(_)
             | ObjectFilter::EnteredThisTurn
@@ -632,7 +636,8 @@ impl Visitor<'_> {
             | Value::CardTypesAmong(s)
             | Value::PartySize(s)
             | Value::BasicLandTypesAmong(s)
-            | Value::SpellsCastThisTurn(s) => self.selector(s),
+            | Value::SpellsCastThisTurn(s)
+            | Value::CardsDrawnThisTurn(s) => self.selector(s),
             Value::Sum(vs) | Value::Product(vs) => {
                 for v in vs {
                     self.value(v);
@@ -660,6 +665,7 @@ impl Visitor<'_> {
             | Condition::OpponentDamagedThisTurn
             | Condition::YouAreAttacked
             | Condition::OpponentLostLifeThisTurn
+            | Condition::YouGainedLifeThisTurn
             | Condition::CastFor(_)
             | Condition::Renowned
             | Condition::YouAttackedThisTurn
