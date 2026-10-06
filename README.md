@@ -20,7 +20,8 @@ cargo run -p mtg-headless -- -v        # every event, not just steps
 cargo run -p mtg-headless -- --stops   # auto-pass OFF, to see what it saves you
 
 cargo run -p mtg-app --bin mtg-gui      # play against a policy bot in a window
-cargo test --workspace                 # 634 tests (more with --features mtg-session/transport)
+cargo test --workspace
+cargo test --workspace --all-features  # includes transport integration tests
 cargo clippy --workspace --all-targets
 ```
 
@@ -29,6 +30,26 @@ sound** controls. Settings carry between matches while the app stays open. Linux
 builds need ALSA development headers and pkg-config (on Debian/Ubuntu:
 `sudo apt install libasound2-dev pkg-config`). Audio-device failure leaves the game
 usable without sound. The original cues and generator are in [assets/sounds](assets/sounds/README.md).
+
+The deck builder suggests cards from shared rules and type themes, filters suggestions
+by format and color identity, suggests roles missing from the main deck, and shows
+estimated roles, mana curve, average spell
+cost, and colored mana demand versus potential land sources. These are text-based
+estimates. A suggestion focus selector offers balanced, synergy, missing-role,
+and early-curve rankings. Analysis includes exact opening-seven land probabilities
+for the current main deck before mulligans. Import accepts pasted lists or dropped UTF-8 files; export supports plain
+text, Arena, MTGO, Moxfield, Archidekt, CSV, and JSON. Spreadsheet imports accept
+comma-separated or tab-separated columns. Structured imports use CSV
+columns `count,name,section` or a JSON `entries` array of objects with those fields.
+
+Tournament suggestion mode downloads official MTGO Modern event lists or accepts
+published Modern lists with event metadata,
+keeps an offline dataset, and ranks additions from similar recent lists. It shows
+sample counts, typical copies, sources, and a comparison with tournament mana
+curves. Deck and suggestion rows have clickable card previews. Saved deck profiles
+cover self-rated power, competitiveness, Commander bracket, and Rule 0 expectations.
+See [tournament data and deck profiles](docs/tournament-data.md) for imports and
+how the evidence and declarations are interpreted.
 
 `mtg-play` is the reference driver: it consumes exactly what a GUI would — the legal
 action list and the choice stream — so anything it can do, the real app can do.
@@ -139,7 +160,7 @@ Currently **8,598 of 34,898 cards (24.6%)** are playable as printed, up from 1,2
 compiler emits has an end-to-end test in `crates/mtg-oracle/tests/compiled/` that takes printed
 text through import and plays it in the engine.
 
-**Session protocol works; the wire does not.** Identity (real Ed25519, persisted),
+**The session protocol works offline.** Identity (real Ed25519, persisted),
 signed single-use invite links, commit-reveal shuffle fairness with a verifiable shuffle,
 and the host/guest handshake are built and tested — 53 tests, all without a network, because
 the protocol is a pure function over messages.
@@ -210,8 +231,8 @@ shows who is attacking and blocking. A phase bar, a Pass button that says where 
 and a log narrated from what changed ("Opponent attacked with…", "You lose 3 life (17)"),
 including everything that happened while auto-pass was handling your priority.
 
-**Still unbuilt:** relay and mDNS discovery (internet play needs a forwarded port). Also outstanding: redacted event streaming
-instead of whole snapshots, relay and mDNS discovery, and reconnect exercised rather than designed.
+**Still unbuilt:** relay and mDNS discovery (internet play needs a forwarded port),
+redacted event streaming instead of whole snapshots, and reconnect exercised rather than designed.
 
 Unimplemented primitives return a named error rather than a silent no-op, so a gap
 shows up in a failure message instead of looking like working code.

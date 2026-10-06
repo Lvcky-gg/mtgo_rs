@@ -41,9 +41,9 @@ impl Bot {
             .collect();
 
         let their_life = opponent(view).map_or(i32::MAX, |p| view.players[&p].life);
-        let total: i32 = attackers.iter().map(|(_, s)| s.power).sum();
+        let total: i64 = attackers.iter().map(|(_, s)| s.combat_damage()).sum();
         if blockers.is_empty()
-            || total >= their_life + blockers.len() as i32 * max_power(&attackers)
+            || total >= i64::from(their_life) + blockers.len() as i64 * max_damage(&attackers)
         {
             return attackers
                 .iter()
@@ -99,31 +99,24 @@ impl Bot {
             .iter()
             .map(|id| {
                 let stats = self.stats(view, *id).unwrap_or_default();
-                (
-                    *id,
-                    stats
-                        .power
-                        .max(0)
-                        .saturating_mul(if stats.double_strike { 2 } else { 1 }),
-                    stats,
-                )
+                (*id, stats.combat_damage(), stats)
             })
             .collect();
         ranked.sort_by_key(|(id, damage, _)| (std::cmp::Reverse(*damage), *id));
         let blockers = self.potential_blockers(view);
-        let mut stoppable: Vec<i32> = ranked
+        let mut stoppable: Vec<i64> = ranked
             .iter()
             .filter(|(_, _, a)| blockers.iter().any(|b| a.blockable_by(b)))
             .map(|(_, damage, _)| *damage)
             .collect();
         stoppable.sort_by_key(|damage| std::cmp::Reverse(*damage));
-        let total: i32 = ranked.iter().map(|(_, damage, _)| *damage).sum();
-        let prevented: i32 = stoppable.iter().take(blockers.len()).sum();
+        let total: i64 = ranked.iter().map(|(_, damage, _)| *damage).sum();
+        let prevented: i64 = stoppable.iter().take(blockers.len()).sum();
         let life = match player {
             Target::Player(p) => view.players.get(&p).map_or(i32::MAX, |p| p.life),
             _ => i32::MAX,
         };
-        if total - prevented >= life {
+        if total - prevented >= i64::from(life) {
             return Answer::Attackers(attackers.iter().map(|a| (*a, player)).collect());
         }
         let mut walkers: Vec<_> = defenders
@@ -146,7 +139,7 @@ impl Bot {
         let mut remaining = ranked.into_iter();
         for (walker, loyalty) in walkers {
             let mut damage = 0;
-            while damage < loyalty {
+            while damage < i64::from(loyalty) {
                 let Some((attacker, power, _)) = remaining.next() else {
                     break;
                 };
@@ -174,6 +167,10 @@ fn opponent(view: &PlayerView) -> Option<PlayerId> {
     view.players.keys().copied().find(|p| *p != view.viewer)
 }
 
-fn max_power(creatures: &[(ObjectId, Stats)]) -> i32 {
-    creatures.iter().map(|(_, s)| s.power).max().unwrap_or(0)
+fn max_damage(creatures: &[(ObjectId, Stats)]) -> i64 {
+    creatures
+        .iter()
+        .map(|(_, s)| s.combat_damage())
+        .max()
+        .unwrap_or(0)
 }

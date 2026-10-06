@@ -108,6 +108,29 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
             r,
         ));
     }
+    // "if no creatures are on the battlefield", "if there are no creatures
+    // on the battlefield": the absence is global unless the noun says otherwise.
+    if let Some(r) = s
+        .strip_prefix("no ")
+        .or_else(|| s.strip_prefix("there are no "))
+        && let Some((noun, r)) = nouns::noun(r, cx)
+        && noun.zone == Zone::Battlefield
+        && noun.plural
+        && let Some(r) = r
+            .strip_prefix(" are on the battlefield")
+            .or_else(|| r.strip_prefix(" on the battlefield"))
+    {
+        return Some((
+            Condition::CountAtMost {
+                what: Selector::All {
+                    zone: Zone::Battlefield,
+                    filter: noun.filter,
+                },
+                at_most: Value::ZERO,
+            },
+            r,
+        ));
+    }
     // Morbid.
     if let Some(r) = s.strip_prefix("an opponent lost life this turn") {
         return Some((Condition::OpponentLostLifeThisTurn, r));
@@ -153,6 +176,22 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     }
     if let Some(r) = s.strip_prefix("an opponent controls ") {
         return controls(r, Selector::Opponents, cx);
+    }
+    // "as long as you've cast a spell this turn". ("Another spell" depends on when it is
+    // read, so only `cast_only` accepts it.)
+    if let Some(r) = s.strip_prefix("you've cast a spell this turn") {
+        return Some((
+            Condition::ValueAtLeast {
+                lhs: Value::SpellsCastThisTurn(Box::new(Selector::You)),
+                rhs: Value::ONE,
+            },
+            r,
+        ));
+    }
+    // "This creature can't be blocked as long as defending player controls an artifact":
+    // read during combat, when there is a defending player.
+    if let Some(r) = s.strip_prefix("defending player controls ") {
+        return controls(r, Selector::DefendingPlayer, cx);
     }
     // Counted across all of them: "your opponents control eight or more lands".
     if let Some(r) = s.strip_prefix("your opponents control ") {

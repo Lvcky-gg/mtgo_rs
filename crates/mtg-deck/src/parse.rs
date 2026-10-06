@@ -34,11 +34,11 @@ pub struct ParsedDeck {
 }
 
 impl ParsedDeck {
-    pub fn count_in(&self, section: Section) -> u32 {
+    pub fn count_in(&self, section: Section) -> u64 {
         self.entries
             .iter()
             .filter(|e| e.section == section)
-            .map(|e| e.count)
+            .map(|e| u64::from(e.count))
             .sum()
     }
 }
@@ -49,12 +49,24 @@ impl ParsedDeck {
 /// UI to surface. A paste that is 95% good should import 95% of the deck and say
 /// what it could not read, not refuse the whole thing.
 pub fn parse(input: &str) -> ParsedDeck {
+    let input = input.trim_start_matches('\u{feff}');
+    if let Some(deck) = crate::interchange::detect(input) {
+        return deck;
+    }
     let mut out = ParsedDeck::default();
     let mut section = Section::Main;
     // MTGGoldfish and several others separate the sideboard with a blank line and
     // no header. Only the *first* blank line after real content means that, and
     // only if no explicit header was ever seen.
-    let mut saw_explicit_header = false;
+    let has_explicit_header = input.lines().any(|raw| {
+        let line = raw.trim();
+        section_header(if is_comment(line) {
+            strip_comment(line)
+        } else {
+            line
+        })
+        .is_some()
+    });
     let mut saw_content = false;
     let mut blank_run = false;
 
@@ -62,7 +74,7 @@ pub fn parse(input: &str) -> ParsedDeck {
         let line = raw.trim();
 
         if line.is_empty() {
-            if saw_content && !saw_explicit_header && !blank_run && section == Section::Main {
+            if saw_content && !has_explicit_header && !blank_run && section == Section::Main {
                 section = Section::Sideboard;
             }
             blank_run = true;
@@ -74,14 +86,12 @@ pub fn parse(input: &str) -> ParsedDeck {
             // A comment can still be a section header: `// Sideboard`.
             if let Some(s) = section_header(strip_comment(line)) {
                 section = s;
-                saw_explicit_header = true;
             }
             continue;
         }
 
         if let Some(s) = section_header(line) {
             section = s;
-            saw_explicit_header = true;
             continue;
         }
 
@@ -188,11 +198,10 @@ fn split_count(line: &str) -> Option<(u32, &str)> {
     if !digits.is_empty() {
         let rest = &line[digits.len()..];
         let rest = rest.strip_prefix(['x', 'X']).unwrap_or(rest);
-        let rest = rest.trim_start();
         // Guard against a card name that genuinely begins with a number by
         // requiring separation between the count and the name.
-        if rest.len() < line.len() && !rest.is_empty() {
-            return Some((digits.parse().ok()?, rest));
+        if rest.starts_with(char::is_whitespace) && !rest.trim_start().is_empty() {
+            return Some((digits.parse().ok()?, rest.trim_start()));
         }
     }
 
@@ -200,7 +209,7 @@ fn split_count(line: &str) -> Option<(u32, &str)> {
     if let Some(idx) = line.rfind(['x', 'X'])
         && line[idx + 1..].chars().all(|c| c.is_ascii_digit())
         && !line[idx + 1..].is_empty()
-        && line[..idx].ends_with(' ')
+        && line[..idx].ends_with(char::is_whitespace)
     {
         return Some((line[idx + 1..].parse().ok()?, line[..idx].trim_end()));
     }
@@ -285,6 +294,17 @@ mod tests {
     }
 
     #[test]
+    fn a_later_explicit_header_makes_earlier_blank_lines_formatting() {
+        for header in ["Sideboard", "// Sideboard", "# sideboard:"] {
+            let d = parse(&format!(
+                "4 Ember Scouts\n\n4 Winged Wanderer\n\n{header}\n2 Xeno Guard"
+            ));
+            assert_eq!(d.count_in(Section::Main), 8, "{header}");
+            assert_eq!(d.count_in(Section::Sideboard), 2, "{header}");
+        }
+    }
+
+    #[test]
     fn sb_prefix_marks_one_line_only() {
         let d = parse("4 Mountain\nSB: 2 Island\n3 Forest");
         assert_eq!(d.count_in(Section::Sideboard), 2);
@@ -330,5 +350,43 @@ mod tests {
     fn split_card_names_survive_intact() {
         let d = parse("2 Front Half // Back Half (SET) 1");
         assert_eq!(d.entries[0].name, "Front Half // Back Half");
+    }
+
+    #[test]
+    fn a_number_without_a_separator_remains_part_of_the_name() {
+        let d = parse("7Ember Scouts\n4xWinged Wanderer\n3Xeno Guard");
+        assert_eq!(
+            d.entries
+                .iter()
+                .map(|e| (e.count, e.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "7Ember Scouts"),
+                (1, "4xWinged Wanderer"),
+                (1, "3Xeno Guard")
+            ]
+        );
+    }
+
+    #[test]
+    fn quantities_accept_tabs_and_unicode_whitespace() {
+        let d = parse("4\tEmber Scouts\nWinged Wanderer\tx2\n3x\u{a0}Xeno Guard");
+        assert_eq!(
+            d.entries
+                .iter()
+                .map(|e| (e.count, e.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (4, "Ember Scouts"),
+                (2, "Winged Wanderer"),
+                (3, "Xeno Guard")
+            ]
+        );
+    }
+
+    #[test]
+    fn section_totals_preserve_large_quantities() {
+        let d = parse("4294967295 Ember Scouts\n4294967295 Winged Wanderer");
+        assert_eq!(d.count_in(Section::Main), 8_589_934_590u64);
     }
 }

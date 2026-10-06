@@ -45,13 +45,14 @@ pub enum MatchKind {
 }
 
 impl Store {
-    /// Insert or replace a card and its faces.
+    /// Atomically insert or replace a card, its faces, lookup keys, and search row.
     ///
     /// `keys` are the normalised lookup keys for each face, supplied by the caller
     /// because normalisation is a matching concern (`mtg-deck`) rather than a storage one.
     /// Returns the interned oracle id.
     pub fn put_card(&self, card: &StoredCard, keys: &[String]) -> Result<u32> {
-        let conn = &self.conn;
+        let tx = self.conn.unchecked_transaction()?;
+        let conn = &tx;
 
         conn.execute(
             "INSERT INTO cards (oracle_uuid, name, layout) VALUES (?1, ?2, ?3)
@@ -115,6 +116,7 @@ impl Store {
             ],
         )?;
 
+        tx.commit()?;
         Ok(oracle)
     }
 
@@ -440,15 +442,29 @@ impl Store {
 
     /// Intern a subtype name, returning its stable id.
     pub fn intern_subtype(&self, name: &str) -> Result<u16> {
-        self.conn.execute(
+        if let Some(id) = self
+            .conn
+            .query_row(
+                "SELECT id FROM subtypes WHERE name = ?1",
+                params![name],
+                |r| r.get::<_, u16>(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO subtypes (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
             params![name],
         )?;
-        Ok(self.conn.query_row(
+        let id = tx.query_row(
             "SELECT id FROM subtypes WHERE name = ?1",
             params![name],
-            |r| r.get::<_, i64>(0),
-        )? as u16)
+            |r| r.get::<_, u16>(0),
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Every interned subtype, for building the engine's lookup table.
@@ -456,7 +472,7 @@ impl Store {
         let mut q = self
             .conn
             .prepare("SELECT id, name FROM subtypes ORDER BY id")?;
-        let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)? as u16, r.get(1)?)))?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, u16>(0)?, r.get(1)?)))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);

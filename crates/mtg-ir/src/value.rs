@@ -45,6 +45,14 @@ pub enum Value {
     CardTypesAmong(Box<Selector>),
     /// CR 702.40a — how many spells were cast before the source spell this turn (storm).
     SpellsCastBefore,
+    /// CR 700.8 — the number of creatures in a party among these: up to one each of
+    /// Cleric, Rogue, Warrior and Wizard.
+    PartySize(Box<Selector>),
+    /// Domain: how many basic land types (Plains, Island, Swamp, Mountain, Forest) appear
+    /// among these.
+    BasicLandTypesAmong(Box<Selector>),
+    /// How many spells these players have cast this turn.
+    SpellsCastThisTurn(Box<Selector>),
     /// A number the controller announces on resolution, within bounds.
     ChosenByController {
         min: Box<Value>,

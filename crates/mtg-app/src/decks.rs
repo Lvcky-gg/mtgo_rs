@@ -132,6 +132,19 @@ pub fn import_deck(store: &mut Store, name: &str, text: &str) -> Result<ImportSu
     if name.is_empty() {
         return Err("give the deck a name".into());
     }
+    let input = text.trim_start_matches('\u{feff}').trim();
+    let profile_json = if input.starts_with('{') {
+        let root: serde_json::Value =
+            serde_json::from_str(input).map_err(|e| format!("Deck JSON: {e}"))?;
+        if let Some(profile) = root.get("profile") {
+            let profile = crate::deck_profile::DeckProfile::from_json(&profile.to_string())?;
+            Some(serde_json::to_string(&profile).map_err(|e| e.to_string())?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let parsed = mtg_deck::parse(text);
     if parsed
         .entries
@@ -207,7 +220,16 @@ pub fn import_deck(store: &mut Store, name: &str, text: &str) -> Result<ImportSu
         return Err("nothing in the list matched a card — is the card database imported?".into());
     }
     store
-        .put_deck(name, None, &entries)
+        .put_deck_with_details(
+            None,
+            name,
+            None,
+            &entries,
+            mtg_store::decks::DeckDetails {
+                printings: &[],
+                profile: profile_json.as_deref(),
+            },
+        )
         .map_err(|e| e.to_string())?;
     Ok(summary)
 }

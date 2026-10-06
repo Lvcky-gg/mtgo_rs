@@ -640,3 +640,143 @@ cleanup after responses before ending the turn. Also adds cancellation of opposi
 reproduced both issues. Final workspace: 1,193 passed, zero failed, 38 ignored;
 scoped engine/rules and compiled oracle Clippy and diff checks pass. Handoff:
 `docs/sessions/2026-10-01-cleanup-and-counter-audit.md`.
+
+Codex completed an autonomous reliability audit on 2026-10-05: bot arithmetic and
+double-strike heuristics, deck parsing and CLI imports, atomic card writes, checked
+persisted deck/subtype/key values, consistent identity startup, and atomic bulk
+imports that propagate database failures. The documented headless run command
+works, and invalid CLI arguments report errors. Existing UI and concurrent
+engine/IR/compiler implementation edits were preserved. Engine code edits are
+limited to two test files; oracle changes are in the bulk importer and its new
+atomicity suite. Final all-feature workspace tests: 1,243 passed, zero failed,
+41 ignored. All-target/all-feature workspace Clippy with warnings denied passes.
+Handoff: `docs/sessions/2026-10-05-autonomous-reliability-audit.md`.
+
+Codex continued with import streaming and refresh metadata: timestamps now commit
+with cards, metadata read failures propagate, gzip detection handles short reads,
+gzip nesting is bounded, and concatenated gzip members are fully imported. A
+truncated later member rolls back earlier rows. Seven new tests pass; final
+all-feature workspace run: 1,250 passed, zero failed, 41 ignored. All-target,
+all-feature Clippy with warnings denied and whitespace checks pass. Handoff:
+`docs/sessions/2026-10-05-import-streaming-followup.md`.
+
+Claude (2026-10-05, card coverage, uncommitted): filter lands (one mana ability per
+bundle), "costs {N} less to cast if it targets <noun>" (`Condition::TargetsMatching`;
+targets are now recorded before the cost is computed in `complete_announcement`; such
+spells are offered when only the discount makes them affordable and the target prompt is
+then narrowed to qualifying targets), and "can block an additional creature each combat" /
+"any number of creatures" (`Restriction::BlockAdditional`, `combat::block_capacity`).
+**Wire change:** `ChoiceKind::DeclareBlockers` gained `capacity: Vec<(ObjectId, u32)>`
+(`#[serde(default)]`). A blocker blocking several attackers is asked to divide its damage
+through `AssignCombatDamage` with `attacker` = the blocker and `among` = its attackers (any
+division of all of it, CR 510.1d). Outside Claude's crates: `{ eligible, .. }` patterns in
+`mtg-policy/src/bot/mod.rs` and `mtg-headless/src/trace.rs`; in `mtg-app/src/ui.rs`,
+`block_capacity`/`add_block` (a picked blocker with spare capacity adds an attacker
+instead of switching), plus one UI test. The bot still blocks one attacker per blocker.
+Coverage 13,887 → 13,947. Workspace tests pass.
+
+Codex (2026-10-05, card playability): typed discard cost grammar now accepts
+creature/land/artifact/color/subtype/nonland/instant-or-sorcery card filters.
+Shared parsing covers activated and mandatory additional casting costs, using
+existing engine selection/payment. Three regressions pass, along with the
+all-feature workspace suite and oracle all-target Clippy. Local database coverage
+now 13,971 / 34,913 (40.0%; 13,947 before this batch). Concurrent compiler and
+engine work preserved; changes remain uncommitted. Handoff:
+`docs/sessions/2026-10-05-typed-discard-card-coverage.md`.
+
+Codex (2026-10-05, card playability): mana abilities can now append fixed,
+unconditional draws/life gain/life loss, retaining immediate mana-ability
+resolution. Tests verify manual paid/sacrificing activation and automatic payment
+both execute the draw. No engine implementation changes. Three regressions and
+all 573 enabled oracle tests pass; oracle Clippy and whitespace checks pass.
+Coverage 13,971 → 13,978 / 34,913. Handoff:
+`docs/sessions/2026-10-05-mana-ability-followups.md`.
+
+Codex (2026-10-05, card playability): flashback accepts supported nonmana costs
+(life, discard, sacrifice, graveyard exile). Engine now pays flashback life and
+reserves additional cost resources before validating one mana plan, preventing
+unpaid resolution after a failed replan. Six regressions added. Workspace passed
+1,272 tests, zero failures, 41 ignored; final additional double-sacrifice test also
+passed. Engine/oracle Clippy clean. Coverage 13,978 → 13,983 / 34,913 (40.1%).
+Handoff: `docs/sessions/2026-10-05-flashback-nonmana-costs.md`.
+
+Codex (2026-10-05, card playability): protection grammar supports multicolored,
+monocolored, colorless, and mixed “and from” qualities. Three regressions verify
+keyword/granted parsing and actual targeting, blocking, and damage prevention.
+No engine implementation changes. All 582 enabled oracle tests pass (15 ignored),
+Clippy and whitespace checks pass. Coverage 13,983 → 13,992 / 34,913 (40.1%).
+Handoff: `docs/sessions/2026-10-05-protection-qualities.md`.
+
+Codex (2026-10-05, card playability): discard-hand/redraw grammar retains the
+original hand count using an existing binding, including fixed additional draws.
+Three regressions verify empty/full hands, opponent privacy, and prior hand-size
+damage. No engine implementation changes. All 585 enabled oracle tests pass
+(15 ignored), Clippy and whitespace checks pass. Coverage 13,992 → 13,998 /
+34,913. Handoff: `docs/sessions/2026-10-05-discard-hand-redraw.md`.
+
+Codex (2026-10-05, card playability): second/third-from-top library placement now
+compiles for supported targets and graveyard self-placement abilities. Three
+regressions verify exact ordering and full/empty/one-card libraries. No engine
+implementation changes. All 588 enabled oracle tests pass (15 ignored); Clippy
+and whitespace checks pass. Coverage 13,998 → 14,004 / 34,913 (40.1%). Handoff:
+`docs/sessions/2026-10-05-indexed-library-placement.md`.
+
+Codex (2026-10-05, card playability): empty-battlefield conditions support
+Pestilence/Pyrohemia shapes. A response regression exposed missing intervening-if
+checks on resolution; engine now rechecks before executing triggered effects.
+Three regressions and the all-feature workspace suite pass; engine/oracle Clippy
+and whitespace checks pass. Coverage 14,004 → 14,008 / 34,913 (40.1%). Handoff:
+`docs/sessions/2026-10-05-empty-battlefield-triggers.md`.
+
+Codex (2026-10-05, deck builder): user selected suggestions, synergy, and analysis.
+Added theme searches beyond the first page, Commander identity filtering, weighted
+role/mana analysis, CSV/JSON interchange, and bounded native file-drop imports.
+Builder tests (42), deck tests (27), and app/deck Clippy pass. Existing app socket
+tests passed with loopback access. Remaining scope and limits documented in
+`docs/sessions/2026-10-05-deck-suggestions-analysis.md`.
+
+Codex (2026-10-05, deck-builder continuation): recommendations now fill absent
+main-deck draw/ramp/interaction roles using the same heuristic as analysis, with
+explicit reasons and a regression proving role bonuses disappear after additions.
+Removed generic legendary bonus. Added spreadsheet TSV import. Builder (42) and
+deck (28) tests, app/deck Clippy, and whitespace checks pass. Handoff remains
+`docs/sessions/2026-10-05-deck-suggestions-analysis.md`.
+
+Codex (2026-10-05, builder focus): added Balanced/Synergy/Missing roles/Early
+curve selector with cache invalidation and scoring/filter regressions. Analysis
+now shows exact opening-seven land odds before mulligans, with boundary and
+normalization tests. All 43 builder tests and app Clippy pass. Handoff remains
+`docs/sessions/2026-10-05-deck-suggestions-analysis.md`.
+
+Codex (2026-10-05, tournament builder): implemented imported Modern tournament
+observations, similar-list scoring with dates/sample counts/source links, and mana
+curve benchmarks. Sidebar cards/suggestions have thumbnails, hover previews, and
+click enlargement. Added saved player-declared power, Commander bracket,
+competitiveness and Rule 0 profiles with history and JSON interchange. Schema v9
+(tournament records) and v10 (deck profiles); existing API preserves profiles.
+Full app: 208 passed, 3 ignored; store: 27 passed; app/store Clippy and whitespace
+checks pass. Imports are local; no automatic event crawler or corpus shipped.
+Handoff: `docs/sessions/2026-10-05-tournament-builder-profiles.md`.
+
+Claude (2026-10-05 evening, card coverage): coverage 14,008 → 14,284 / 34,913 (40.9%).
+Engine/IR/compiler only, plus one arm in `mtg-policy/src/bot/mod.rs`. New:
+- Block requirements (CR 509.1c): `Restriction::{MustBlock, MustBlockSource, MustBeBlocked,
+  MustBeBlockedByAll}`; `combat::validate_blocks` now rejects a declaration when a one-step
+  change obeys more requirements (`BlockError::RequirementUnmet { better }`), and
+  `DeclareBlockers.default` is now a requirement-obeying declaration (`combat::required_blocks`),
+  not always empty. The bot uses that default when it's non-empty. **Codex/UI:** a human who
+  ignores a lure is silently re-asked; preselecting `choice.default` or showing the error would
+  help. Provoke, `Duration::UntilEndOfCombat` (ends at the end-of-combat action and at cleanup).
+- `Restriction::AssignAsThoughUnblocked`: answering `AssignCombatDamage` with no rows (or all
+  zero) sends all damage to the attacked player/planeswalker. The UI already allows that.
+- `AdditionalCost::TapUntapped { filter, count }` ("Tap an untapped creature you control"),
+  paid like crew via `ChooseObjects`; not for mana abilities yet.
+- `Effect::DealDamageDivided`: one target slot per point of damage, repeats allowed, so the
+  split is announced with the targets (CR 601.2d). `Event::Targeted` is now deduped per object.
+- Also: `Restriction::CantCast { who, spells, beyond }` (statics and "this turn";
+  `cost::cast_forbidden` gates casting, face-down casting and casting mid-resolution);
+  `Value::{PartySize, BasicLandTypesAmong, SpellsCastThisTurn}`; undaunted; counter-and-exile
+  (`exile` on `CounterSpell`/`CounterUnlessPays`); "shuffles their (hand and) graveyard into
+  their library"; "activated abilities of <noun> can't be activated"; "defending player
+  controls …" conditions; "whenever you attack with N or more <noun>".
+- Tests: `tests/compiled/{block_requirements,tap_costs,divided_damage,cast_restrictions}.rs`.

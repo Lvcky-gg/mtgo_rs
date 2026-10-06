@@ -595,3 +595,178 @@ fn quoted_grants_compile_activated_and_triggered_abilities() {
         assert!(!creature(text).understood(), "{text}");
     }
 }
+
+#[test]
+fn typed_discard_costs_preserve_filters_and_reject_unimplemented_choices() {
+    for text in [
+        "Discard a creature card: Draw a card.",
+        "Discard two land cards: Draw a card.",
+        "Discard a red card: Draw a card.",
+        "Discard an artifact card: Draw a card.",
+        "Discard a nonland card: Draw a card.",
+        "Discard an Elf card: Draw a card.",
+        "Discard an instant or sorcery card: Draw a card.",
+    ] {
+        let c = creature(text);
+        let a = ok(&c);
+        let AbilityKind::Activated { cost, .. } = &a[0].kind else {
+            panic!()
+        };
+        assert!(
+            matches!(&cost.additional[0], AdditionalCost::Discard { filter, .. }
+            if *filter != ObjectFilter::Any),
+            "{text}"
+        );
+    }
+    for text in [
+        "Discard a creature: Draw a card.",
+        "Discard two creature card: Draw a card.",
+        "Discard a creature card at random: Draw a card.",
+        "Discard a creature card or pay 3 life: Draw a card.",
+    ] {
+        assert!(!creature(text).understood(), "{text}");
+    }
+}
+
+#[test]
+fn mana_ability_followups_require_unconditional_effects_without_choices() {
+    for text in [
+        "{1}, {T}, Sacrifice this creature: Add one mana of any color. Draw a card.",
+        "{T}: Add {G}. You gain 1 life.",
+        "{T}: Add {G}. Draw a card. You lose 1 life.",
+    ] {
+        let c = creature(text);
+        let a = ok(&c);
+        assert!(
+            matches!(
+                &a[0].kind,
+                AbilityKind::Activated {
+                    is_mana_ability: true,
+                    effect: Effect::Sequence(_),
+                    ..
+                }
+            ),
+            "{text}"
+        );
+    }
+    for text in [
+        "{T}: Add {G}. Target player draws a card.",
+        "{T}: Add {G}. You may draw a card.",
+        "{T}: Add {G}. Discard a card.",
+        "{T}: Add {G}. Draw a card for each creature you control.",
+    ] {
+        assert!(!creature(text).understood(), "{text}");
+    }
+}
+
+#[test]
+fn flashback_costs_accept_payable_parts_and_reject_unimplemented_parts() {
+    for text in [
+        "Draw a card.\nFlashback—{1}{U}, Pay 3 life.",
+        "Draw a card.\nFlashback—Sacrifice three creatures.",
+        "Draw a card.\nFlashback—Discard a creature card.",
+        "Draw a card.\nFlashback—Exile two cards from your graveyard.",
+    ] {
+        ok(&instant(text));
+    }
+    for text in [
+        "Draw a card.\nFlashback—Tap an untapped creature you control.",
+        "Draw a card.\nFlashback—Discard X cards.",
+        "Draw a card.\nFlashback—Sacrifice this spell.",
+        "Draw a card.\nFlashback—Discard this card.",
+        "Draw a card.\nFlashback—Exile this card from your graveyard.",
+    ] {
+        assert!(!instant(text).understood(), "{text}");
+    }
+}
+
+#[test]
+fn protection_qualities_work_as_keywords_and_granted_effects() {
+    for quality in [
+        "multicolored",
+        "monocolored",
+        "colorless",
+        "red and from artifacts",
+    ] {
+        ok(&creature(&format!("Protection from {quality}")));
+        ok(&instant(&format!(
+            "Target creature gains protection from {quality} until end of turn."
+        )));
+    }
+    for quality in [
+        "colorless except artifacts",
+        "red and from unknown",
+        "multicolored except green",
+    ] {
+        assert!(
+            !creature(&format!("Protection from {quality}")).understood(),
+            "{quality}"
+        );
+    }
+}
+
+#[test]
+fn discard_hand_draw_same_count_requires_the_complete_followup() {
+    for text in [
+        "Discard your hand, then draw that many cards.",
+        "Discard all the cards in your hand, then draw that many cards plus one.",
+        "Discard all the cards in your hand, then draw that many cards. You gain 2 life.",
+    ] {
+        ok(&instant(text));
+    }
+    for text in [
+        "Discard your hand, then draw that many cards at random.",
+        "Discard your hand, then draw that many cards plus X.",
+        "Discard your hand, then draw that many cards if you control a creature.",
+    ] {
+        assert!(!instant(text).understood(), "{text}");
+    }
+}
+
+#[test]
+fn indexed_library_placement_rejects_unimplemented_owner_choices() {
+    for text in [
+        "Put target creature into its owner's library second from the top.",
+        "Put target creature into its owner's library third from the top.",
+        "Put target creature card from your graveyard into your library second from the top.",
+    ] {
+        ok(&instant(text));
+    }
+    for text in [
+        "Put target creature into its owner's library second from the top or on the bottom.",
+        "Put target creature into your library second from the top.",
+        "Put target creature into its owner's library fourth from the top.",
+    ] {
+        assert!(!instant(text).understood(), "{text}");
+    }
+    assert!(
+        !creature("{T}: Put this card from your graveyard into your library third from the top.")
+            .understood()
+    );
+}
+
+#[test]
+fn absent_battlefield_conditions_require_a_complete_zone_qualifier() {
+    for condition in [
+        "no creatures are on the battlefield",
+        "there are no creatures on the battlefield",
+        "no artifacts are on the battlefield",
+    ] {
+        ok(&creature(&format!(
+            "At the beginning of your upkeep, if {condition}, you gain 2 life."
+        )));
+    }
+    for condition in [
+        "no creatures are attacking",
+        "no creatures are in your hand",
+        "no creatures are on the battlefield except this creature",
+    ] {
+        assert!(
+            !creature(&format!(
+                "At the beginning of your upkeep, if {condition}, you gain 2 life."
+            ))
+            .understood(),
+            "{condition}"
+        );
+    }
+}

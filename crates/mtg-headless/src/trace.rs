@@ -166,7 +166,7 @@ fn stand_in(c: &Choice) -> Answer {
         // Attack with everything and block with everything: crude, but it exercises
         // combat, and a demo client is not the place for strategy.
         ChoiceKind::DeclareAttackers { eligible, .. } => Answer::Objects(eligible.clone()),
-        ChoiceKind::DeclareBlockers { eligible } => Answer::Blocks(
+        ChoiceKind::DeclareBlockers { eligible, .. } => Answer::Blocks(
             eligible
                 .iter()
                 .filter_map(|(blocker, can_block)| {
@@ -242,7 +242,7 @@ fn prompt_line(c: &Choice, cards: &DemoCards, state: &GameState) -> String {
         ChoiceKind::DeclareAttackers { eligible, .. } => {
             format!("{:?}: declare attackers ({} able)", c.who, eligible.len())
         }
-        ChoiceKind::DeclareBlockers { eligible } => {
+        ChoiceKind::DeclareBlockers { eligible, .. } => {
             format!("{:?}: declare blockers ({} able)", c.who, eligible.len())
         }
         ChoiceKind::OrderBlockers { attacker, blockers } => format!(

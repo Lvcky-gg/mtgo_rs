@@ -255,6 +255,10 @@ pub enum AbilityKind {
     /// nothing during a game, so a card with it plays exactly as its other text says.
     DeckRule(Box<str>),
 
+    /// CR 702.52 — dredge N: while this card is in its owner's graveyard, if they would
+    /// draw a card they may instead mill N and return this card to their hand (only with
+    /// at least N cards in their library).
+    Dredge(u8),
     /// A keyword that the engine implements directly because it participates in
     /// turn structure or combat rather than producing an effect.
     Keyword(Keyword),
@@ -271,6 +275,14 @@ pub enum AltCost {
     /// CR 702.109 — dash: it gains haste, and returns to its owner's hand at the
     /// beginning of the next end step.
     Dash,
+    /// CR 702.152 — blitz: it gains haste and "when this creature dies, draw a card", and
+    /// is sacrificed at the beginning of the next end step.
+    Blitz,
+    /// CR 702.117 — surge: castable for this cost if its controller has cast another spell
+    /// this turn (the condition is the cost's `timing`).
+    Surge,
+    /// CR 702.137 — spectacle: castable for this cost if an opponent lost life this turn.
+    Spectacle,
     /// CR 702.74 — evoke: when it enters, if it was evoked, its controller sacrifices it
     /// (a trigger compiled beside this ability).
     Evoke,

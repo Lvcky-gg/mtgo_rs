@@ -201,6 +201,11 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         deals_damage,
         pump,
         cant_block,
+        all_must_block,
+        assign_unblocked,
+        have_block,
+        cant_cast_this_turn,
+        shuffle_into_library,
     ];
     for shape in SHAPES {
         let saved = cx.clone();
@@ -1484,6 +1489,16 @@ fn put_into_library<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         return None;
     } else if let Some(r) = library(r, "on top of") {
         (ZonePosition::Top, r)
+    } else if let Some(r) = library(r, "into") {
+        let (position, r) = if let Some(r) = r.strip_prefix(" second from the top") {
+            (ZonePosition::FromTop(1), r)
+        } else {
+            (
+                ZonePosition::FromTop(2),
+                r.strip_prefix(" third from the top")?,
+            )
+        };
+        (position, r)
     } else {
         (ZonePosition::Bottom, library(r, "on the bottom of")?)
     };
@@ -1599,19 +1614,31 @@ fn counter_spell<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     if cx.targets.get(index as usize)?.zone != Zone::Stack {
         return None;
     }
+    // "If that spell is countered this way, exile it instead of putting it into its owner's
+    // graveyard."
+    let exiled = |r: &'s str| {
+        r.strip_prefix(
+            ". if that spell is countered this way, exile it instead of putting it into its \
+             owner's graveyard",
+        )
+        .map_or((false, r), |r| (true, r))
+    };
     if let Some(after) = r.strip_prefix(" unless its controller pays ") {
         let (mana, rest) = super::mana_cost(after)?;
+        let (exile, rest) = exiled(rest);
         return Some((
             Effect::CounterUnlessPays {
                 what,
                 mana,
                 life: None,
                 discard: false,
+                exile,
             },
             rest,
         ));
     }
-    Some((Effect::CounterSpell { what }, r))
+    let (exile, r) = exiled(r);
+    Some((Effect::CounterSpell { what, exile }, r))
 }
 
 /// "put a +1/+1 counter on target creature", "put two +1/+1 counters on ~".
@@ -1956,6 +1983,12 @@ fn deals_damage<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let (source, _, r) = nouns::object(s, cx)?;
     let r = r.strip_prefix(" deals ")?;
     let (n, r) = amount(r, cx)?;
+    if let Some(among) = r.strip_prefix(" damage divided as you choose among ") {
+        let Value::Fixed(total) = n else {
+            return None;
+        };
+        return divided(source, total, among, cx);
+    }
     let r = r.strip_prefix(" damage to ")?;
     let (to, r) = nouns::recipient(r, cx)?;
     let first = Effect::DealDamage {
@@ -1980,6 +2013,71 @@ fn deals_damage<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     }
     *cx = saved;
     Some((first, r))
+}
+
+/// "… divided as you choose among one, two, or three targets" (CR 601.2d): one target slot
+/// per point of damage, any of which may name the same target, so the division is announced
+/// with the targets. Slots are mandatory: all the damage is divided.
+fn divided<'s>(
+    source: Selector,
+    total: i32,
+    among: &'s str,
+    cx: &mut Cx,
+) -> Option<(Effect, &'s str)> {
+    let (most, r) = if let Some(r) = among.strip_prefix("one or two ") {
+        (2, r)
+    } else if let Some(r) = among.strip_prefix("one, two, or three ") {
+        (3, r)
+    } else if let Some(r) = among.strip_prefix("any number of ") {
+        (total, r)
+    } else {
+        let r = among.strip_prefix("up to ")?;
+        let (n, r) = words::number(r)?;
+        (n, r.strip_prefix(' ')?)
+    };
+    if !(1..=10).contains(&total) || total > most {
+        return None;
+    }
+    let (spec, rest) = if let Some(rest) = r.strip_prefix("targets") {
+        (
+            mtg_ir::selector::TargetSpec {
+                zone: Zone::Battlefield,
+                filter: mtg_ir::ObjectFilter::Or(vec![
+                    mtg_ir::ObjectFilter::HasType(CardType::Creature),
+                    mtg_ir::ObjectFilter::HasType(CardType::Planeswalker),
+                ]),
+                allows_players: true,
+                players: None,
+                mode: None,
+                count: Value::ONE,
+                up_to: false,
+                distinct_from_other_targets: false,
+            },
+            rest,
+        )
+    } else {
+        let r = r.strip_prefix("target ")?;
+        let (noun, rest) = nouns::noun(r, cx)?;
+        if !noun.plural || noun.zone != Zone::Battlefield {
+            return None;
+        }
+        (
+            mtg_ir::selector::TargetSpec {
+                zone: noun.zone,
+                filter: noun.filter,
+                allows_players: false,
+                players: None,
+                mode: None,
+                count: Value::ONE,
+                up_to: false,
+                distinct_from_other_targets: false,
+            },
+            rest,
+        )
+    };
+    let shares: Vec<Selector> = (0..total).map(|_| cx.target(spec.clone())).collect();
+    cx.it = Some(Selector::Union(shares.clone()));
+    Some((Effect::DealDamageDivided { source, shares }, rest))
 }
 
 /// "target creature gets +2/+2 until end of turn", "creatures you control get +1/+0 and
@@ -2021,6 +2119,11 @@ fn pump<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         && let Some((by, after)) = per(after, cx)
     {
         scale_mods(&mut mods, by);
+        r = after;
+    }
+    // "… gets +2/+2 until end of turn and must be blocked this turn if able"
+    if let Some(after) = r.strip_prefix(" and must be blocked this turn if able") {
+        mods.push(Modification::Restriction(Restriction::MustBeBlocked));
         r = after;
     }
     Some((continuous(what, mods, Duration::UntilEndOfTurn), r))
@@ -2131,14 +2234,44 @@ fn continuous(what: Selector, mods: Vec<Modification>, duration: Duration) -> Ef
 
 /// "target creature can't block this turn".
 fn cant_block<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    // Before the subject is read: naming a target makes it the new "it".
+    let it_is_self = cx.it == Some(Selector::SelfSource);
     let (what, _, r) = nouns::object(s, cx)?;
     battlefield_only(&what, cx)?;
+    // "blocks ~ this combat if able", "blocks it this turn if able" — "it" being this
+    // permanent, the source of the requirement.
+    for (lead, duration) in [
+        (" blocks ~ this turn if able", Duration::UntilEndOfTurn),
+        (" blocks ~ this combat if able", Duration::UntilEndOfCombat),
+        (" blocks it this turn if able", Duration::UntilEndOfTurn),
+        (" blocks it this combat if able", Duration::UntilEndOfCombat),
+    ] {
+        if let Some(r) = r.strip_prefix(lead)
+            && (lead.contains('~') || it_is_self)
+        {
+            return Some((
+                continuous(
+                    what,
+                    vec![Modification::Restriction(Restriction::MustBlockSource)],
+                    duration,
+                ),
+                r,
+            ));
+        }
+    }
     let (rs, r) = if let Some(r) = r.strip_prefix(" can't attack or block this turn") {
         (vec![Restriction::CantAttack, Restriction::CantBlock], r)
     } else if let Some(r) = r.strip_prefix(" can't block this turn") {
         (vec![Restriction::CantBlock], r)
     } else if let Some(r) = r.strip_prefix(" can't attack this turn") {
         (vec![Restriction::CantAttack], r)
+    } else if let Some(r) = r.strip_prefix(" must be blocked this turn if able") {
+        (vec![Restriction::MustBeBlocked], r)
+    } else if let Some(r) = r
+        .strip_prefix(" blocks this turn if able")
+        .or_else(|| r.strip_prefix(" block this turn if able"))
+    {
+        (vec![Restriction::MustBlock], r)
     } else {
         let r = r.strip_prefix(" can't be blocked this turn")?;
         (
@@ -2155,6 +2288,160 @@ fn cant_block<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
             Duration::UntilEndOfTurn,
         ),
         r,
+    ))
+}
+
+/// "you may have ~ assign its combat damage this turn as though it weren't blocked",
+/// "you may have creatures you control assign their combat damage this turn as though they
+/// weren't blocked" (CR 510.1c).
+fn assign_unblocked<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let rest = s.strip_prefix("you may have ")?;
+    let (what, plural, rest) = nouns::object(rest, cx)?;
+    battlefield_only(&what, cx)?;
+    let rest = if plural {
+        rest.strip_prefix(" assign their combat damage this turn as though they weren't blocked")?
+    } else {
+        rest.strip_prefix(" assign its combat damage this turn as though it weren't blocked")?
+    };
+    Some((
+        continuous(
+            what,
+            vec![Modification::Restriction(
+                Restriction::AssignAsThoughUnblocked,
+            )],
+            Duration::UntilEndOfTurn,
+        ),
+        rest,
+    ))
+}
+
+/// "target player shuffles their graveyard into their library", "each player shuffles their
+/// hand and graveyard into their library".
+fn shuffle_into_library<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let (who, _, rest) = nouns::player(s, cx)?;
+    let (zones, rest) =
+        if let Some(r) = rest.strip_prefix(" shuffles their graveyard into their library") {
+            (vec![Zone::Graveyard], r)
+        } else {
+            let r = rest.strip_prefix(" shuffles their hand and graveyard into their library")?;
+            (vec![Zone::Hand, Zone::Graveyard], r)
+        };
+    let mut steps: Vec<Effect> = zones
+        .into_iter()
+        .map(|zone| Effect::MoveZone {
+            what: Selector::All {
+                zone,
+                filter: mtg_ir::ObjectFilter::OwnedBy(Box::new(who.clone())),
+            },
+            to: Zone::Library,
+            owner_relative_to: None,
+            position: ZonePosition::Top,
+            tapped: false,
+            face_down: false,
+            under_control_of: None,
+        })
+        .collect();
+    steps.push(Effect::Shuffle { who: who.clone() });
+    // "…, then draws seven cards."
+    let rest = if let Some(r) = rest.strip_prefix(", then draws ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(if n == 1 { " card" } else { " cards" })
+    {
+        steps.push(Effect::Draw {
+            who,
+            count: Value::Fixed(n),
+        });
+        r
+    } else {
+        rest
+    };
+    Some((Effect::Sequence(steps), rest))
+}
+
+/// "your opponents can't cast spells this turn", "players can't cast noncreature spells this
+/// turn".
+fn cant_cast_this_turn<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let (who, rest) = super::cant_cast_who(s)?;
+    let rest = rest.strip_prefix(" can't cast ")?;
+    let (what, rest) = rest.split_once(" this turn")?;
+    let modification = super::cant_cast(who, what, cx)?;
+    Some((
+        Effect::Continuous {
+            what: Selector::SelfSource,
+            modification,
+            duration: Duration::UntilEndOfTurn,
+        },
+        rest,
+    ))
+}
+
+/// "you may have target creature block ~ this turn if able", and provoke's "you may have
+/// target creature defending player controls untap and block it this combat if able".
+fn have_block<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let rest = s.strip_prefix("you may have ")?;
+    let it_is_self = cx.it == Some(Selector::SelfSource);
+    let (what, false, rest) = nouns::object(rest, cx)? else {
+        return None;
+    };
+    battlefield_only(&what, cx)?;
+    let (untap, rest) = match rest.strip_prefix(" untap and") {
+        Some(r) => (true, r),
+        None => (false, rest),
+    };
+    let (duration, rest) = [
+        (" block ~ this turn if able", Duration::UntilEndOfTurn),
+        (" block ~ this combat if able", Duration::UntilEndOfCombat),
+        (" block it this turn if able", Duration::UntilEndOfTurn),
+        (" block it this combat if able", Duration::UntilEndOfCombat),
+    ]
+    .into_iter()
+    .find_map(|(lead, d)| {
+        rest.strip_prefix(lead)
+            .filter(|_| lead.contains('~') || it_is_self)
+            .map(|r| (d, r))
+    })?;
+    let block = Effect::Continuous {
+        what: what.clone(),
+        modification: Modification::Restriction(Restriction::MustBlockSource),
+        duration,
+    };
+    let then = if untap {
+        Effect::Sequence(vec![Effect::Untap { what }, block])
+    } else {
+        block
+    };
+    Some((
+        Effect::May {
+            prompt: "have it block".into(),
+            then: Box::new(then),
+            otherwise: None,
+        },
+        rest,
+    ))
+}
+
+/// "all creatures able to block target creature this turn do so" (CR 509.1c).
+fn all_must_block<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let rest = s.strip_prefix("all ")?;
+    let (blockers, rest) = nouns::noun(rest, cx)?;
+    if !blockers.plural || blockers.zone != Zone::Battlefield {
+        return None;
+    }
+    let rest = rest.strip_prefix(" able to block ")?;
+    let (what, false, rest) = nouns::object(rest, cx)? else {
+        return None;
+    };
+    battlefield_only(&what, cx)?;
+    let rest = rest.strip_prefix(" this turn do so")?;
+    Some((
+        continuous(
+            what,
+            vec![Modification::Restriction(Restriction::MustBeBlockedByAll(
+                blockers.filter,
+            ))],
+            Duration::UntilEndOfTurn,
+        ),
+        rest,
     ))
 }
 
@@ -2613,19 +2900,49 @@ fn capitalise(w: &str) -> String {
 /// "discard a card", "discard two cards" — the imperative, for the controller.
 fn discard_you<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let r = s.strip_prefix("discard ")?;
-    // "discard your hand": every card in it.
-    if let Some(r) = r.strip_prefix("your hand") {
-        return Some((
-            Effect::Discard {
-                who: Selector::You,
-                count: Value::Count(Box::new(Selector::All {
-                    zone: Zone::Hand,
-                    filter: mtg_ir::ObjectFilter::OwnedBy(Box::new(Selector::You)),
-                })),
-                at_random: false,
-            },
-            r,
-        ));
+    // Snapshot the hand before discarding so "draw that many" still counts
+    // those cards after they have moved to new objects in another zone.
+    if let Some(r) = r
+        .strip_prefix("your hand")
+        .or_else(|| r.strip_prefix("all the cards in your hand"))
+    {
+        let hand = Selector::All {
+            zone: Zone::Hand,
+            filter: mtg_ir::ObjectFilter::OwnedBy(Box::new(Selector::You)),
+        };
+        let discard = Effect::Discard {
+            who: Selector::You,
+            count: Value::Count(Box::new(hand.clone())),
+            at_random: false,
+        };
+        if let Some(r) = r
+            .strip_prefix(", then draw that many cards")
+            .or_else(|| r.strip_prefix(". then draw that many cards"))
+        {
+            let slot = mtg_ir::selector::Binding::Named(u16::MAX - 5);
+            let count = Value::Count(Box::new(Selector::Bound(slot)));
+            let (count, r) = if let Some(r) = r.strip_prefix(" plus ") {
+                let (extra, r) = words::number(r)?;
+                (Value::Sum(vec![count, Value::Fixed(extra)]), r)
+            } else {
+                (count, r)
+            };
+            return Some((
+                Effect::Let {
+                    slot,
+                    what: hand,
+                    body: Box::new(Effect::Sequence(vec![
+                        discard,
+                        Effect::Draw {
+                            who: Selector::You,
+                            count,
+                        },
+                    ])),
+                },
+                r,
+            ));
+        }
+        return Some((discard, r));
     }
     let (n, r) = count_of(r, "card", cx)?;
     if r.starts_with(" at random") {
@@ -2936,6 +3253,36 @@ pub fn per<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
         && let Some(r) = spent_on_self(r)
     {
         return Some((Value::ColorsSpent, r));
+    }
+    // "for each creature in your party" (CR 700.8).
+    if let Some(r) = s.strip_prefix("creature in your party") {
+        return Some((
+            Value::PartySize(Box::new(Selector::All {
+                zone: Zone::Battlefield,
+                filter: mtg_ir::ObjectFilter::And(vec![
+                    mtg_ir::ObjectFilter::HasType(CardType::Creature),
+                    mtg_ir::ObjectFilter::ControlledBy(Box::new(Selector::You)),
+                ]),
+            })),
+            r,
+        ));
+    }
+    // Domain: "for each basic land type among lands you control".
+    if let Some(r) = s.strip_prefix("basic land type among lands you control") {
+        return Some((
+            Value::BasicLandTypesAmong(Box::new(Selector::All {
+                zone: Zone::Battlefield,
+                filter: mtg_ir::ObjectFilter::And(vec![
+                    mtg_ir::ObjectFilter::HasType(CardType::Land),
+                    mtg_ir::ObjectFilter::ControlledBy(Box::new(Selector::You)),
+                ]),
+            })),
+            r,
+        ));
+    }
+    // Undaunted: "for each opponent you have".
+    if let Some(r) = s.strip_prefix("opponent you have") {
+        return Some((Value::Count(Box::new(Selector::Opponents)), r));
     }
     if let Some((kind, r)) = words::counter(s) {
         let (what, _, r) = nouns::object(r.strip_prefix(" on ")?, &mut cx.clone())?;

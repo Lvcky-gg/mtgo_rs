@@ -1189,6 +1189,26 @@ fn dash_attacks_with_haste_and_returns_to_hand() {
 }
 
 #[test]
+fn blitz_attacks_with_haste_then_is_sacrificed_and_draws() {
+    let mut t = Table::default();
+    let raider = t.card("{3}{R}", "Creature — Goblin", Some((3, 2)), "Blitz {1}{R}");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let r = g.put(raider, P0, Zone::Hand);
+    let actions = g.main();
+    g.act(alternative(&actions, r), &[], &[]);
+    let on = g.find(raider).expect("blitzed in");
+    assert!(g.has(on, mtg_core::Keyword::Haste));
+    g.combat(&[on], &[], &[], &[]);
+    assert_eq!(g.life(P1), 17);
+    let hand = g.count(Zone::Hand, P0);
+    g.until(P1, mtg_core::Step::Upkeep);
+    assert!(g.find(raider).is_none(), "sacrificed at the end step");
+    assert_eq!(g.count(Zone::Graveyard, P0), 1);
+    assert_eq!(g.count(Zone::Hand, P0), hand + 1, "and its death drew a card");
+}
+
+#[test]
 fn evoke_gets_the_enters_trigger_then_sacrifices() {
     let mut t = Table::default();
     let elemental = t.card(

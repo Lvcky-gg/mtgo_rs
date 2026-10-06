@@ -444,6 +444,41 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             }
             types.len() as i32
         }
+        Value::SpellsCastThisTurn(who) => players(ctx, who)?
+            .iter()
+            .map(|p| ctx.state.spells_by_player.get(p).copied().unwrap_or(0) as i32)
+            .sum(),
+        Value::BasicLandTypesAmong(sel) => {
+            let mut seen = [false; 5];
+            for id in objects(ctx, sel)? {
+                for s in &ctx.characteristics(id)?.subtypes {
+                    if let Some(i) = ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+                        .iter()
+                        .position(|n| ctx.cards.subtype_name(*s) == Some(*n))
+                    {
+                        seen[i] = true;
+                    }
+                }
+            }
+            seen.iter().filter(|s| **s).count() as i32
+        }
+        Value::PartySize(sel) => {
+            const ROLES: [&str; 4] = ["Cleric", "Rogue", "Warrior", "Wizard"];
+            // Which roles each creature could fill (a changeling has every creature type).
+            let mut fills: Vec<[bool; 4]> = Vec::new();
+            for id in objects(ctx, sel)? {
+                let subtypes = &ctx.characteristics(id)?.subtypes;
+                let roles = ROLES.map(|role| {
+                    subtypes
+                        .iter()
+                        .any(|s| ctx.cards.subtype_name(*s) == Some(role))
+                });
+                if roles.iter().any(|r| *r) {
+                    fills.push(roles);
+                }
+            }
+            party(&fills, 0, &mut vec![false; fills.len()])
+        }
         Value::ColorsSpent | Value::ManaSpentOfColor(_) => {
             let spent = ctx
                 .state
@@ -600,6 +635,28 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
             .get(&ctx.source)
             .is_some_and(|o| o.kicked || o.cast_context.as_ref().is_some_and(|c| c.kicked)),
         Condition::DuringStep(s) => ctx.state.step == *s,
+        Condition::TargetsMatching(f) => {
+            let Some(cc) = ctx
+                .state
+                .objects
+                .get(&ctx.source)
+                .and_then(|o| o.cast_context.as_ref())
+            else {
+                return Ok(false);
+            };
+            let mut any = false;
+            for (i, t) in cc.targets.iter().enumerate() {
+                // Placeholders for slots left empty are not targets.
+                if !cc.empty_slots.contains(&(i as u8))
+                    && let Target::Object(id) = t
+                    && matches(ctx, f, *id)?
+                {
+                    any = true;
+                    break;
+                }
+            }
+            any
+        }
         Condition::CountAtLeast { what, at_least } => {
             value(ctx, &Value::Count(Box::new(what.clone())))? >= value(ctx, at_least)?
         }
@@ -872,4 +929,24 @@ pub fn protected_from(
                 if state.objects.contains_key(&source)
                     && matches(&ctx, from, source).unwrap_or(false))
     })
+}
+
+/// The most roles from `role` on that distinct creatures can fill, each creature filling at
+/// most one (CR 700.8).
+fn party(fills: &[[bool; 4]], role: usize, used: &mut Vec<bool>) -> i32 {
+    if role == 4 {
+        return 0;
+    }
+    let mut best = party(fills, role + 1, used);
+    for (i, roles) in fills.iter().enumerate() {
+        if roles[role] && !used[i] {
+            used[i] = true;
+            best = best.max(1 + party(fills, role + 1, used));
+            used[i] = false;
+            if best == (4 - role) as i32 {
+                break;
+            }
+        }
+    }
+    best
 }

@@ -107,6 +107,13 @@ pub struct ObjectView {
 /// - Libraries: count only, and **order is never transmitted**, not even shuffled,
 ///   because a client that receives the order can be modified to display it.
 pub fn project(state: &GameState, viewer: PlayerId) -> PlayerView {
+    project_showing(state, viewer, &[])
+}
+
+/// [`project`], plus `shown`: objects the viewer is being asked to choose among, which
+/// they are entitled to look at — the cards a scry or surveil puts in front of them
+/// (CR 701.22a), even though they are still in a library.
+pub fn project_showing(state: &GameState, viewer: PlayerId, shown: &[ObjectId]) -> PlayerView {
     let mut visible = BTreeMap::new();
 
     // The top card of a library some effect lets its owner, or everyone, see.
@@ -125,7 +132,7 @@ pub fn project(state: &GameState, viewer: PlayerId) -> PlayerView {
             // Library membership is not revealed at all: a library card only
             // appears in a view once an effect has revealed or moved it.
             Zone::Library => top_seen(obj),
-        };
+        } || shown.contains(&obj.id);
         if obj.zone.zone == Zone::Library && !entitled {
             continue;
         }

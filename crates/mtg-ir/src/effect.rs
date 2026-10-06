@@ -196,6 +196,13 @@ pub enum Effect {
         to: Selector,
         amount: Value,
     },
+    /// CR 601.2d — "deals 3 damage divided as you choose among one, two, or three
+    /// targets": one point of damage for each of `shares`, the target slots the division was
+    /// announced with. A target named by several slots is dealt that many, all at once.
+    DealDamageDivided {
+        source: Selector,
+        shares: Vec<Selector>,
+    },
     Tap {
         what: Selector,
     },
@@ -379,6 +386,10 @@ pub enum Effect {
     // ---- the stack ------------------------------------------------------
     CounterSpell {
         what: Selector,
+        /// "If that spell is countered this way, exile it instead of putting it into its
+        /// owner's graveyard."
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exile: bool,
     },
     /// "Counter target spell unless its controller pays {3}", and ward (CR 702.21): the
     /// controller of each object may pay; any not paid for is countered.
@@ -391,6 +402,9 @@ pub enum Effect {
         /// A card to discard instead of mana ("ward—discard a card").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         discard: bool,
+        /// A spell countered this way is exiled instead of going to the graveyard.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exile: bool,
     },
     /// Copy a spell or ability on the stack, optionally letting new targets be chosen.
     CopySpell {
@@ -604,6 +618,32 @@ pub enum Restriction {
     CantAttackAlone,
     /// "Can't block alone" (CR 506.5): legal only if another creature also blocks.
     CantBlockAlone,
+    /// "Can block an additional creature each combat" (CR 509.1a): this many more
+    /// attackers; `None` is "can block any number of creatures". Several add up.
+    BlockAdditional(Option<u8>),
+    /// Block requirements (CR 509.1c). "Blocks each combat if able": it blocks some
+    /// attacker if it can.
+    MustBlock,
+    /// "Target creature blocks this creature this turn if able": it blocks the effect's
+    /// source if it can.
+    MustBlockSource,
+    /// "Must be blocked if able": at least one creature blocks it if any can.
+    MustBeBlocked,
+    /// "All creatures able to block this creature do so": every creature matching the
+    /// filter (from this creature's point of view) that can block it, does.
+    MustBeBlockedByAll(ObjectFilter),
+    /// "Your opponents can't cast creature spells", "each player can't cast more than one
+    /// spell each turn": the players `who` names (from the effect's controller) can't cast
+    /// spells matching `spells` — at all, or once they have cast `beyond` spells this turn.
+    CantCast {
+        who: crate::selector::Selector,
+        spells: ObjectFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        beyond: Option<u8>,
+    },
+    /// "You may have this creature assign its combat damage as though it weren't
+    /// blocked" (CR 510.1c): its controller may send all of it to what it attacks.
+    AssignAsThoughUnblocked,
     /// "Can't attack unless defending player controls an Island".
     CantAttackUnlessDefenderControls(ObjectFilter),
     /// CR 402.2 — "You have no maximum hand size": the controller of the source.
@@ -629,6 +669,8 @@ pub enum Duration {
     /// Lasts as long as the source is on the battlefield — a static ability.
     WhileSourcePresent,
     UntilEndOfTurn,
+    /// "This combat": ends as creatures are removed from combat (CR 511.3).
+    UntilEndOfCombat,
     UntilYourNextTurn,
     /// One-shot effects that nevertheless create a lasting change with no end.
     Permanent,

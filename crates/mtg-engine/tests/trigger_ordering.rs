@@ -385,8 +385,20 @@ fn overlapping_reads_and_writes_trigger_ordering_prompt() {
     // Engine should ask for ordering since order matters.
     let object = Resource::Object(ObjectId(42));
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[object.clone()], &[object.clone()], false),
-        trigger(2, P0, &[object.clone()], &[object.clone()], false),
+        trigger(
+            1,
+            P0,
+            std::slice::from_ref(&object),
+            std::slice::from_ref(&object),
+            false,
+        ),
+        trigger(
+            2,
+            P0,
+            std::slice::from_ref(&object),
+            std::slice::from_ref(&object),
+            false,
+        ),
     ]);
 
     let interruptions = run(&mut engine, &cards, 900, |e| {
@@ -406,8 +418,8 @@ fn trigger_reading_without_writing_allows_any_order() {
     // Order doesn't matter for commutativity.
     let object = Resource::Object(ObjectId(50));
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[object.clone()], &[], false),
-        trigger(2, P0, &[object.clone()], &[], false),
+        trigger(1, P0, std::slice::from_ref(&object), &[], false),
+        trigger(2, P0, std::slice::from_ref(&object), &[], false),
     ]);
 
     let interruptions = run(&mut engine, &cards, 900, |e| {
@@ -450,8 +462,8 @@ fn trigger_with_prompt_affects_ordering_decision() {
     // should still request ordering.
     let resource = Resource::Object(ObjectId(60));
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[], &[resource.clone()], true), // has prompts
-        trigger(2, P0, &[], &[resource.clone()], false),
+        trigger(1, P0, &[], std::slice::from_ref(&resource), true), // has prompts
+        trigger(2, P0, &[], std::slice::from_ref(&resource), false),
     ]);
 
     let interruptions = run(&mut engine, &cards, 900, |e| {
@@ -476,8 +488,20 @@ fn order_matters_when_triggers_modify_state_read_by_second() {
     let life = Resource::Life(P0);
 
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[life.clone()], &[obj.clone()], false),
-        trigger(2, P0, &[obj.clone()], &[life.clone()], false),
+        trigger(
+            1,
+            P0,
+            std::slice::from_ref(&life),
+            std::slice::from_ref(&obj),
+            false,
+        ),
+        trigger(
+            2,
+            P0,
+            std::slice::from_ref(&obj),
+            std::slice::from_ref(&life),
+            false,
+        ),
     ]);
 
     let interruptions = run(&mut engine, &cards, 900, |e| {
@@ -532,8 +556,8 @@ fn three_triggers_with_partial_conflicts() {
     let unique = Resource::Object(ObjectId(91));
 
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[], &[shared.clone()], false),
-        trigger(2, P0, &[], &[shared.clone()], false),
+        trigger(1, P0, &[], std::slice::from_ref(&shared), false),
+        trigger(2, P0, &[], std::slice::from_ref(&shared), false),
         trigger(3, P0, &[], &[unique], false),
     ]);
 
@@ -553,8 +577,8 @@ fn unknown_effect_footprint_triggers_conservative_ask() {
     // A second conflicting trigger should trigger conservative ask-when-unsure.
     let resource = Resource::Object(ObjectId(100));
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[], &[resource.clone()], true), // prompts during resolution
-        trigger(2, P0, &[], &[resource.clone()], false),
+        trigger(1, P0, &[], std::slice::from_ref(&resource), true), // prompts during resolution
+        trigger(2, P0, &[], std::slice::from_ref(&resource), false),
     ]);
 
     let interruptions = run(&mut engine, &cards, 900, |e| {
@@ -574,8 +598,8 @@ fn multiple_players_with_same_potential_conflict() {
     // Should ask P0 but not P1.
     let conflict = Resource::Object(ObjectId(110));
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[], &[conflict.clone()], false),
-        trigger(2, P0, &[], &[conflict.clone()], false),
+        trigger(1, P0, &[], std::slice::from_ref(&conflict), false),
+        trigger(2, P0, &[], std::slice::from_ref(&conflict), false),
         trigger(3, P1, &[], &[Resource::Object(ObjectId(111))], false),
         trigger(4, P1, &[], &[Resource::Object(ObjectId(112))], false),
     ]);
@@ -606,9 +630,9 @@ fn edge_case_many_triggers_mixed_conflicts() {
     let unique2 = Resource::Object(ObjectId(123));
 
     let (mut engine, cards) = game_with(vec![
-        trigger(1, P0, &[], &[a.clone()], false),
+        trigger(1, P0, &[], std::slice::from_ref(&a), false),
         trigger(2, P0, &[], &[a.clone(), b.clone()], false),
-        trigger(3, P0, &[], &[b.clone()], false),
+        trigger(3, P0, &[], std::slice::from_ref(&b), false),
         trigger(4, P0, &[], &[unique1], false),
         trigger(5, P0, &[], &[unique2], false),
     ]);

@@ -65,12 +65,10 @@ impl Bot {
                 .iter()
                 .any(|(b, atts)| *b == blocker && atts.contains(&attacker))
         };
-        let used = |blocks: &[(ObjectId, ObjectId)], b: ObjectId| {
-            blocks.iter().any(|(x, _)| *x == b)
-        };
-        let blocked = |blocks: &[(ObjectId, ObjectId)], a: ObjectId| {
-            blocks.iter().any(|(_, x)| *x == a)
-        };
+        let used =
+            |blocks: &[(ObjectId, ObjectId)], b: ObjectId| blocks.iter().any(|(x, _)| *x == b);
+        let blocked =
+            |blocks: &[(ObjectId, ObjectId)], a: ObjectId| blocks.iter().any(|(_, x)| *x == a);
 
         // Good blocks first.
         let needed = |a: &Stats| usize::from(a.min_blockers).max(if a.menace { 2 } else { 1 });
@@ -97,26 +95,29 @@ impl Bot {
                 .and_then(|o| o.attacking_target)
                 .unwrap_or(Target::Player(view.viewer))
         };
-        let incoming = |target: Target, blocks: &[(ObjectId, ObjectId)]| -> i32 {
+        let incoming = |target: Target, blocks: &[(ObjectId, ObjectId)]| -> i64 {
             attackers
                 .iter()
                 .filter(|(a, _)| destination(*a) == target)
                 .map(|(id, a)| {
-                    let damage = a
-                        .power
-                        .max(0)
-                        .saturating_mul(if a.double_strike { 2 } else { 1 });
+                    let damage = a.combat_damage();
                     if !blocked(blocks, *id) {
                         return damage;
                     }
                     if !a.trample {
                         return 0;
                     }
-                    let absorbed: i32 = blocks
+                    let absorbed: i64 = blocks
                         .iter()
                         .filter(|(_, attacker)| attacker == id)
                         .filter_map(|(b, _)| self.stats(view, *b))
-                        .map(|b| if a.deathtouch { 1 } else { b.toughness.max(0) })
+                        .map(|b| {
+                            if a.deathtouch {
+                                1
+                            } else {
+                                i64::from(b.toughness.max(0))
+                            }
+                        })
                         .sum();
                     (damage - absorbed).max(0)
                 })
@@ -147,7 +148,7 @@ impl Bot {
         }
         for (target, health) in threatened {
             for (attacker, stats) in &attackers {
-                if incoming(target, &blocks) < health {
+                if incoming(target, &blocks) < i64::from(health) {
                     break;
                 }
                 if destination(*attacker) != target || blocked(&blocks, *attacker) {
@@ -165,10 +166,10 @@ impl Bot {
                 }
             }
         }
-        if let [(only, _)] = blocks[..] {
-            if self.stats(view, only).is_some_and(|s| s.cant_block_alone) {
-                blocks.clear();
-            }
+        if let [(only, _)] = blocks[..]
+            && self.stats(view, only).is_some_and(|s| s.cant_block_alone)
+        {
+            blocks.clear();
         }
         blocks
     }

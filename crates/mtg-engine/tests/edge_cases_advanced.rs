@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use mtg_core::{Step, Zone, ZoneRef};
+use mtg_core::{CardType, Step, Zone, ZoneRef};
 use mtg_engine::{Engine, Progress, choice::Answer, state::GameState};
 use mtg_ir::PrintedCards;
 
@@ -155,11 +155,9 @@ fn type_querying() {
     let engine = Engine::new(state);
     let cards = TestCards::default();
 
-    if let Some(obj) = engine.state.objects.get(&creature) {
-        let _face = cards.face(obj.card, obj.face);
-        // Just verify it doesn't panic
-        assert!(true);
-    }
+    let obj = engine.state.objects.get(&creature).unwrap();
+    let face = cards.face(obj.card, obj.face).unwrap();
+    assert!(face.printed_characteristics().has_type(CardType::Creature));
 }
 
 /// Test: Asymmetric P/T creature

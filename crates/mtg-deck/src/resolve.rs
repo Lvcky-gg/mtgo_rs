@@ -70,9 +70,6 @@ pub fn normalise(name: &str) -> String {
             'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => out.push('u'),
             'ñ' | 'Ñ' => out.push('n'),
             'ç' | 'Ç' => out.push('c'),
-            // Smart quotes, as pasted from a web page.
-            '\u{2018}' | '\u{2019}' => out.push('\''),
-            '\u{201C}' | '\u{201D}' => out.push('"'),
             c if c.is_alphanumeric() => out.extend(c.to_lowercase()),
             c if c.is_whitespace() && !out.ends_with(' ') => out.push(' '),
             c if c.is_whitespace() => {}
@@ -93,8 +90,8 @@ pub fn resolve(parsed: &ParsedDeck, db: &dyn Resolver) -> ResolvedDeck {
     };
 
     for entry in &parsed.entries {
-        // The maybeboard is parsed so it does not become an error, then dropped.
-        if entry.section == Section::Maybeboard {
+        // Neither a maybeboard entry nor a zero-copy line contributes to the deck.
+        if entry.section == Section::Maybeboard || entry.count == 0 {
             continue;
         }
 
@@ -148,6 +145,18 @@ mod tests {
         assert_eq!(normalise("Ashen    Rite"), "ashen rite");
     }
 
+    #[test]
+    fn smart_quotes_match_plain_quotes_in_normalised_keys() {
+        assert_eq!(
+            normalise("Scout’s ‘Last’ Watch"),
+            normalise("Scout's 'Last' Watch")
+        );
+        assert_eq!(
+            normalise("The “Winged” Wanderer"),
+            normalise("The \"Winged\" Wanderer")
+        );
+    }
+
     struct OnlyNormalised;
     impl Resolver for OnlyNormalised {
         fn exact(&self, _: &str) -> Option<CardId> {
@@ -179,5 +188,17 @@ mod tests {
         assert!(r.main.is_empty());
         assert_eq!(r.failed.len(), 1);
         assert_eq!(r.failed[0].suggestions.len(), 1);
+    }
+
+    #[test]
+    fn zero_quantity_entries_do_not_add_cards_or_a_commander() {
+        let parsed = crate::parse(
+            "Deck\n0 AEtherling\n0 Unknown Scout\nCommander\n0 AEtherling\nSideboard\n0 AEtherling",
+        );
+        let r = resolve(&parsed, &OnlyNormalised);
+        assert!(r.main.is_empty());
+        assert!(r.sideboard.is_empty());
+        assert!(r.commanders.is_empty());
+        assert!(r.failed.is_empty());
     }
 }

@@ -81,6 +81,9 @@ pub struct GuiApp {
     play_choice: Option<ObjectId>,
     /// How large permanents are drawn: shrunk when the board has more rows than fit.
     board_scale: f32,
+    /// The board's height other than its card rows, measured on the last frame: panel
+    /// headers, labels and spacing. "Fit board" sizes the cards from it.
+    board_chrome: Option<f32>,
     board_zoom: Option<f32>,
     journal_open: bool,
     sound: crate::sound::SoundFx,
@@ -129,6 +132,7 @@ impl GuiApp {
             pending_blocker: None,
             play_choice: None,
             board_scale: 1.0,
+            board_chrome: None,
             board_zoom: None,
             journal_open: true,
             sound: Default::default(),
@@ -310,7 +314,15 @@ impl GuiApp {
                     }
                     let cost = card
                         .and_then(|c| self.texts.get_face(c, face))
-                        .map(|t| t.cost.as_str())
+                        .map(|t| {
+                            if board::object(view, id)
+                                .is_some_and(|o| o.zone.zone == mtg_core::Zone::Graveyard)
+                            {
+                                t.graveyard_cost.as_deref().unwrap_or(&t.cost)
+                            } else {
+                                &t.cost
+                            }
+                        })
                         .unwrap_or("");
                     if cost.is_empty() {
                         name
@@ -570,14 +582,18 @@ impl GuiApp {
         } else {
             ART_SIZE.y * 0.7 + 56.0
         };
-        let headers =
+        let estimate =
             76.0 * (board.opponents.len() + 1) as f32 + row_count as f32 * 22.0 + stack_height;
+        // The chrome measured last frame is exact for an unchanged board; the estimate covers
+        // the first frame. Taking the larger keeps a growing board from overflowing for a frame.
+        let headers = self.board_chrome.map_or(estimate, |m| m.max(estimate));
         let per_row = (ui.available_height() - headers) / row_count.max(1) as f32;
         self.board_scale = self
             .board_zoom
             .unwrap_or_else(|| (per_row / (ART_SIZE.y + 10.0)).clamp(0.45, 1.0));
+        let card_rows = row_count as f32 * ART_SIZE.y * self.board_scale;
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        let output = egui::ScrollArea::vertical().show(ui, |ui| {
             for side in &board.opponents {
                 self.draw_side_panel(ui, view, side);
                 ui.add_space(10.0);
@@ -621,6 +637,7 @@ impl GuiApp {
             ui.add_space(10.0);
             self.draw_side_panel(ui, view, &board.mine);
         });
+        self.board_chrome = Some((output.content_size.y - card_rows).max(0.0));
     }
 
     fn draw_side_panel(&mut self, ui: &mut Ui, view: &PlayerView, side: &board::Side) {
@@ -727,11 +744,26 @@ impl GuiApp {
                     .on_hover_text("21 combat damage from a single commander loses the game");
             }
             // Graveyard and exile open a window listing the cards.
-            let graveyard = format!("graveyard {}", side.graveyard.len());
+            let available = match self.current.as_ref().map(|q| &q.choice.kind) {
+                Some(ChoiceKind::Priority { legal }) => {
+                    board::hand_play_options(&legal.actions, &side.graveyard).len()
+                }
+                _ => 0,
+            };
+            let graveyard = if available > 0 {
+                format!("Graveyard {} · {available} available", side.graveyard.len())
+            } else {
+                format!("Graveyard {}", side.graveyard.len())
+            };
             if ui
                 .add_enabled(
                     !side.graveyard.is_empty(),
-                    egui::Button::new(graveyard).small(),
+                    egui::Button::new(RichText::new(graveyard).color(if available > 0 {
+                        ACCENT
+                    } else {
+                        crate::theme::TEXT
+                    }))
+                    .small(),
                 )
                 .clicked()
             {
@@ -969,6 +1001,15 @@ impl GuiApp {
                                         .truncate(),
                                     );
                                     self.object_hover(name, view, id);
+                                    for action in &actions {
+                                        let label = self.action_label(view, action);
+                                        let response = ui.add(
+                                            egui::Button::new(RichText::new(label).small()).wrap(),
+                                        );
+                                        if self.action_hover(response, view, action).clicked() {
+                                            self.answer(Answer::Action(action.clone()));
+                                        }
+                                    }
                                 });
                                 if (index + 1) % columns == 0 {
                                     ui.end_row();
@@ -991,7 +1032,7 @@ impl GuiApp {
             ChoiceKind::DeclareAttackers { eligible, .. } => {
                 eligible.contains(&id).then_some(BoardPick::Toggle)
             }
-            ChoiceKind::DeclareBlockers { eligible } => {
+            ChoiceKind::DeclareBlockers { eligible, .. } => {
                 if eligible.iter().any(|(b, _)| *b == id) {
                     Some(BoardPick::Blocker)
                 } else if self.pending_blocker.is_some_and(|b| {
@@ -1026,8 +1067,15 @@ impl GuiApp {
                 }
             }
             BoardPick::Blocker => {
+                // A creature that may block several attackers is picked again to add one;
+                // clicking it while picked takes its blocks back.
+                if self.block_capacity(id) > 1 && self.pending_blocker != Some(id) {
+                    self.pending_blocker = Some(id);
+                } else if self.block_capacity(id) > 1 {
+                    self.blocks.retain(|(b, _)| *b != id);
+                    self.pending_blocker = None;
                 // Clicking a creature that is already blocking takes the block back.
-                if self.blocks.iter().any(|(b, _)| *b == id) {
+                } else if self.blocks.iter().any(|(b, _)| *b == id) {
                     self.blocks.retain(|(b, _)| *b != id);
                     self.pending_blocker = None;
                 } else {
@@ -1040,8 +1088,7 @@ impl GuiApp {
             }
             BoardPick::Attacker => {
                 if let Some(blocker) = self.pending_blocker.take() {
-                    self.blocks.retain(|(b, _)| *b != blocker);
-                    self.blocks.push((blocker, id));
+                    self.add_block(blocker, id);
                 }
             }
             BoardPick::Target => {
@@ -1050,11 +1097,36 @@ impl GuiApp {
         }
     }
 
+    /// How many attackers this blocker may block in the outstanding declaration.
+    fn block_capacity(&self, blocker: ObjectId) -> usize {
+        match self.current.as_ref().map(|q| &q.choice.kind) {
+            Some(ChoiceKind::DeclareBlockers { capacity, .. }) => capacity
+                .iter()
+                .find(|(b, _)| *b == blocker)
+                .map_or(1, |(_, n)| *n as usize),
+            _ => 1,
+        }
+    }
+
+    /// Add a block, replacing this blocker's oldest one once it is at capacity.
+    fn add_block(&mut self, blocker: ObjectId, attacker: ObjectId) {
+        if self.blocks.contains(&(blocker, attacker)) {
+            return;
+        }
+        let capacity = self.block_capacity(blocker);
+        if self.blocks.iter().filter(|(b, _)| *b == blocker).count() >= capacity
+            && let Some(i) = self.blocks.iter().position(|(b, _)| *b == blocker)
+        {
+            self.blocks.remove(i);
+        }
+        self.blocks.push((blocker, attacker));
+    }
+
     fn toggle_block(&mut self, blocker: ObjectId, attacker: ObjectId) {
-        let chosen = self.blocks.contains(&(blocker, attacker));
-        self.blocks.retain(|(b, _)| *b != blocker);
-        if !chosen {
-            self.blocks.push((blocker, attacker));
+        if self.blocks.contains(&(blocker, attacker)) {
+            self.blocks.retain(|p| *p != (blocker, attacker));
+        } else {
+            self.add_block(blocker, attacker);
         }
         if self.pending_blocker == Some(blocker) {
             self.pending_blocker = None;
@@ -1998,7 +2070,7 @@ impl GuiApp {
                 }
             }
 
-            ChoiceKind::DeclareBlockers { eligible } => {
+            ChoiceKind::DeclareBlockers { eligible, .. } => {
                 // One row per potential blocker, with a button per attacker it may block. The
                 // engine validates the whole declaration (menace included) and re-asks if it is
                 // illegal, so this only has to offer the pairs it was given.
@@ -2008,9 +2080,8 @@ impl GuiApp {
                             ui.label(RichText::new(self.name_of(view, *blocker)).strong().small());
                         self.object_hover(response, view, *blocker);
                         ui.label(RichText::new("blocks").weak().small());
-                        let current = self.blocks.iter().find(|(b, _)| b == blocker).map(|p| p.1);
                         for attacker in attackers {
-                            let chosen = current == Some(*attacker);
+                            let chosen = self.blocks.contains(&(*blocker, *attacker));
                             let label = RichText::new(self.name_of(view, *attacker));
                             let label = if chosen {
                                 label.color(ACCENT).strong()
@@ -2892,6 +2963,7 @@ mod target_tests {
                 (first, vec![attacker, other_attacker]),
                 (second, vec![attacker]),
             ],
+            capacity: Vec::new(),
         });
         app.click_pick(first, BoardPick::Blocker);
         app.toggle_block(second, attacker);
@@ -2912,12 +2984,36 @@ mod target_tests {
     }
 
     #[test]
+    fn a_blocker_with_capacity_keeps_several_attackers() {
+        let wall = ObjectId(1);
+        let (a, b, c) = (ObjectId(3), ObjectId(4), ObjectId(5));
+        let (mut app, _answers, _) = question_app(ChoiceKind::DeclareBlockers {
+            eligible: vec![(wall, vec![a, b, c])],
+            capacity: vec![(wall, 2)],
+        });
+        app.click_pick(wall, BoardPick::Blocker);
+        app.click_pick(a, BoardPick::Attacker);
+        app.click_pick(wall, BoardPick::Blocker);
+        app.click_pick(b, BoardPick::Attacker);
+        assert_eq!(app.blocks, vec![(wall, a), (wall, b)]);
+        app.toggle_block(wall, c);
+        assert_eq!(
+            app.blocks,
+            vec![(wall, b), (wall, c)],
+            "the oldest makes room"
+        );
+        app.toggle_block(wall, b);
+        assert_eq!(app.blocks, vec![(wall, c)]);
+    }
+
+    #[test]
     fn undo_cancels_pending_blockers_before_completed_blocks_or_engine_actions() {
         let first = ObjectId(1);
         let second = ObjectId(2);
         let attacker = ObjectId(3);
         let (mut app, answers, ctx) = question_app(ChoiceKind::DeclareBlockers {
             eligible: vec![(first, vec![attacker]), (second, vec![attacker])],
+            capacity: Vec::new(),
         });
         app.current.as_mut().unwrap().choice.undo = true;
         app.click_pick(first, BoardPick::Blocker);

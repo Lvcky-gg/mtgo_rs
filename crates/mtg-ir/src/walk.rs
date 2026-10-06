@@ -65,6 +65,7 @@ impl Visitor<'_> {
             | AbilityKind::AdditionalCastCost { cost } => self.cost(cost),
             AbilityKind::Aftermath
             | AbilityKind::DeckRule(_)
+            | AbilityKind::Dredge(_)
             | AbilityKind::Saga { .. }
             | AbilityKind::Enchant
             | AbilityKind::Keyword(_)
@@ -93,7 +94,8 @@ impl Visitor<'_> {
                 }
                 AdditionalCost::Discard { count, filter, .. }
                 | AdditionalCost::ExileFrom { count, filter, .. }
-                | AdditionalCost::Reveal { count, filter } => {
+                | AdditionalCost::Reveal { count, filter }
+                | AdditionalCost::TapUntapped { filter, count } => {
                     self.value(count);
                     self.filter(filter);
                 }
@@ -244,7 +246,12 @@ impl Visitor<'_> {
                 Restriction::CantGainLife(who) | Restriction::LifeGainBoost { who, .. } => {
                     self.selector(who)
                 }
-                Restriction::PlayFromTopOfLibrary { spells, .. } => self.filter(spells),
+                Restriction::PlayFromTopOfLibrary { spells, .. }
+                | Restriction::MustBeBlockedByAll(spells) => self.filter(spells),
+                Restriction::CantCast { who, spells, .. } => {
+                    self.selector(who);
+                    self.filter(spells);
+                }
                 Restriction::CostModifier { what, delta } => {
                     self.filter(what);
                     self.value(delta);
@@ -268,6 +275,11 @@ impl Visitor<'_> {
                 | Restriction::MinimumBlockers(_)
                 | Restriction::CantAttackAlone
                 | Restriction::CantBlockAlone
+                | Restriction::BlockAdditional(_)
+                | Restriction::MustBlock
+                | Restriction::MustBlockSource
+                | Restriction::MustBeBlocked
+                | Restriction::AssignAsThoughUnblocked
                 | Restriction::PreventDamageRemoveCounter
                 | Restriction::AdditionalLandPlay
                 | Restriction::MayChooseNotToUntap => {}
@@ -398,7 +410,7 @@ impl Visitor<'_> {
             | Effect::Regenerate { what }
             | Effect::Tap { what }
             | Effect::Untap { what }
-            | Effect::CounterSpell { what }
+            | Effect::CounterSpell { what, .. }
             | Effect::CounterUnlessPays { what, .. }
             | Effect::CopySpell { what, .. }
             | Effect::CastWithoutPaying { what, .. } => self.selector(what),
@@ -410,6 +422,12 @@ impl Visitor<'_> {
                 self.selector(source);
                 self.selector(to);
                 self.value(amount);
+            }
+            Effect::DealDamageDivided { source, shares } => {
+                self.selector(source);
+                for to in shares {
+                    self.selector(to);
+                }
             }
             Effect::AddCounters { what, amount, .. }
             | Effect::RemoveCounters { what, amount, .. } => {
@@ -611,7 +629,10 @@ impl Visitor<'_> {
             | Value::Toughness(s)
             | Value::LeastToughness(s)
             | Value::ManaValue(s)
-            | Value::CardTypesAmong(s) => self.selector(s),
+            | Value::CardTypesAmong(s)
+            | Value::PartySize(s)
+            | Value::BasicLandTypesAmong(s)
+            | Value::SpellsCastThisTurn(s) => self.selector(s),
             Value::Sum(vs) | Value::Product(vs) => {
                 for v in vs {
                     self.value(v);
@@ -651,6 +672,7 @@ impl Visitor<'_> {
             | Condition::Saddled
             | Condition::NoSpellsLastTurn
             | Condition::PlayerCastTwoLastTurn => {}
+            Condition::TargetsMatching(f) => self.filter(f),
             Condition::CountAtLeast { what, at_least: v }
             | Condition::CountAtMost { what, at_most: v } => {
                 self.selector(what);

@@ -453,3 +453,104 @@ fn cant_block_big_creatures_and_cant_be_blocked() {
     let eligible = mtg_engine::combat::eligible_blockers(&g.engine.state, &g.table, P1);
     assert!(!eligible.iter().any(|(x, _)| *x == gh2), "can't block");
 }
+
+const EXTRA: &str = "This creature can block an additional creature each combat.";
+
+#[test]
+fn it_can_block_one_more_attacker_and_no_more() {
+    let mut t = Table::default();
+    let guard = t.card("{2}{W}", "Creature — Soldier", Some((3, 5)), EXTRA);
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    let a = g.put(bear, P0, Zone::Battlefield);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let c = g.put(bear, P0, Zone::Battlefield);
+    let w = g.put(guard, P1, Zone::Battlefield);
+    let plain = g.put(bear, P1, Zone::Battlefield);
+    g.main();
+    for x in [a, b, c] {
+        g.engine
+            .state
+            .combat
+            .attackers
+            .insert(x, Target::Player(P1));
+    }
+    assert!(blocks(&g, &[(a, vec![w]), (b, vec![w])]).is_ok());
+    assert!(
+        blocks(&g, &[(a, vec![w, w])]).is_err(),
+        "the same attacker twice"
+    );
+    assert!(blocks(&g, &[(a, vec![w]), (b, vec![w]), (c, vec![w])]).is_err());
+    assert!(
+        blocks(&g, &[(a, vec![plain]), (b, vec![plain])]).is_err(),
+        "an ordinary creature still blocks only one"
+    );
+}
+
+#[test]
+fn any_number_of_creatures() {
+    let mut t = Table::default();
+    let wall = t.card(
+        "{3}",
+        "Creature — Wall",
+        Some((0, 8)),
+        "This creature can block any number of creatures.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    let attackers: Vec<_> = (0..4).map(|_| g.put(bear, P0, Zone::Battlefield)).collect();
+    let w = g.put(wall, P1, Zone::Battlefield);
+    g.main();
+    for x in &attackers {
+        g.engine
+            .state
+            .combat
+            .attackers
+            .insert(*x, Target::Player(P1));
+    }
+    let all: Vec<_> = attackers.iter().map(|a| (*a, vec![w])).collect();
+    assert!(blocks(&g, &all).is_ok());
+}
+
+#[test]
+fn a_double_blocker_divides_its_damage() {
+    let mut t = Table::default();
+    let guard = t.card("{2}{W}", "Creature — Soldier", Some((4, 5)), EXTRA);
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    let a = g.put(bear, P0, Zone::Battlefield);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let w = g.put(guard, P1, Zone::Battlefield);
+    g.main();
+    g.combat(&[a, b], &[(w, a), (w, b)], &[], &[]);
+    assert_eq!(g.life(P1), 20, "both attackers were blocked");
+    assert!(
+        !g.engine.state.objects.contains_key(&a),
+        "2 of its 4 damage"
+    );
+    assert!(!g.engine.state.objects.contains_key(&b), "the other 2");
+    assert_eq!(
+        g.engine.state.objects[&w].damage, 4,
+        "hit by both bears, once each"
+    );
+}
+
+#[test]
+fn its_controller_chooses_the_division() {
+    let mut t = Table::default();
+    let guard = t.card("{2}{W}", "Creature — Soldier", Some((3, 5)), EXTRA);
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    let a = g.put(bear, P0, Zone::Battlefield);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let w = g.put(guard, P1, Zone::Battlefield);
+    g.main();
+    g.combat(
+        &[a, b],
+        &[(w, a), (w, b)],
+        &[],
+        &[Answer::DamageAssignment(vec![(a, 0), (b, 3)])],
+    );
+    assert!(g.engine.state.objects.contains_key(&a), "assigned none");
+    assert!(!g.engine.state.objects.contains_key(&b), "assigned all 3");
+}

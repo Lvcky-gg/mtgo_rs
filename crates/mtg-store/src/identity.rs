@@ -30,19 +30,15 @@ pub struct StoredFriend {
 impl Store {
     /// This installation's identity, if one has been generated.
     pub fn identity(&self) -> Result<Option<StoredIdentity>> {
-        let row = self
+        Ok(self
             .conn()
             .query_row("SELECT seed, public FROM identity WHERE id = 1", [], |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+                Ok(StoredIdentity {
+                    seed: r.get(0)?,
+                    public: r.get(1)?,
+                })
             })
-            .optional()?;
-
-        Ok(row.and_then(|(seed, public)| {
-            Some(StoredIdentity {
-                seed: seed.try_into().ok()?,
-                public: public.try_into().ok()?,
-            })
-        }))
+            .optional()?)
     }
 
     /// Store the identity, replacing any existing one.
@@ -57,6 +53,25 @@ impl Store {
             params![id.seed.as_slice(), id.public.as_slice()],
         )?;
         Ok(())
+    }
+
+    /// Return the installation's identity, saving `candidate` only if none exists.
+    /// Concurrent first-use callers all receive the identity that won insertion.
+    pub fn identity_or_insert(&self, candidate: &StoredIdentity) -> Result<StoredIdentity> {
+        let tx = self.conn().unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO identity (id, seed, public, created) VALUES (1, ?1, ?2, datetime('now'))
+             ON CONFLICT(id) DO NOTHING",
+            params![candidate.seed.as_slice(), candidate.public.as_slice()],
+        )?;
+        let identity = tx.query_row("SELECT seed, public FROM identity WHERE id = 1", [], |r| {
+            Ok(StoredIdentity {
+                seed: r.get(0)?,
+                public: r.get(1)?,
+            })
+        })?;
+        tx.commit()?;
+        Ok(identity)
     }
 
     /// Pin a peer, or rename one already pinned.
@@ -76,15 +91,14 @@ impl Store {
             .query_row(
                 "SELECT public, nickname FROM friends WHERE public = ?1",
                 params![public.as_slice()],
-                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),
+                |r| {
+                    Ok(StoredFriend {
+                        public: r.get(0)?,
+                        nickname: r.get(1)?,
+                    })
+                },
             )
-            .optional()?
-            .and_then(|(p, nickname)| {
-                Some(StoredFriend {
-                    public: p.try_into().ok()?,
-                    nickname,
-                })
-            }))
+            .optional()?)
     }
 
     pub fn friends(&self) -> Result<Vec<StoredFriend>> {
@@ -92,14 +106,14 @@ impl Store {
             .conn()
             .prepare("SELECT public, nickname FROM friends ORDER BY nickname")?;
         let rows = q.query_map([], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+            Ok(StoredFriend {
+                public: r.get(0)?,
+                nickname: r.get(1)?,
+            })
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (p, nickname) = r?;
-            if let Ok(public) = p.try_into() {
-                out.push(StoredFriend { public, nickname });
-            }
+            out.push(r?);
         }
         Ok(out)
     }

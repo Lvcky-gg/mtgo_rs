@@ -87,7 +87,7 @@ pub enum Progress {
 /// Each variant is a resume point. Holding a queue rather than an index means a
 /// multi-step sub-flow (ordering blockers for three separate attackers) is one
 /// state, not three.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Debug)]
 enum Suspended {
     /// CR 502.3 — the active player chooses which "may choose not to untap" permanents
     /// stay tapped.
@@ -106,6 +106,9 @@ enum Suspended {
     },
     /// CR 514.1 — the active player is choosing what to discard down to hand size.
     Discarding,
+    /// CR 504.1 — the draw for the turn asked a question (dredge, CR 702.52); it is run
+    /// again from the start with the answers so far, like a resolution.
+    Drawing { answers: Vec<Answer> },
 }
 
 /// An announcement in progress, waiting for targets (CR 601.2).
@@ -283,6 +286,8 @@ pub struct Engine {
     /// The id of the outstanding choice that belongs to `resolving`, so an answer can
     /// be routed to the resolution rather than mistaken for an unrelated question.
     resolution_choice: Option<u64>,
+    /// The id of the outstanding choice the draw for the turn asked (`Suspended::Drawing`).
+    draw_choice: Option<u64>,
     /// Points a player can undo back to, newest last. See [`Engine::can_undo`].
     undo: Vec<Checkpoint>,
     /// The id of the outstanding mulligan question, so its answer is routed here.
@@ -335,6 +340,7 @@ impl Engine {
             announcement_choice: None,
             resolving: None,
             resolution_choice: None,
+            draw_choice: None,
             undo: Vec::new(),
             pregame_choice: None,
             entering_choice: None,
@@ -647,6 +653,13 @@ impl Engine {
             }
             return Ok(());
         }
+        if self.draw_choice == Some(id) {
+            self.draw_choice = None;
+            if let Some(Suspended::Drawing { answers }) = self.suspended.as_mut() {
+                answers.push(answer);
+            }
+            return Ok(());
+        }
 
         match (&choice.kind, answer) {
             (ChoiceKind::Priority { legal }, Answer::Pass) => {
@@ -735,6 +748,43 @@ impl Engine {
             ) => {
                 let attacker = *attacker;
                 let deathtouch = self.has_deathtouch(cards, attacker);
+                // A blocker dividing its damage among attackers (CR 510.1d): any division of
+                // all of it.
+                if !self.state.combat.attackers.contains_key(&attacker) {
+                    let mut seen = std::collections::BTreeSet::new();
+                    let assigned: u64 = rows.iter().map(|(_, n)| u64::from(*n)).sum();
+                    if !rows
+                        .iter()
+                        .all(|(object, _)| among.contains(object) && seen.insert(*object))
+                        || assigned != u64::from(*total)
+                    {
+                        self.pending = Some(choice);
+                        return Err(Illegal::WrongAnswerKind);
+                    }
+                    let assignment = crate::combat::Assignment {
+                        source: attacker,
+                        deathtouch,
+                        to: rows
+                            .into_iter()
+                            .filter(|(_, n)| *n > 0)
+                            .map(|(o, n)| (Target::Object(o), n))
+                            .collect(),
+                    };
+                    if let Some(Suspended::AssigningDamage {
+                        queue,
+                        first_strike,
+                        mut settled,
+                    }) = self.suspended.clone()
+                    {
+                        settled.push(assignment);
+                        self.suspended = Some(Suspended::AssigningDamage {
+                            queue: queue.into_iter().filter(|a| *a != attacker).collect(),
+                            first_strike,
+                            settled,
+                        });
+                    }
+                    return Ok(());
+                }
                 // The wire answer contains only object targets. Accepting the default must
                 // retain the canonical assignment's excess trample damage to a player.
                 let canonical = if matches!(&choice.default,
@@ -755,6 +805,20 @@ impl Engine {
                 } else {
                     None
                 };
+                // Assigning nothing to the blockers of a creature that may assign its damage
+                // as though it weren't blocked sends all of it to what it attacks.
+                let canonical = canonical.or_else(|| {
+                    (*total > 0
+                        && rows.iter().all(|(_, n)| *n == 0)
+                        && crate::combat::assigns_as_though_unblocked(&self.state, cards, attacker))
+                    .then(|| self.state.combat.attackers.get(&attacker).copied())
+                    .flatten()
+                    .map(|defender| crate::combat::Assignment {
+                        source: attacker,
+                        deathtouch,
+                        to: vec![(defender, *total)],
+                    })
+                });
                 let mut trample_excess = None;
                 if canonical.is_none() {
                     let mut seen = std::collections::BTreeSet::new();
@@ -2250,7 +2314,9 @@ impl Engine {
                         continue;
                     }
                 }
-                if !crate::cost::timing_allows(state, cards, id, who) {
+                if !crate::cost::timing_allows(state, cards, id, who)
+                    || crate::cost::cast_forbidden(state, cards, id, who)
+                {
                     continue;
                 }
                 // `{X}` is announced as 0 here. Offering the spell with X = 0 is correct;
@@ -2259,7 +2325,9 @@ impl Engine {
                 let Some(total) = crate::cost::total_cost(state, cards, id, who) else {
                     continue;
                 };
-                if crate::mana::plan_spell(state, cards, who, &total, 0, id).is_none() {
+                if crate::mana::plan_spell(state, cards, who, &total, 0, id).is_none()
+                    && !Self::discount_affordable(state, cards, id, who)
+                {
                     continue;
                 }
                 if let Some(extra) = cards
@@ -2387,6 +2455,7 @@ impl Engine {
             for a in &face.abilities {
                 if let mtg_ir::AbilityKind::AlternativeCost { cost, .. } = &a.kind
                     && cost.additional.is_empty()
+                    && crate::cost::conditions_hold(&self.state, cards, id, who, &cost.timing)
                     && crate::mana::plan_spell(&self.state, cards, who, &cost.mana, 0, id).is_some()
                     && (a.targets.is_empty()
                         || crate::targeting::can_be_announced(
@@ -2480,6 +2549,7 @@ impl Engine {
                     .and_then(|o| cards.face(o.card, o.face))
                     .and_then(morph_ability)
                     .is_some()
+                    && !crate::cost::cast_forbidden(&self.state, cards, id, who)
                 {
                     actions.push(Action::CastFaceDown { object: id });
                 }
@@ -2957,6 +3027,55 @@ impl Engine {
             .collect()
     }
 
+    /// Whether a spell its full cost can't pay for becomes affordable by targeting something
+    /// its "costs {2} less to cast if it targets …" discount asks for. The announcement then
+    /// offers only such targets (`narrow_to_discount`).
+    fn discount_affordable(
+        state: &GameState,
+        cards: &dyn PrintedCards,
+        object: ObjectId,
+        who: PlayerId,
+    ) -> bool {
+        let Some(filter) = crate::cost::target_discount(state, cards, object) else {
+            return false;
+        };
+        crate::targeting::specs_of(state, cards, object)
+            .iter()
+            .flat_map(|spec| crate::targeting::legal_targets(state, cards, spec, object, who, &[]))
+            .filter(|t| Self::target_matches(state, cards, object, who, &filter, *t))
+            .any(|t| {
+                crate::cost::cost_with_target(state, cards, object, who, t)
+                    .and_then(|c| crate::mana::plan_spell(state, cards, who, &c, 0, object))
+                    .is_some()
+            })
+    }
+
+    fn target_matches(
+        state: &GameState,
+        cards: &dyn PrintedCards,
+        object: ObjectId,
+        who: PlayerId,
+        filter: &mtg_ir::ObjectFilter,
+        target: Target,
+    ) -> bool {
+        let Target::Object(id) = target else {
+            return false;
+        };
+        let chars = crate::eval::ComputedChars(cards);
+        let ctx = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: object,
+            controller: who,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        crate::eval::matches(&ctx, filter, id).unwrap_or(false)
+    }
+
     /// Whether a spell has a kicker that could be paid on top of its cost.
     fn kicker_affordable(&self, cards: &dyn PrintedCards, object: ObjectId, who: PlayerId) -> bool {
         let Some(obj) = self.state.objects.get(&object) else {
@@ -3100,7 +3219,7 @@ impl Engine {
                 a.skip_slot();
                 continue;
             }
-            let legal = crate::targeting::legal_targets(
+            let mut legal = crate::targeting::legal_targets(
                 &self.state,
                 cards,
                 &spec,
@@ -3110,6 +3229,40 @@ impl Engine {
             );
             let need =
                 crate::targeting::required(&spec, &self.state, cards, a.object, a.controller);
+            // A spell offered only because "costs {2} less if it targets a tapped creature"
+            // makes it affordable must take such a target, or the announcement couldn't be
+            // completed (CR 601.2f, 601.2h).
+            if a.pay_cost
+                && let Some(filter) = crate::cost::target_discount(&self.state, cards, a.object)
+            {
+                let matches = |t: &Target| {
+                    Self::target_matches(&self.state, cards, a.object, a.controller, &filter, *t)
+                };
+                let satisfied = a
+                    .chosen
+                    .iter()
+                    .enumerate()
+                    .any(|(i, t)| !a.empty.contains(&(i as u8)) && matches(t));
+                let full_affordable =
+                    crate::cost::total_cost(&self.state, cards, a.object, a.controller)
+                        .and_then(|c| {
+                            crate::mana::plan_spell(
+                                &self.state,
+                                cards,
+                                a.controller,
+                                &c,
+                                a.x.unwrap_or(0),
+                                a.object,
+                            )
+                        })
+                        .is_some();
+                if !satisfied
+                    && !full_affordable
+                    && legal.iter().filter(|t| matches(t)).count() as u32 >= need.max(1)
+                {
+                    legal.retain(|t| matches(t));
+                }
+            }
 
             // A slot that requires more targets than exist makes the announcement
             // illegal, so the whole thing rewinds (CR 601.2).
@@ -3174,6 +3327,8 @@ impl Engine {
             let crew = matches!(part, mtg_ir::AdditionalCost::TapCreaturesWithPower { .. });
             let because = if crew {
                 "tap creatures with enough total power"
+            } else if matches!(part, mtg_ir::AdditionalCost::TapUntapped { .. }) {
+                "tap to pay the cost"
             } else if matches!(part, mtg_ir::AdditionalCost::Discard { .. }) {
                 "discard to pay the cost"
             } else if matches!(part, mtg_ir::AdditionalCost::ExileFrom { .. }) {
@@ -3220,6 +3375,7 @@ impl Engine {
                     !matches!(
                         p,
                         mtg_ir::AdditionalCost::TapCreaturesWithPower { .. }
+                            | mtg_ir::AdditionalCost::TapUntapped { .. }
                             | mtg_ir::AdditionalCost::ReturnUnblockedAttacker
                     )
                 })
@@ -3236,7 +3392,13 @@ impl Engine {
                 .cost_parts
                 .iter()
                 .zip(&a.cost_chosen)
-                .filter(|(p, _)| matches!(p, mtg_ir::AdditionalCost::TapCreaturesWithPower { .. }))
+                .filter(|(p, _)| {
+                    matches!(
+                        p,
+                        mtg_ir::AdditionalCost::TapCreaturesWithPower { .. }
+                            | mtg_ir::AdditionalCost::TapUntapped { .. }
+                    )
+                })
                 .flat_map(|(_, c)| c.iter().copied())
                 .collect(),
         };
@@ -3262,23 +3424,71 @@ impl Engine {
         // The mana is planned before anything else is paid, and a cost that can't be paid
         // makes the whole announcement illegal (CR 601.2h): the caller rewinds. Nothing is
         // ever cast or activated for free.
-        if pay_cost {
+        let payment = if pay_cost {
+            // The targets are chosen before the cost is determined (CR 601.2c, 601.2f):
+            // "costs {2} less to cast if it targets a tapped creature" reads them.
+            if let Some(o) = self.state.objects.get_mut(&object) {
+                let cc = o.cast_context.get_or_insert_with(Default::default);
+                cc.targets = done.targets.clone();
+                cc.empty_slots = done.empty.clone();
+            }
             let total = crate::cost::total_cost(&self.state, cards, object, controller);
-            if total
-                .as_ref()
-                .and_then(|t| {
-                    crate::mana::plan_spell(&self.state, cards, controller, t, done.x, object)
+            // Reserve cards already committed to other costs, and life required
+            // separately from mana (including flashback), before planning payment.
+            let mut payment_state = self.state.clone();
+            for id in done.paid_with.iter().chain(&done.tapped_for) {
+                payment_state.objects.remove(id);
+            }
+            let extra_life = self
+                .state
+                .objects
+                .get(&object)
+                .filter(|o| !o.face_down)
+                .and_then(|o| {
+                    let face = cards.face(o.card, o.face)?;
+                    let mut extra = crate::cost::additional_cast_cost(face).unwrap_or_default();
+                    if o.cast_context.as_ref().and_then(|cc| cc.cast_from) == Some(Zone::Graveyard)
+                    {
+                        extra.additional.extend(
+                            crate::cost::cast_from_additional(face, Zone::Graveyard).additional,
+                        );
+                    }
+                    Some(
+                        extra
+                            .additional
+                            .iter()
+                            .filter_map(|part| match part {
+                                mtg_ir::AdditionalCost::PayLife {
+                                    amount: mtg_ir::Value::Fixed(n),
+                                } => Some(i64::from(*n)),
+                                _ => None,
+                            })
+                            .sum::<i64>(),
+                    )
                 })
-                .is_none()
-            {
+                .unwrap_or(0);
+            let remaining = i64::from(payment_state.player(controller).life) - extra_life;
+            if remaining < 0 {
                 return false;
             }
-        } else if let Some((source, ability)) = self
-            .state
-            .objects
-            .get(&object)
-            .and_then(|o| o.cast_context.as_ref())
-            .and_then(|c| Some((c.source?, c.ability?)))
+            payment_state.players.get_mut(&controller).unwrap().life =
+                remaining.min(i64::from(i32::MAX)) as i32;
+            let Some(plan) = total.as_ref().and_then(|t| {
+                crate::mana::plan_spell(&payment_state, cards, controller, t, done.x, object)
+            }) else {
+                return false;
+            };
+            Some(plan)
+        } else {
+            None
+        };
+        if !pay_cost
+            && let Some((source, ability)) = self
+                .state
+                .objects
+                .get(&object)
+                .and_then(|o| o.cast_context.as_ref())
+                .and_then(|c| Some((c.source?, c.ability?)))
             && let Some(cost) = crate::cost::ability_cost(&self.state, cards, source, ability)
             && !cost.mana.symbols.is_empty()
             && !crate::mana::can_pay(&self.state, cards, controller, &cost.mana, done.x)
@@ -3299,14 +3509,15 @@ impl Engine {
         }
         // Targets are part of the stack object, and are announced publicly — a trigger
         // watching for "becomes the target of" sees these events. Placeholders for empty
-        // slots are not targets.
-        let events: Vec<Event> = done
-            .targets
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !done.empty.contains(&(*i as u8)))
-            .map(|(_, t)| Event::Targeted { object, target: *t })
-            .collect();
+        // slots are not targets, and something named by several slots (divided damage)
+        // becomes the target once.
+        let mut events: Vec<Event> = Vec::new();
+        for (i, t) in done.targets.iter().enumerate() {
+            let e = Event::Targeted { object, target: *t };
+            if !done.empty.contains(&(i as u8)) && !events.contains(&e) {
+                events.push(e);
+            }
+        }
         if !events.is_empty() {
             apply::apply_simultaneous(
                 &mut self.state,
@@ -3430,8 +3641,17 @@ impl Engine {
                 .objects
                 .get(&object)
                 .filter(|o| !o.face_down)
-                .and_then(|o| cards.face(o.card, o.face))
-                .and_then(crate::cost::additional_cast_cost)
+                .and_then(|o| {
+                    let face = cards.face(o.card, o.face)?;
+                    let mut cost = crate::cost::additional_cast_cost(face).unwrap_or_default();
+                    if o.cast_context.as_ref().and_then(|cc| cc.cast_from) == Some(Zone::Graveyard)
+                    {
+                        cost.additional.extend(
+                            crate::cost::cast_from_additional(face, Zone::Graveyard).additional,
+                        );
+                    }
+                    Some(cost)
+                })
         {
             for part in &extra.additional {
                 if let mtg_ir::AdditionalCost::PayLife {
@@ -3452,10 +3672,7 @@ impl Engine {
         }
 
         if pay_cost {
-            let total = crate::cost::total_cost(&self.state, cards, object, controller);
-            if let Some(plan) = total.as_ref().and_then(|t| {
-                crate::mana::plan_spell(&self.state, cards, controller, t, done.x, object)
-            }) {
+            if let Some(plan) = payment {
                 let before = self.log.len();
                 self.pay(cards, controller, &plan);
                 // What was spent, for sunburst, converge and "if {R} was spent".
@@ -3854,7 +4071,16 @@ impl Engine {
                 })
                 .and_then(|kind| match &kind {
                     mtg_ir::AbilityKind::SpellEffect(e) => Some(e.clone()),
-                    mtg_ir::AbilityKind::Triggered { effect, .. } => Some(effect.clone()),
+                    mtg_ir::AbilityKind::Triggered { trigger, effect } => {
+                        Some(match &trigger.intervening_if {
+                            Some(cond) => mtg_ir::Effect::If {
+                                cond: cond.clone(),
+                                then: Box::new(effect.clone()),
+                                otherwise: Box::new(mtg_ir::Effect::Nothing),
+                            },
+                            None => effect.clone(),
+                        })
+                    }
                     mtg_ir::AbilityKind::Activated { effect, .. } => Some(effect.clone()),
                     _ => None,
                 })
@@ -3873,7 +4099,8 @@ impl Engine {
 
                 // A decision is needed. Roll back and ask.
                 Err(resolve::ResolveError::Ask { who, kind, because }) => {
-                    let choice_view = crate::view::project(&self.state, who);
+                    let choice_view =
+                        crate::view::project_showing(&self.state, who, choice_candidates(&kind));
                     self.state = *snapshot.clone();
                     self.log.truncate(log_len);
                     self.cache.invalidate();
@@ -3907,7 +4134,8 @@ impl Engine {
             match resolve::enter_choice(&self.state, cards, &mut rc, top) {
                 Ok(answer) => answer,
                 Err(resolve::ResolveError::Ask { who, kind, because }) => {
-                    let choice_view = crate::view::project(&self.state, who);
+                    let choice_view =
+                        crate::view::project_showing(&self.state, who, choice_candidates(&kind));
                     self.state = *snapshot.clone();
                     self.log.truncate(log_len);
                     self.cache.invalidate();
@@ -4121,8 +4349,47 @@ impl Engine {
             }
             // Dash (CR 702.109a): it gains haste, and returns to its owner's hand at the
             // beginning of the next end step.
-            let dashed = obj.cast_context.as_ref().and_then(|c| c.alt_cost)
-                == Some(mtg_ir::ability::AltCost::Dash);
+            let alt = obj.cast_context.as_ref().and_then(|c| c.alt_cost);
+            let dashed = alt == Some(mtg_ir::ability::AltCost::Dash);
+            // Blitz (CR 702.152a): haste, "when this creature dies, draw a card", and it is
+            // sacrificed at the beginning of the next end step.
+            let blitzed = alt == Some(mtg_ir::ability::AltCost::Blitz);
+            if blitzed {
+                for (on, effect) in [
+                    (
+                        mtg_ir::EventPattern::StepBegins {
+                            step: mtg_core::Step::End,
+                            whose: mtg_ir::Selector::EachPlayer,
+                        },
+                        mtg_ir::Effect::Sacrifice {
+                            who: mtg_ir::Selector::You,
+                            what: mtg_ir::Selector::SelfSource,
+                        },
+                    ),
+                    (
+                        mtg_ir::EventPattern::Dies {
+                            who: mtg_ir::ObjectFilter::IsSelf,
+                        },
+                        mtg_ir::Effect::Draw {
+                            who: mtg_ir::Selector::You,
+                            count: mtg_ir::Value::ONE,
+                        },
+                    ),
+                ] {
+                    let id = self.state.next_delayed;
+                    self.state.next_delayed += 1;
+                    self.state.delayed.push(crate::state::DelayedTrigger {
+                        id,
+                        source: new_object,
+                        card: obj.card,
+                        controller: obj.controller,
+                        on,
+                        effect,
+                        bindings: Default::default(),
+                        targets: Vec::new(),
+                    });
+                }
+            }
             // Warp (CR 702.185a): exiled at the beginning of the next end step, to be cast
             // from exile on a later turn.
             if obj.cast_context.as_ref().and_then(|c| c.alt_cost)
@@ -4192,7 +4459,7 @@ impl Engine {
             );
             // Suspend (CR 702.62a): a creature cast as its last time counter was removed
             // has haste.
-            if dashed || obj.cast_context.as_ref().is_some_and(|c| c.gains_haste) {
+            if dashed || blitzed || obj.cast_context.as_ref().is_some_and(|c| c.gains_haste) {
                 resolve::grant_haste(
                     &mut self.state,
                     &mut self.log,
@@ -4290,6 +4557,7 @@ impl Engine {
             T::CombatDamage { first_strike } => self.begin_combat_damage(cards, first_strike),
             T::Cleanup => self.begin_cleanup(cards),
             T::UntapAll => self.begin_untap(cards),
+            T::DrawForTurn => self.draw_for_turn(cards, Vec::new()),
             other => {
                 self.perform_turn_based_action(cards, other);
                 None
@@ -4310,6 +4578,46 @@ impl Engine {
                 first_strike,
                 settled,
             } => self.next_damage_assignment(cards, queue, first_strike, settled),
+            Suspended::Drawing { answers } => self.draw_for_turn(cards, answers),
+        }
+    }
+
+    /// CR 504.1 — the active player draws, unless it is the starting player's first turn
+    /// of a two-player game (CR 103.7a). A question during the draw (dredge) rolls it back
+    /// and asks; the draw then runs again with the answer.
+    fn draw_for_turn(&mut self, cards: &dyn PrintedCards, answers: Vec<Answer>) -> Option<Choice> {
+        let active = self.state.active_player;
+        if self.state.turn == 1 && self.state.turn_order.len() == 2 {
+            return None;
+        }
+        let snapshot = self.state.clone();
+        let log_len = self.log.len();
+        let mut rc = ResolveCtx::new(ObjectId(0), active);
+        rc.answers = answers.clone();
+        match resolve::resolve(
+            &mut self.state,
+            cards,
+            &mut self.log,
+            &mtg_ir::Effect::Draw {
+                who: mtg_ir::Selector::You,
+                count: mtg_ir::Value::ONE,
+            },
+            &mut rc,
+        ) {
+            Err(resolve::ResolveError::Ask { who, kind, because }) => {
+                self.state = snapshot;
+                self.log.truncate(log_len);
+                self.cache.invalidate();
+                self.suspended = Some(Suspended::Drawing { answers });
+                let c = self.new_choice(who, *kind, because, None);
+                self.draw_choice = Some(c.id);
+                Some(c)
+            }
+            _ => {
+                self.suspended = None;
+                self.cache.invalidate();
+                None
+            }
         }
     }
 
@@ -4574,12 +4882,24 @@ impl Engine {
             return None;
         }
 
+        let capacity = eligible
+            .iter()
+            .map(|(b, _)| (*b, crate::combat::block_capacity(&self.state, cards, *b)))
+            .filter(|(_, n)| *n > 1)
+            .map(|(b, n)| (b, u32::try_from(n).unwrap_or(u32::MAX)))
+            .collect();
         self.suspended = Some(Suspended::Blockers);
         Some(self.new_choice(
             defender,
-            ChoiceKind::DeclareBlockers { eligible },
+            ChoiceKind::DeclareBlockers { eligible, capacity },
             "declare blockers".into(),
-            Some(Answer::Blocks(Vec::new())),
+            // No blocks, unless something must block (CR 509.1c): then a declaration
+            // obeying the requirements, so the default is always legal.
+            Some(Answer::Blocks(crate::combat::required_blocks(
+                &self.state,
+                cards,
+                defender,
+            ))),
         ))
     }
 
@@ -4666,9 +4986,28 @@ impl Engine {
             .copied()
             .filter(|a| crate::combat::deals_damage_now(&self.state, cards, *a, first_strike))
             .filter(|a| !crate::combat::assignment_is_forced(&self.state, cards, *a))
+            .chain(self.multi_blockers(cards, first_strike))
             .collect();
 
         self.next_damage_assignment(cards, queue, first_strike, Vec::new())
+    }
+
+    /// Blockers that block more than one attacker and deal damage in this step: each is
+    /// asked how to divide it.
+    fn multi_blockers(&self, cards: &dyn PrintedCards, first_strike: bool) -> Vec<ObjectId> {
+        let mut out: Vec<ObjectId> = Vec::new();
+        for b in self.state.combat.blocks.values().flatten() {
+            if !out.contains(b)
+                && crate::combat::blocked_by(&self.state, *b).len() > 1
+                && crate::combat::deals_damage_now(&self.state, cards, *b, first_strike)
+                && crate::layers::compute(&self.state, cards, *b)
+                    .and_then(|c| c.power)
+                    .is_some_and(|p| p > 0)
+            {
+                out.push(*b);
+            }
+        }
+        out
     }
 
     fn next_damage_assignment(
@@ -4678,6 +5017,47 @@ impl Engine {
         first_strike: bool,
         settled: Vec<crate::combat::Assignment>,
     ) -> Option<Choice> {
+        if let Some(blocker) = queue.first().copied()
+            && !self.state.combat.attackers.contains_key(&blocker)
+        {
+            // A creature blocking several attackers divides its damage among them as its
+            // controller chooses (CR 510.1d).
+            let attackers = crate::combat::blocked_by(&self.state, blocker);
+            let power = crate::layers::compute(&self.state, cards, blocker)
+                .and_then(|c| c.power)
+                .unwrap_or(0)
+                .max(0) as u32;
+            let who =
+                crate::layers::controller(&self.state, blocker).unwrap_or(self.state.active_player);
+            let default =
+                crate::combat::assign_blocker_damage(&self.state, cards, blocker, &attackers).map(
+                    |a| {
+                        Answer::DamageAssignment(
+                            a.to.iter()
+                                .filter_map(|(t, n)| match t {
+                                    Target::Object(o) => Some((*o, *n)),
+                                    Target::Player(_) => None,
+                                })
+                                .collect(),
+                        )
+                    },
+                );
+            self.suspended = Some(Suspended::AssigningDamage {
+                queue,
+                first_strike,
+                settled,
+            });
+            return Some(self.new_choice(
+                who,
+                ChoiceKind::AssignCombatDamage {
+                    attacker: blocker,
+                    among: attackers,
+                    total: power,
+                },
+                "assign combat damage".into(),
+                default,
+            ));
+        }
         if let Some(attacker) = queue.first().copied() {
             let blockers = self
                 .state
@@ -4898,32 +5278,29 @@ impl Engine {
                     );
                 }
             }
-            T::DrawForTurn => {
-                // CR 103.7a — in a two-player game the starting player skips their
-                // first draw step.
-                let skip = self.state.turn == 1 && self.state.turn_order.len() == 2;
-                if !skip {
-                    let mut rc = ResolveCtx::new(ObjectId(0), active);
-                    let _ = resolve::resolve(
-                        &mut self.state,
-                        cards,
-                        &mut self.log,
-                        &mtg_ir::Effect::Draw {
-                            who: mtg_ir::Selector::You,
-                            count: mtg_ir::Value::ONE,
-                        },
-                        &mut rc,
-                    );
-                }
-            }
-
             // Handled by the suspendable path in `begin_turn_based_action`, since
-            // each needs player decisions inside the action.
-            T::DeclareAttackers | T::DeclareBlockers | T::CombatDamage { .. } => {}
+            // each may need player decisions inside the action.
+            T::DrawForTurn | T::DeclareAttackers | T::DeclareBlockers | T::CombatDamage { .. } => {}
 
             T::EndCombat => {
                 self.state.combat.clear();
                 self.suspended = None;
+                let ended: Vec<Event> = self
+                    .state
+                    .continuous
+                    .iter()
+                    .filter(|e| e.duration == mtg_ir::effect::Duration::UntilEndOfCombat)
+                    .map(|e| Event::ContinuousEffectEnded { effect: e.id })
+                    .collect();
+                if !ended.is_empty() {
+                    apply::apply_simultaneous(
+                        &mut self.state,
+                        Cause::TurnStructure,
+                        ended,
+                        &mut self.log,
+                    );
+                    self.cache.invalidate();
+                }
             }
 
             T::Cleanup => {
@@ -4939,7 +5316,13 @@ impl Engine {
                     .state
                     .continuous
                     .iter()
-                    .filter(|e| e.duration == mtg_ir::effect::Duration::UntilEndOfTurn)
+                    .filter(|e| {
+                        matches!(
+                            e.duration,
+                            mtg_ir::effect::Duration::UntilEndOfTurn
+                                | mtg_ir::effect::Duration::UntilEndOfCombat
+                        )
+                    })
                     .map(|e| e.id)
                     .collect();
                 let mut events: Vec<Event> = ended
@@ -5009,17 +5392,27 @@ impl Engine {
             }
         }
 
-        // Blockers hit back at the attacker they are blocking.
-        for (attacker, blockers) in self.state.combat.blocks.clone() {
-            for blocker in blockers {
-                if !crate::combat::deals_damage_now(&self.state, cards, blocker, first_strike) {
-                    continue;
-                }
-                if let Some(a) =
-                    crate::combat::assign_blocker_damage(&self.state, cards, blocker, attacker)
-                {
-                    assignments.push(a);
-                }
+        // Blockers hit back at the attackers they are blocking — each blocker once, however
+        // many attackers it blocks.
+        let mut blockers: Vec<ObjectId> = Vec::new();
+        for b in self.state.combat.blocks.values().flatten() {
+            if !blockers.contains(b) {
+                blockers.push(*b);
+            }
+        }
+        for blocker in blockers {
+            if !crate::combat::deals_damage_now(&self.state, cards, blocker, first_strike) {
+                continue;
+            }
+            let attackers = crate::combat::blocked_by(&self.state, blocker);
+            match chosen.iter().find(|a| a.source == blocker) {
+                Some(manual) => assignments.push(manual.clone()),
+                None => assignments.extend(crate::combat::assign_blocker_damage(
+                    &self.state,
+                    cards,
+                    blocker,
+                    &attackers,
+                )),
             }
         }
 
@@ -5619,5 +6012,13 @@ fn reveals_information(event: &Event, who: PlayerId) -> bool {
             from.zone == Zone::Library || (from.zone == Zone::Hand && from.player != Some(who))
         }
         _ => false,
+    }
+}
+
+/// The objects a choice puts in front of its chooser, who may look at them.
+fn choice_candidates(kind: &ChoiceKind) -> &[ObjectId] {
+    match kind {
+        ChoiceKind::ChooseObjects { from, .. } => from,
+        _ => &[],
     }
 }

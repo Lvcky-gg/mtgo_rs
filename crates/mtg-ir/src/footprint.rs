@@ -355,6 +355,12 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             .with(objects_write(to, r))
             .with(value_footprint(amount, r)),
 
+        Effect::DealDamageDivided { source, shares } => {
+            shares.iter().fold(objects_read(source, r), |f, to| {
+                f.with(objects_write(to, r))
+            })
+        }
+
         Effect::AddCounters { what, kind, amount }
         | Effect::RemoveCounters { what, kind, amount } => {
             let mut f = objects_write(what, r);
@@ -409,7 +415,7 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             .with(selector_read(who, r))
             .with(Footprint::writing(Resource::ContinuousEffects)),
 
-        Effect::CounterSpell { what } | Effect::CopySpell { what, .. } => {
+        Effect::CounterSpell { what, .. } | Effect::CopySpell { what, .. } => {
             objects_write(what, r).with(Footprint::writing(Resource::Stack))
         }
         // Asks another player whether to pay, so it always prompts.
@@ -471,6 +477,8 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
         | C::Saddled
         | C::NoSpellsLastTurn
         | C::PlayerCastTwoLastTurn => Footprint::default(),
+        // Only read while the spell's cost is determined (CR 601.2f).
+        C::TargetsMatching(_) => Footprint::default(),
         C::CountAtLeast { what, at_least } => {
             selector_read(what, r).with(value_footprint(at_least, r))
         }
@@ -497,7 +505,12 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         }
         // Fixed as the spell was cast.
         Value::SpellsCastBefore => Footprint::default(),
-        Value::Count(s) | Value::ManaValue(s) | Value::CardTypesAmong(s) => selector_read(s, r),
+        Value::Count(s)
+        | Value::ManaValue(s)
+        | Value::CardTypesAmong(s)
+        | Value::PartySize(s)
+        | Value::BasicLandTypesAmong(s)
+        | Value::SpellsCastThisTurn(s) => selector_read(s, r),
         Value::Power(s) | Value::Toughness(s) | Value::LeastToughness(s) => objects_read(s, r),
         Value::LifeTotal(s) => players_read(s, r, Resource::Life),
         Value::Counters(s, kind) => {

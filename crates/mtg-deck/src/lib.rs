@@ -32,6 +32,7 @@
 //! that actually goes wrong, thanks to accents, split cards and double-faced
 //! cards — is one function with its own tests.
 
+mod interchange;
 pub mod parse;
 pub mod resolve;
 

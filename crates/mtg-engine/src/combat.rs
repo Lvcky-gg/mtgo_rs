@@ -386,6 +386,9 @@ pub enum BlockError {
     TooManyBlockers { attacker: ObjectId, max: usize },
     /// "Can't block alone": the only creature declared as a blocker (CR 506.5).
     BlockingAlone { blocker: ObjectId },
+    /// Another legal declaration obeys more block requirements (CR 509.1c) — `better`
+    /// is one, as blocker/attacker pairs.
+    RequirementUnmet { better: Vec<(ObjectId, ObjectId)> },
 }
 
 /// Check a complete block declaration.
@@ -397,17 +400,241 @@ pub fn validate_blocks(
     defender: PlayerId,
     blocks: &BTreeMap<ObjectId, Vec<ObjectId>>,
 ) -> Result<(), BlockError> {
+    validate_restrictions(state, cards, defender, blocks)?;
+    let requirements = block_requirements(state, cards, defender);
+    match better_blocks(state, cards, defender, &requirements, blocks) {
+        Some(better) => Err(BlockError::RequirementUnmet {
+            better: pairs(&better),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// One block requirement (CR 509.1c): `blocker` must block (`attacker`, or anything when
+/// `None`), or `attacker` must be blocked by someone when `blocker` is `None`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Requirement {
+    pub blocker: Option<ObjectId>,
+    pub attacker: Option<ObjectId>,
+}
+
+/// Every block requirement on this declaration that some creature could obey.
+pub fn block_requirements(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    defender: PlayerId,
+) -> Vec<Requirement> {
+    let effects: Vec<_> = crate::layers::effects(state, cards)
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                &e.modification,
+                Modification::Restriction(
+                    Restriction::MustBlock
+                        | Restriction::MustBlockSource
+                        | Restriction::MustBeBlocked
+                        | Restriction::MustBeBlockedByAll(_)
+                )
+            )
+        })
+        .collect();
+    if effects.is_empty() {
+        return Vec::new();
+    }
+    let eligible = eligible_blockers(state, cards, defender);
+    let chars = ComputedChars(cards);
+    let mut out = Vec::new();
+    for e in &effects {
+        let Modification::Restriction(r) = &e.modification else {
+            continue;
+        };
+        match r {
+            Restriction::MustBlock => out.extend(
+                eligible
+                    .iter()
+                    .filter(|(b, _)| crate::layers::applies(state, cards, e, *b))
+                    .map(|(b, _)| Requirement {
+                        blocker: Some(*b),
+                        attacker: None,
+                    }),
+            ),
+            Restriction::MustBlockSource => out.extend(
+                eligible
+                    .iter()
+                    .filter(|(b, can)| {
+                        can.contains(&e.source) && crate::layers::applies(state, cards, e, *b)
+                    })
+                    .map(|(b, _)| Requirement {
+                        blocker: Some(*b),
+                        attacker: Some(e.source),
+                    }),
+            ),
+            Restriction::MustBeBlocked => {
+                for a in state.combat.attackers.keys() {
+                    if crate::layers::applies(state, cards, e, *a)
+                        && eligible.iter().any(|(_, can)| can.contains(a))
+                    {
+                        out.push(Requirement {
+                            blocker: None,
+                            attacker: Some(*a),
+                        });
+                    }
+                }
+            }
+            Restriction::MustBeBlockedByAll(filter) => {
+                for a in state.combat.attackers.keys() {
+                    if !crate::layers::applies(state, cards, e, *a) {
+                        continue;
+                    }
+                    let ctx = ctx_for(state, cards, &chars, *a);
+                    for (b, can) in &eligible {
+                        if can.contains(a)
+                            && crate::eval::matches(&ctx, filter, *b).unwrap_or(false)
+                        {
+                            out.push(Requirement {
+                                blocker: Some(*b),
+                                attacker: Some(*a),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// How many requirements a declaration obeys.
+fn obeyed(requirements: &[Requirement], blocks: &BTreeMap<ObjectId, Vec<ObjectId>>) -> usize {
+    requirements
+        .iter()
+        .filter(|r| match (r.blocker, r.attacker) {
+            (Some(b), Some(a)) => blocks.get(&a).is_some_and(|bs| bs.contains(&b)),
+            (Some(b), None) => blocks.values().any(|bs| bs.contains(&b)),
+            (None, Some(a)) => blocks.get(&a).is_some_and(|bs| !bs.is_empty()),
+            (None, None) => false,
+        })
+        .count()
+}
+
+/// A legal declaration one step away from `blocks` that obeys more requirements, if there
+/// is one (CR 509.1c: the maximum number of requirements must be obeyed).
+///
+/// A step moves one creature onto an attacker — instead of what it was blocking, or as
+/// well when it may block several — with a second creature joining when the attacker
+/// needs more blockers (menace). This is a local search: it never rejects a declaration
+/// unless it has a better one in hand, but it can miss improvements that take several
+/// creatures changing at once.
+fn better_blocks(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    defender: PlayerId,
+    requirements: &[Requirement],
+    blocks: &BTreeMap<ObjectId, Vec<ObjectId>>,
+) -> Option<BTreeMap<ObjectId, Vec<ObjectId>>> {
+    if requirements.is_empty() {
+        return None;
+    }
+    let now = obeyed(requirements, blocks);
+    let eligible = eligible_blockers(state, cards, defender);
+    let moved = |from: &BTreeMap<ObjectId, Vec<ObjectId>>, b: ObjectId, a: ObjectId, keep: bool| {
+        let mut next = from.clone();
+        if !keep {
+            for bs in next.values_mut() {
+                bs.retain(|x| *x != b);
+            }
+        }
+        let bs = next.entry(a).or_default();
+        if !bs.contains(&b) {
+            bs.push(b);
+        }
+        next.retain(|_, bs| !bs.is_empty());
+        next
+    };
+    for (b, can) in &eligible {
+        for a in can {
+            let mut candidates = vec![moved(blocks, *b, *a, false)];
+            let current = blocks.values().filter(|bs| bs.contains(b)).count();
+            if current > 0 && current < block_capacity(state, cards, *b) {
+                candidates.push(moved(blocks, *b, *a, true));
+            }
+            let need = minimum_blockers(state, cards, *a);
+            for next in candidates {
+                if next.get(a).map_or(0, Vec::len) < need {
+                    // Menace: try each second creature alongside.
+                    for (d, dcan) in &eligible {
+                        if d == b || !dcan.contains(a) {
+                            continue;
+                        }
+                        let pair = moved(&next, *d, *a, false);
+                        if obeyed(requirements, &pair) > now
+                            && validate_restrictions(state, cards, defender, &pair).is_ok()
+                        {
+                            return Some(pair);
+                        }
+                    }
+                    continue;
+                }
+                if obeyed(requirements, &next) > now
+                    && validate_restrictions(state, cards, defender, &next).is_ok()
+                {
+                    return Some(next);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A legal declaration obeying as many block requirements as the search finds: what a
+/// player who makes no decisions declares. Empty when nothing is required.
+pub fn required_blocks(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    defender: PlayerId,
+) -> Vec<(ObjectId, ObjectId)> {
+    let requirements = block_requirements(state, cards, defender);
+    let mut blocks = BTreeMap::new();
+    while let Some(next) = better_blocks(state, cards, defender, &requirements, &blocks) {
+        blocks = next;
+    }
+    pairs(&blocks)
+}
+
+fn pairs(blocks: &BTreeMap<ObjectId, Vec<ObjectId>>) -> Vec<(ObjectId, ObjectId)> {
+    blocks
+        .iter()
+        .flat_map(|(a, bs)| bs.iter().map(move |b| (*b, *a)))
+        .collect()
+}
+
+/// Check a declaration against everything but block requirements.
+fn validate_restrictions(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    defender: PlayerId,
+    blocks: &BTreeMap<ObjectId, Vec<ObjectId>>,
+) -> Result<(), BlockError> {
     let mut seen: Vec<ObjectId> = Vec::new();
+    let mut count: BTreeMap<ObjectId, usize> = BTreeMap::new();
 
     for (attacker, blockers) in blocks {
         if blockers.is_empty() {
             continue;
         }
-        for b in blockers {
-            if seen.contains(b) {
+        for (i, b) in blockers.iter().enumerate() {
+            let before = *count.get(b).unwrap_or(&0);
+            if blockers[..i].contains(b) {
                 return Err(BlockError::BlockingTwice { blocker: *b });
             }
-            seen.push(*b);
+            if before >= block_capacity(state, cards, *b) {
+                return Err(BlockError::BlockingTwice { blocker: *b });
+            }
+            count.insert(*b, before + 1);
+            if before == 0 {
+                seen.push(*b);
+            }
 
             let ok = state
                 .objects
@@ -457,6 +684,46 @@ pub fn validate_blocks(
     }
 
     Ok(())
+}
+
+/// How many attackers this creature may block (CR 509.1a): one, plus "can block an
+/// additional creature each combat"; `usize::MAX` for "any number".
+pub fn block_capacity(state: &GameState, cards: &dyn PrintedCards, blocker: ObjectId) -> usize {
+    let mut extra = 0usize;
+    for e in crate::layers::effects(state, cards) {
+        if let Modification::Restriction(Restriction::BlockAdditional(n)) = &e.modification
+            && crate::layers::applies(state, cards, &e, blocker)
+        {
+            match n {
+                Some(n) => extra = extra.saturating_add(usize::from(*n)),
+                None => return usize::MAX,
+            }
+        }
+    }
+    1 + extra
+}
+
+/// Whether this attacker's controller may assign its combat damage as though it weren't
+/// blocked (CR 510.1c): all of it to the player or planeswalker it attacks.
+pub fn assigns_as_though_unblocked(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    attacker: ObjectId,
+) -> bool {
+    restricted(state, cards, attacker, |r| {
+        matches!(r, Restriction::AssignAsThoughUnblocked)
+    })
+}
+
+/// The attackers a creature is blocking, in declaration order.
+pub fn blocked_by(state: &GameState, blocker: ObjectId) -> Vec<ObjectId> {
+    state
+        .combat
+        .blocks
+        .iter()
+        .filter(|(_, bs)| bs.contains(&blocker))
+        .map(|(a, _)| *a)
+        .collect()
 }
 
 /// The fewest creatures that may block this attacker, if any block it: two for menace
@@ -547,8 +814,12 @@ pub fn assign_attacker_damage(
     };
 
     if blockers.is_empty() {
-        // Blocked by nothing but still blocked deals no damage (CR 509.1h).
-        if state.combat.was_blocked.contains(&attacker) && !trample {
+        // Blocked by nothing but still blocked deals no damage (CR 509.1h) — unless it
+        // may assign its damage as though it weren't blocked, which it then does.
+        if state.combat.was_blocked.contains(&attacker)
+            && !trample
+            && !assigns_as_though_unblocked(state, cards, attacker)
+        {
             return Some(out);
         }
         if power > 0 {
@@ -600,7 +871,7 @@ pub fn assignment_is_forced(
     if power == 0 || blockers.is_empty() {
         return true;
     }
-    if blockers.len() > 1 {
+    if blockers.len() > 1 || assigns_as_though_unblocked(state, cards, attacker) {
         return false;
     }
     !has(state, cards, attacker, Keyword::Trample)
@@ -613,24 +884,40 @@ pub fn assignment_is_forced(
             )
 }
 
-/// A blocking creature's damage assignment: all of it to the attacker it blocks.
+/// A blocking creature's damage assignment (CR 510.1d): all of it to the attacker it
+/// blocks; blocking several, lethal damage to each in turn and the rest to the last — *a*
+/// division, which its controller may change (see `Engine::next_damage_assignment`).
 pub fn assign_blocker_damage(
     state: &GameState,
     cards: &dyn PrintedCards,
     blocker: ObjectId,
-    attacker: ObjectId,
+    attackers: &[ObjectId],
 ) -> Option<Assignment> {
     let power = crate::layers::compute(state, cards, blocker)
         .and_then(|c| c.power)
         .unwrap_or(0)
         .max(0) as u32;
-    if power == 0 {
+    if power == 0 || attackers.is_empty() {
         return None;
+    }
+    let deathtouch = has(state, cards, blocker, Keyword::Deathtouch);
+    let mut left = power;
+    let mut to = Vec::new();
+    for (i, a) in attackers.iter().enumerate() {
+        let amount = if i + 1 == attackers.len() {
+            left
+        } else {
+            lethal_damage(state, cards, *a, deathtouch).min(left)
+        };
+        if amount > 0 {
+            to.push((Target::Object(*a), amount));
+        }
+        left -= amount;
     }
     Some(Assignment {
         source: blocker,
-        deathtouch: has(state, cards, blocker, Keyword::Deathtouch),
-        to: vec![(Target::Object(attacker), power)],
+        deathtouch,
+        to,
     })
 }
 

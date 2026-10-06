@@ -9,7 +9,7 @@
 use crate::{Result, Store, StoreError};
 
 /// The schema version this build writes and understands.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 10;
 
 const MIGRATIONS: &[&str] = &[
     // v1 — cards, decks, preferences.
@@ -158,6 +158,15 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (deck, oracle)
     );
     "#,
+    // v9 — imported tournament observations, independent of personal decks.
+    r#"
+    CREATE TABLE tournament_records (
+        id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
+    );
+    "#,
+    // v10 — player-declared power and pregame expectations travel with saved decks.
+    r#"ALTER TABLE decks ADD COLUMN profile TEXT NOT NULL DEFAULT '{}';"#,
 ];
 
 /// Apply any migrations the file has not seen.
@@ -202,6 +211,8 @@ mod tests {
         store.conn.execute_batch(r#"
             DROP TABLE IF EXISTS faces;
             DROP TABLE IF EXISTS deck_printings;
+            DROP TABLE IF EXISTS tournament_records;
+            ALTER TABLE decks DROP COLUMN profile;
             CREATE TABLE faces (
                 oracle      INTEGER NOT NULL REFERENCES cards(oracle) ON DELETE CASCADE,
                 face_index  INTEGER NOT NULL,

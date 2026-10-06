@@ -1915,6 +1915,7 @@ name = "mtg-deck"
 version = "0.1.0"
 dependencies = [
  "mtg-core",
+ "serde_json",
 ]
 
 [[package]]

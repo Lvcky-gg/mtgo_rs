@@ -40,10 +40,9 @@ mod cast_strategy;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mtg_core::{AbilityId, CardId, CardType, CounterKind, ObjectId, PlayerId, Step, Target};
+use mtg_core::{AbilityId, CardId, CardType, CounterKind, ObjectId, Target};
 use mtg_engine::{
     Choice, PlayerView,
-    actions::Action,
     choice::{Answer, ChoiceKind},
 };
 use mtg_ir::{
@@ -83,6 +82,11 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// Unblocked damage across both combat damage steps.
+    fn combat_damage(&self) -> i64 {
+        i64::from(self.power.max(0)) * if self.double_strike { 2 } else { 1 }
+    }
+
     /// Read a card's front face.
     ///
     /// Returns the printed stats of a card if the face is defined. This is used by the bot
@@ -138,14 +142,14 @@ impl Stats {
         })
     }
 
-    /// Whether this creature, dealing its damage to `other`, destroys it.
+    /// Whether this creature's accumulated damage destroys `other`.
     ///
-    /// A creature destroys another if its power is greater than the other's toughness, or if
-    /// it has deathtouch (which destroys any creature with 1 or more toughness).
+    /// Positive damage is lethal when it reaches the other's remaining toughness,
+    /// or when its source has deathtouch.
     ///
     /// Example: A 2/2 creature with deathtouch kills any creature by damage.
-    fn kills(&self, other: &Stats) -> bool {
-        self.power > 0 && (self.deathtouch || self.power >= other.toughness)
+    fn kills_with_damage(&self, other: &Stats, damage: i64) -> bool {
+        damage > 0 && (self.deathtouch || damage >= i64::from(other.toughness))
     }
 
     /// Whether `blocker` may block this creature, as far as flying goes. The engine's
@@ -160,7 +164,7 @@ impl Stats {
     }
 }
 
-/// How one creature fares fighting another, accounting for first strike.
+/// How one creature fares fighting another, accounting for first and double strike.
 ///
 /// Returns `(a_kills_b, b_kills_a)` where each bool indicates if that creature destroys the other.
 ///
@@ -173,14 +177,32 @@ impl Stats {
 /// - **2/2 first strike vs 3/3**: `(false, false)` — Neither dies (2 damage doesn't kill 3/3).
 /// - **3/3 first strike vs 2/2**: `(true, false)` — 3/3 kills 2/2 with first strike (2's damage never resolves).
 fn fight(a: &Stats, b: &Stats) -> (bool, bool) {
-    let a_kills = a.kills(b);
-    let b_kills = b.kills(a);
-    match (a.first_strike, b.first_strike) {
-        // Only the first striker's damage lands if it is lethal.
-        (true, false) => (a_kills, b_kills && !a_kills),
-        (false, true) => (a_kills && !b_kills, b_kills),
-        _ => (a_kills, b_kills),
+    let first_damage = |s: &Stats| {
+        if s.first_strike || s.double_strike {
+            i64::from(s.power.max(0))
+        } else {
+            0
+        }
+    };
+    let a_first = first_damage(a);
+    let b_first = first_damage(b);
+    let a_kills_first = a.kills_with_damage(b, a_first);
+    let b_kills_first = b.kills_with_damage(a, b_first);
+    if a_kills_first || b_kills_first {
+        return (a_kills_first, b_kills_first);
     }
+    let total_damage = |s: &Stats, first| {
+        first
+            + if !s.first_strike || s.double_strike {
+                i64::from(s.power.max(0))
+            } else {
+                0
+            }
+    };
+    (
+        a.kills_with_damage(b, total_damage(a, a_first)),
+        b.kills_with_damage(a, total_damage(b, b_first)),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -334,7 +356,12 @@ impl Bot {
                 Some(self.attack_plan(&attackers, defenders, view))
             }
             ChoiceKind::ChooseTargets { slots } => self.targets(choice, slots, view),
-            ChoiceKind::DeclareBlockers { eligible } => {
+            // Blocks something must make (lure, CR 509.1c) come as the engine's default,
+            // which the bot's own choice would not know to include.
+            ChoiceKind::DeclareBlockers { .. } if matches!(&choice.default, Some(Answer::Blocks(b)) if !b.is_empty()) => {
+                choice.default.clone()
+            }
+            ChoiceKind::DeclareBlockers { eligible, .. } => {
                 Some(Answer::Blocks(self.blocks(eligible, view)))
             }
             ChoiceKind::KeepOrMulligan { mulligans_taken } => {
@@ -405,11 +432,8 @@ impl Bot {
             // the lands the hand needs.
             (
                 u32::from(!spare_land),
-                if s.land {
-                    u32::MAX
-                } else {
-                    u32::MAX - 1 - s.mana_value
-                },
+                s.land,
+                std::cmp::Reverse(s.mana_value),
                 id.0,
             )
         });
@@ -437,23 +461,27 @@ impl Bot {
                     && self.layouts.get(&card) == Some(&mtg_ir::Layout::Split)
                     && let Some(other) = self.stats.get(&(card, 1))
                 {
-                    stats.mana_value += other.mana_value;
+                    stats.mana_value = stats.mana_value.saturating_add(other.mana_value);
                 }
-                let delta = o
+                let plus = o
                     .counters
                     .get(&CounterKind::PlusOnePlusOne)
                     .copied()
-                    .unwrap_or(0)
-                    - o.counters
-                        .get(&CounterKind::MinusOneMinusOne)
-                        .copied()
-                        .unwrap_or(0);
-                stats.power += delta;
-                stats.toughness = (stats.toughness + delta - o.damage as i32).max(0);
+                    .unwrap_or(0);
+                let minus = o
+                    .counters
+                    .get(&CounterKind::MinusOneMinusOne)
+                    .copied()
+                    .unwrap_or(0);
+                let delta = i64::from(plus) - i64::from(minus);
+                stats.power = (i64::from(stats.power) + delta)
+                    .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+                    as i32;
+                stats.toughness = (i64::from(stats.toughness) + delta - i64::from(o.damage))
+                    .clamp(0, i64::from(i32::MAX)) as i32;
                 stats
             })
     }
-
 
     /// Choose targets for spells and abilities based on their effect.
     ///
@@ -515,7 +543,6 @@ impl Bot {
                 .collect(),
         ))
     }
-
 }
 
 /// A small heuristic for effects whose targets are consistently helpful or harmful.
@@ -559,9 +586,9 @@ fn target_preference(effect: &Effect) -> TargetPreference {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mtg_core::ZoneRef;
+    use mtg_core::{PlayerId, Step, ZoneRef};
     use mtg_engine::{
-        actions::LegalActions,
+        actions::{Action, LegalActions},
         view::{ObjectView, PlayerSummary},
     };
 
@@ -576,6 +603,106 @@ mod tests {
             mana_value: 2,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn large_attack_totals_and_blocker_estimates_do_not_overflow() {
+        let b = bot(&[creature(i32::MAX, 1), creature(1, i32::MAX)]);
+        let v = view(
+            ME,
+            Step::DeclareAttackers,
+            &[(1, 0, ME), (2, 0, ME), (3, 0, ME), (4, 1, THEM)],
+        );
+        assert_eq!(
+            b.attackers(&[ObjectId(1), ObjectId(2), ObjectId(3)], &v),
+            vec![ObjectId(1), ObjectId(2), ObjectId(3)]
+        );
+    }
+
+    #[test]
+    fn large_double_strike_damage_is_lethal_after_one_attacker_is_blocked() {
+        let b = bot(&[
+            Stats {
+                double_strike: true,
+                ..creature(i32::MAX, 1)
+            },
+            creature(1, 1),
+            Stats::default(),
+        ]);
+        let mut v = view(
+            ME,
+            Step::DeclareAttackers,
+            &[(1, 0, ME), (2, 0, ME), (3, 1, THEM), (4, 2, THEM)],
+        );
+        v.players.get_mut(&THEM).unwrap().life = i32::MAX;
+        loyalty(&mut v, 4, 1);
+        let Answer::Attackers(plan) = b.attack_plan(
+            &[ObjectId(1), ObjectId(2)],
+            &[Target::Player(THEM), Target::Object(ObjectId(4))],
+            &v,
+        ) else {
+            panic!("attack plan")
+        };
+        assert_eq!(
+            plan,
+            vec![
+                (ObjectId(1), Target::Player(THEM)),
+                (ObjectId(2), Target::Player(THEM))
+            ]
+        );
+    }
+
+    #[test]
+    fn large_incoming_damage_still_requests_a_life_saving_block() {
+        let b = bot(&[creature(1, 1), creature(i32::MAX, i32::MAX)]);
+        let mut v = view(
+            THEM,
+            Step::DeclareBlockers,
+            &[(1, 0, ME), (2, 1, THEM), (3, 1, THEM)],
+        );
+        attacking(&mut v, 2, Target::Player(ME));
+        attacking(&mut v, 3, Target::Player(ME));
+        assert_eq!(
+            b.blocks(&[(ObjectId(1), vec![ObjectId(2)])], &v),
+            vec![(ObjectId(1), ObjectId(2))]
+        );
+    }
+
+    #[test]
+    fn large_marked_damage_never_increases_effective_toughness() {
+        let b = bot(&[creature(2, 2)]);
+        let mut v = view(ME, Step::DeclareAttackers, &[(1, 0, ME)]);
+        v.visible.get_mut(&ObjectId(1)).unwrap().damage = u32::MAX;
+        assert_eq!(b.stats(&v, ObjectId(1)).unwrap().toughness, 0);
+    }
+
+    #[test]
+    fn extreme_counters_are_combined_before_clamping_stats() {
+        let b = bot(&[creature(i32::MIN, i32::MIN)]);
+        let mut v = view(ME, Step::DeclareAttackers, &[(1, 0, ME)]);
+        let o = v.visible.get_mut(&ObjectId(1)).unwrap();
+        o.counters.insert(CounterKind::PlusOnePlusOne, i32::MAX);
+        o.counters.insert(CounterKind::MinusOneMinusOne, i32::MIN);
+        let stats = b.stats(&v, ObjectId(1)).unwrap();
+        assert_eq!(stats.power, i32::MAX);
+        assert_eq!(stats.toughness, i32::MAX);
+    }
+
+    #[test]
+    fn discarding_a_maximum_mana_value_spell_does_not_overflow() {
+        let b = bot(&[
+            Stats {
+                mana_value: u32::MAX,
+                ..Default::default()
+            },
+            creature(1, 1),
+        ]);
+        let mut v = view(ME, Step::Cleanup, &[(1, 0, ME), (2, 1, ME)]);
+        in_hand(&mut v, &[1, 2]);
+        assert_eq!(
+            b.worst_cards(&[ObjectId(1), ObjectId(2)], 1, &v),
+            vec![ObjectId(1)]
+        );
     }
 
     /// A bot whose card N has the given stats.
@@ -867,6 +994,69 @@ mod tests {
         };
         assert_eq!(fight(&striker, &creature(2, 2)), (true, false));
         assert_eq!(fight(&creature(2, 2), &creature(2, 2)), (true, true));
+    }
+
+    #[test]
+    fn double_strike_accounts_for_both_hits_in_creature_fights() {
+        let striker = Stats {
+            double_strike: true,
+            ..creature(2, 5)
+        };
+        assert_eq!(fight(&striker, &creature(3, 4)), (true, false));
+        assert_eq!(fight(&creature(3, 4), &striker), (false, true));
+        assert_eq!(fight(&striker, &creature(5, 4)), (true, true));
+        let first = Stats {
+            first_strike: true,
+            ..creature(3, 4)
+        };
+        assert_eq!(fight(&striker, &first), (true, false));
+        let lethal_first = Stats {
+            first_strike: true,
+            ..creature(5, 4)
+        };
+        assert_eq!(fight(&striker, &lethal_first), (false, true));
+        let both = Stats {
+            double_strike: true,
+            ..creature(3, 4)
+        };
+        assert_eq!(fight(&striker, &both), (true, true));
+    }
+
+    #[test]
+    fn it_takes_a_safe_double_strike_block() {
+        let b = bot(&[
+            Stats {
+                double_strike: true,
+                ..creature(2, 5)
+            },
+            creature(3, 4),
+        ]);
+        let v = view(THEM, Step::DeclareBlockers, &[(1, 0, ME), (2, 1, THEM)]);
+        assert_eq!(
+            b.blocks(&[(ObjectId(1), vec![ObjectId(2)])], &v),
+            vec![(ObjectId(1), ObjectId(2))]
+        );
+    }
+
+    #[test]
+    fn double_strike_can_make_a_lethal_attack_worth_losing_creatures() {
+        let b = bot(&[
+            Stats {
+                double_strike: true,
+                ..creature(2, 1)
+            },
+            creature(5, 5),
+        ]);
+        let mut v = view(
+            ME,
+            Step::DeclareAttackers,
+            &[(1, 0, ME), (2, 0, ME), (3, 0, ME), (4, 1, THEM)],
+        );
+        v.players.get_mut(&THEM).unwrap().life = 8;
+        assert_eq!(
+            b.attackers(&[ObjectId(1), ObjectId(2), ObjectId(3)], &v),
+            vec![ObjectId(1), ObjectId(2), ObjectId(3)]
+        );
     }
 
     #[test]

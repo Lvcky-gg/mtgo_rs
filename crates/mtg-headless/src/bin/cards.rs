@@ -147,8 +147,7 @@ fn search(args: &[String]) -> Result<(), String> {
     for (oracle, name) in hits {
         let type_line = store
             .card(oracle)
-            .ok()
-            .flatten()
+            .map_err(|e| e.to_string())?
             .and_then(|c| c.faces.first().map(|f| f.type_line.clone()))
             .unwrap_or_default();
         println!("{name}  —  {type_line}");
@@ -163,10 +162,28 @@ fn deck(args: &[String]) -> Result<(), String> {
     };
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let mut store = open()?;
+    save_deck(&mut store, name, &text)
+}
 
-    let parsed = mtg_deck::parse(&text);
+fn save_deck(store: &mut Store, name: &str, text: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("give the deck a name".into());
+    }
+
+    let parsed = mtg_deck::parse(text);
+    if parsed
+        .entries
+        .iter()
+        .any(|entry| entry.section == mtg_deck::Section::Companion)
+    {
+        return Err("companion designation is not supported yet; the deck was not saved".into());
+    }
+    if parsed.count_in(mtg_deck::Section::Commander) > 1 {
+        return Err("multiple commanders are not supported yet; the deck was not saved".into());
+    }
     let entries = {
-        let resolver = StoreResolver(&store);
+        let resolver = StoreResolver(store);
         let resolved = mtg_deck::resolve::resolve(&parsed, &resolver);
 
         // Report what could not be matched rather than importing a quietly incomplete deck.
@@ -206,7 +223,7 @@ fn deck(args: &[String]) -> Result<(), String> {
         entries
     };
 
-    let total: u32 = entries.iter().map(|(_, n, _)| n).sum();
+    let total: u64 = entries.iter().map(|(_, n, _)| u64::from(*n)).sum();
     if total == 0 {
         return Err("nothing resolved — is the card database imported?".into());
     }
@@ -395,4 +412,67 @@ fn parse(args: &[String]) -> Result<(), String> {
         println!("NOT UNDERSTOOD: {line}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod deck_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_command_sections_preserve_the_existing_deck() {
+        let mut store = Store::in_memory().unwrap();
+        let id = store.put_deck("Existing", None, &[]).unwrap();
+        let original = store.deck(id).unwrap();
+        for (text, expected) in [
+            (
+                "Commander\n1 First Captain\n1 Second Captain",
+                "multiple commanders",
+            ),
+            ("Commander\n2 First Captain", "multiple commanders"),
+            ("Companion\n1 Traveling Friend", "companion designation"),
+        ] {
+            let error = save_deck(&mut store, "Existing", text).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(store.deck(id).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn large_import_totals_and_trimmed_names_are_preserved() {
+        let mut store = Store::in_memory().unwrap();
+        let card = mtg_store::StoredCard {
+            oracle_uuid: "invented-import-card".into(),
+            name: "Invented Scout".into(),
+            layout: "normal".into(),
+            faces: vec![mtg_store::FaceRow {
+                name: "Invented Scout".into(),
+                ..Default::default()
+            }],
+        };
+        let oracle = store
+            .put_card(&card, &[mtg_deck::resolve::normalise(&card.name)])
+            .unwrap();
+        save_deck(
+            &mut store,
+            "  Scouts  ",
+            "4294967295 Invented Scout\nSideboard\n4294967295 Invented Scout",
+        )
+        .unwrap();
+        let decks = store.deck_list().unwrap();
+        assert_eq!(decks.len(), 1);
+        assert_eq!(decks[0].1, "Scouts");
+        let deck = store.deck(decks[0].0).unwrap().unwrap();
+        assert_eq!(deck.entries.len(), 2);
+        assert!(
+            deck.entries
+                .iter()
+                .all(|(id, count, _)| *id == oracle && *count == u32::MAX)
+        );
+        assert!(
+            save_deck(&mut store, "  ", "1 Invented Scout")
+                .unwrap_err()
+                .contains("name")
+        );
+        assert_eq!(store.deck_list().unwrap(), decks);
+    }
 }

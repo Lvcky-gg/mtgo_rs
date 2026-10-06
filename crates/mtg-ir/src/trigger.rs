@@ -315,6 +315,9 @@ pub enum Condition {
     /// A creature is attacking the controller or a planeswalker they control: "if you've
     /// been attacked this step".
     YouAreAttacked,
+    /// The source spell targets an object matching this: "if it targets a tapped
+    /// creature" (CR 601.2f — read from the targets chosen during announcement).
+    TargetsMatching(crate::ObjectFilter),
     Not(Box<Condition>),
     And(Vec<Condition>),
     Or(Vec<Condition>),

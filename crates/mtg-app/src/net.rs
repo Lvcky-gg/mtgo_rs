@@ -49,17 +49,27 @@ fn now() -> u64 {
 /// The public key is the account, so it is kept rather than regenerated per game.
 pub fn identity() -> Result<Identity, String> {
     let store: Store = crate::decks::create_store()?;
-    if let Some(stored) = store.identity().map_err(|e| e.to_string())? {
-        return Ok(Identity::from_seed(&stored.seed));
+    identity_from_store(&store)
+}
+
+fn identity_from_store(store: &Store) -> Result<Identity, String> {
+    let stored = match store.identity().map_err(|e| e.to_string())? {
+        Some(stored) => stored,
+        None => {
+            let fresh = Identity::generate();
+            store
+                .identity_or_insert(&StoredIdentity {
+                    seed: fresh.to_backup(),
+                    public: fresh.public().0,
+                })
+                .map_err(|e| e.to_string())?
+        }
+    };
+    let identity = Identity::from_seed(&stored.seed);
+    if identity.public().0 != stored.public {
+        return Err("the saved identity's public key does not match its seed".into());
     }
-    let fresh = Identity::generate();
-    store
-        .put_identity(&StoredIdentity {
-            seed: fresh.to_backup(),
-            public: fresh.public().0,
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(fresh)
+    Ok(identity)
 }
 
 /// The address other machines on the LAN reach this one by. Found by asking the OS which
@@ -321,6 +331,39 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
 mod tests {
     use super::*;
     use mtg_net::wire::{Channel, TypedChannel};
+
+    #[test]
+    fn first_use_saves_a_consistent_identity_and_reuses_it() {
+        let store = Store::in_memory().unwrap();
+        let first = identity_from_store(&store).unwrap();
+        let saved = store.identity().unwrap().unwrap();
+        assert_eq!(saved.seed, first.to_backup());
+        assert_eq!(saved.public, first.public().0);
+        assert_eq!(
+            identity_from_store(&store).unwrap().public(),
+            first.public()
+        );
+        assert_eq!(store.identity().unwrap(), Some(saved));
+    }
+
+    #[test]
+    fn mismatched_saved_identity_is_reported_and_preserved() {
+        let store = Store::in_memory().unwrap();
+        let actual = Identity::from_seed(&[7; 32]);
+        let mut saved = StoredIdentity {
+            seed: actual.to_backup(),
+            public: actual.public().0,
+        };
+        saved.public[0] ^= 1;
+        store.put_identity(&saved).unwrap();
+        assert!(
+            identity_from_store(&store)
+                .err()
+                .unwrap()
+                .contains("does not match")
+        );
+        assert_eq!(store.identity().unwrap(), Some(saved));
+    }
 
     #[test]
     fn cancelled_join_stops_before_parsing_or_connecting() {

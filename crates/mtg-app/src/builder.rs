@@ -6,7 +6,7 @@
 //! screen: a search with filters over the whole card database, results as card images you click
 //! to add, and the deck beside them, with a sample hand and a playtest one click away.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use egui::{Color32, RichText, Ui, Vec2};
 use mtg_net::fairness::{Seed, shuffle_order};
@@ -253,6 +253,60 @@ pub enum Group {
     Lands,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeckExportFormat {
+    Plain,
+    Arena,
+    Mtgo,
+    Moxfield,
+    Archidekt,
+    Csv,
+    Json,
+}
+
+impl DeckExportFormat {
+    const ALL: [Self; 7] = [
+        Self::Plain,
+        Self::Arena,
+        Self::Mtgo,
+        Self::Moxfield,
+        Self::Archidekt,
+        Self::Csv,
+        Self::Json,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "Plain text",
+            Self::Arena => "MTG Arena",
+            Self::Mtgo => "MTGO",
+            Self::Moxfield => "Moxfield",
+            Self::Archidekt => "Archidekt",
+            Self::Csv => "CSV",
+            Self::Json => "JSON",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct SuggestedCard {
+    oracle: u32,
+    name: String,
+    reason: String,
+    score: u32,
+    sources: Vec<(String, String)>,
+}
+
+fn tournament_suggestions(picks: &[crate::tournaments::Pick]) -> Vec<SuggestedCard> {
+    picks.iter().map(|pick| SuggestedCard {
+        oracle: pick.oracle,
+        name: pick.name.clone(),
+        reason: format!("{} of {} similar distinct published lists · {} average {} copies · {} to {} · adoption, not win rate", pick.included, pick.samples, pick.copies, if pick.sideboard { "sideboard" } else { "main-deck" }, pick.first_date, pick.last_date),
+        score: (pick.score * 1000.0).round() as u32,
+        sources: pick.sources.clone(),
+    }).collect()
+}
+
 impl Group {
     pub fn label(self) -> &'static str {
         match self {
@@ -274,6 +328,7 @@ pub struct Draft {
     /// The saved deck this edits, if it has been saved.
     pub id: Option<i64>,
     pub name: String,
+    pub profile: crate::deck_profile::DeckProfile,
     pub main: BTreeMap<u32, u32>,
     pub side: BTreeMap<u32, u32>,
     pub commander: Option<u32>,
@@ -288,9 +343,119 @@ pub struct Draft {
     saved: Option<(String, DeckContents)>,
 }
 
+#[derive(Default, Debug)]
+struct DeckAnalysis {
+    lands: u64,
+    spells: u64,
+    total_mana: u64,
+    draw: u64,
+    ramp: u64,
+    interaction: u64,
+    demand: [u64; 5],
+    sources: [u64; 5],
+    creature_curve: [u64; 8],
+    other_curve: [u64; 8],
+    unknown: u64,
+}
+
+#[derive(Default)]
+struct CardRoles {
+    draw: bool,
+    ramp: bool,
+    interaction: bool,
+}
+
+impl CardRoles {
+    fn of(card: &DraftCard) -> Self {
+        if card.is_land() {
+            return Self::default();
+        }
+        let rules = card.rules.to_lowercase();
+        Self {
+            draw: rules
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .any(|word| word == "draw"),
+            ramp: rules.contains("add ") || (rules.contains("search") && rules.contains("land")),
+            interaction: [
+                "destroy target",
+                "exile target",
+                "counter target",
+                "damage to target",
+                "damage to any target",
+                "return target",
+            ]
+            .iter()
+            .any(|text| rules.contains(text)),
+        }
+    }
+}
+
+impl DeckAnalysis {
+    fn of(draft: &Draft) -> Self {
+        let mut result = Self::default();
+        for (id, count) in &draft.main {
+            let Some(card) = draft.cards.get(id) else {
+                result.unknown += u64::from(*count);
+                continue;
+            };
+            let count = u64::from(*count);
+            let rules = card.rules.to_lowercase();
+            if card.is_land() {
+                result.lands += count;
+            } else {
+                result.spells += count;
+                let bucket = (card.mana_value as usize).min(7);
+                if card.type_line.split_whitespace().any(|ty| ty == "Creature") {
+                    result.creature_curve[bucket] += count;
+                } else {
+                    result.other_curve[bucket] += count;
+                }
+                result.total_mana += u64::from(card.mana_value) * count;
+                let roles = CardRoles::of(card);
+                result.draw += count * u64::from(roles.draw);
+                result.ramp += count * u64::from(roles.ramp);
+                result.interaction += count * u64::from(roles.interaction);
+            }
+            for (index, (color, basic)) in [
+                ('W', "Plains"),
+                ('U', "Island"),
+                ('B', "Swamp"),
+                ('R', "Mountain"),
+                ('G', "Forest"),
+            ]
+            .iter()
+            .enumerate()
+            {
+                if !card.is_land() {
+                    result.demand[index] += card
+                        .cost
+                        .split('{')
+                        .filter(|symbol| {
+                            symbol
+                                .split('}')
+                                .next()
+                                .unwrap_or_default()
+                                .split('/')
+                                .any(|part| part == color.to_string())
+                        })
+                        .count() as u64
+                        * count;
+                } else if card.type_line.contains(basic)
+                    || rules.contains("any color")
+                    || (rules.contains("add ") && card.rules.contains(&format!("{{{color}}}")))
+                {
+                    result.sources[index] += count;
+                }
+            }
+        }
+        result
+    }
+}
+
 /// Editing history changes deck composition; text fields retain their own undo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DeckContents {
+    profile: crate::deck_profile::DeckProfile,
     printings: BTreeMap<u32, String>,
     main: BTreeMap<u32, u32>,
     side: BTreeMap<u32, u32>,
@@ -393,9 +558,13 @@ impl Draft {
             .deck(id)
             .map_err(|e| e.to_string())?
             .ok_or("that deck no longer exists")?;
+        let profile = crate::deck_profile::DeckProfile::from_json(
+            &store.deck_profile(id).map_err(|e| e.to_string())?,
+        )?;
         let mut draft = Self {
             id: Some(id),
             name: row.name,
+            profile,
             ..Default::default()
         };
         for (oracle, count, section) in row.entries {
@@ -541,11 +710,22 @@ impl Draft {
 
     fn contents(&self) -> DeckContents {
         DeckContents {
+            profile: self.profile.clone(),
             printings: self.printings.clone(),
             main: self.main.clone(),
             side: self.side.clone(),
             commander: self.commander,
         }
+    }
+
+    pub fn set_profile(&mut self, profile: crate::deck_profile::DeckProfile) -> Result<(), String> {
+        profile.validate()?;
+        if self.profile != profile {
+            self.remember();
+            self.profile = profile;
+            self.refresh_dirty();
+        }
+        Ok(())
     }
 
     pub fn set_printing(&mut self, oracle: u32, printing: Option<String>) {
@@ -570,6 +750,7 @@ impl Draft {
     }
 
     fn restore(&mut self, contents: DeckContents) {
+        self.profile = contents.profile;
         self.printings = contents.printings;
         self.main = contents.main;
         self.side = contents.side;
@@ -674,17 +855,23 @@ impl Draft {
         entries.extend(self.main.iter().map(|(o, n)| (*o, *n, Section::Main)));
         entries.extend(self.side.iter().map(|(o, n)| (*o, *n, Section::Sideboard)));
         entries.extend(self.commander.map(|o| (o, 1, Section::Commander)));
+        self.profile.validate()?;
+        let profile_json = serde_json::to_string(&self.profile).map_err(|e| e.to_string())?;
+        let printings: Vec<_> = self
+            .printings
+            .iter()
+            .map(|(o, p)| (*o, p.clone()))
+            .collect();
         let id = store
-            .put_deck_with_printings(
+            .put_deck_with_details(
                 self.id,
                 &name,
                 None,
                 &entries,
-                &self
-                    .printings
-                    .iter()
-                    .map(|(o, p)| (*o, p.clone()))
-                    .collect::<Vec<_>>(),
+                mtg_store::decks::DeckDetails {
+                    printings: &printings,
+                    profile: Some(&profile_json),
+                },
             )
             .map_err(|e| e.to_string())?;
         self.id = Some(id);
@@ -694,26 +881,137 @@ impl Draft {
         Ok(id)
     }
 
-    /// The deck as text, in the same form the importer reads: `4 Name` per line, the
-    /// sideboard after a "Sideboard" line, the commander after a "Commander" line.
-    pub fn to_text(&self) -> String {
+    /// The deck as text, in a shape that major deck sites and clients can import.
+    pub fn to_text_with_format(&self, format: DeckExportFormat) -> String {
+        if matches!(format, DeckExportFormat::Csv | DeckExportFormat::Json) {
+            let entries: Vec<_> = self
+                .main
+                .iter()
+                .map(|(o, n)| (*o, *n, "main"))
+                .chain(self.side.iter().map(|(o, n)| (*o, *n, "sideboard")))
+                .chain(self.commander.map(|o| (o, 1, "commander")))
+                .collect();
+            if format == DeckExportFormat::Json {
+                let entries: Vec<_> = entries
+                    .iter()
+                    .map(|(o, n, section)| {
+                        serde_json::json!({
+                            "count": n, "name": self.name_of(*o), "section": section,
+                        })
+                    })
+                    .collect();
+                return serde_json::to_string_pretty(
+                    &serde_json::json!({"entries": entries, "profile": self.profile}),
+                )
+                .unwrap()
+                    + "\n";
+            }
+            let mut output = String::from("count,name,section\n");
+            for (o, n, section) in entries {
+                output.push_str(&format!(
+                    "{n},\"{}\",{section}\n",
+                    self.name_of(o).replace('"', "\"\"")
+                ));
+            }
+            return output;
+        }
         let line = |o: &u32, n: &u32| format!("{n} {}", self.name_of(*o));
+        let arch_line =
+            |o: &u32, n: &u32, category: &str| format!("{n} {} [{category}]", self.name_of(*o));
         let mut out: Vec<String> = Vec::new();
-        if let Some(c) = self.commander {
-            out.push("Commander".into());
-            out.push(line(&c, &1));
-            out.push(String::new());
-            out.push("Deck".into());
+
+        match format {
+            DeckExportFormat::Csv | DeckExportFormat::Json => {
+                unreachable!("structured export handled above")
+            }
+            DeckExportFormat::Plain => {
+                if let Some(c) = self.commander {
+                    out.push("Commander".into());
+                    out.push(line(&c, &1));
+                    out.push(String::new());
+                    out.push("Deck".into());
+                }
+                for (_, cards) in self.grouped() {
+                    out.extend(cards.iter().map(|(o, n)| line(o, n)));
+                }
+                if !self.side.is_empty() {
+                    out.push(String::new());
+                    out.push("Sideboard".into());
+                    out.extend(self.side.iter().map(|(o, n)| line(o, n)));
+                }
+            }
+            DeckExportFormat::Arena => {
+                out.push("Deck".into());
+                for (_, cards) in self.grouped() {
+                    out.extend(cards.iter().map(|(o, n)| line(o, n)));
+                }
+                if !self.side.is_empty() {
+                    out.push(String::new());
+                    out.push("Sideboard".into());
+                    out.extend(self.side.iter().map(|(o, n)| line(o, n)));
+                }
+                if let Some(c) = self.commander {
+                    out.push(String::new());
+                    out.push("Commander".into());
+                    out.push(line(&c, &1));
+                }
+            }
+            DeckExportFormat::Mtgo => {
+                if let Some(c) = self.commander {
+                    out.push("Commander".into());
+                    out.push(line(&c, &1));
+                    out.push(String::new());
+                    out.push("Deck".into());
+                }
+                for (_, cards) in self.grouped() {
+                    out.extend(cards.iter().map(|(o, n)| line(o, n)));
+                }
+                if !self.side.is_empty() {
+                    out.push(String::new());
+                    out.push("Sideboard".into());
+                    out.extend(self.side.iter().map(|(o, n)| line(o, n)));
+                }
+            }
+            DeckExportFormat::Moxfield => {
+                if let Some(c) = self.commander {
+                    out.push("Commander".into());
+                    out.push(line(&c, &1));
+                    out.push(String::new());
+                }
+                out.push("Deck".into());
+                for (_, cards) in self.grouped() {
+                    out.extend(cards.iter().map(|(o, n)| line(o, n)));
+                }
+                if !self.side.is_empty() {
+                    out.push(String::new());
+                    out.push("Sideboard".into());
+                    out.extend(self.side.iter().map(|(o, n)| line(o, n)));
+                }
+            }
+            DeckExportFormat::Archidekt => {
+                if let Some(c) = self.commander {
+                    out.push("Commander".into());
+                    out.push(arch_line(&c, &1, "Commander"));
+                    out.push(String::new());
+                }
+                out.push("Deck".into());
+                for (group, cards) in self.grouped() {
+                    out.extend(cards.iter().map(|(o, n)| arch_line(o, n, group.label())));
+                }
+                if !self.side.is_empty() {
+                    out.push(String::new());
+                    out.push("Sideboard".into());
+                    out.extend(self.side.iter().map(|(o, n)| arch_line(o, n, "Sideboard")));
+                }
+            }
         }
-        for (_, cards) in self.grouped() {
-            out.extend(cards.iter().map(|(o, n)| line(o, n)));
-        }
-        if !self.side.is_empty() {
-            out.push(String::new());
-            out.push("Sideboard".into());
-            out.extend(self.side.iter().map(|(o, n)| line(o, n)));
-        }
+
         out.join("\n") + "\n"
+    }
+
+    /// The default share text: plain sections that import round-trips exactly.
+    pub fn to_text(&self) -> String {
+        self.to_text_with_format(DeckExportFormat::Plain)
     }
 
     /// The deck in the portable form a match plays.
@@ -777,6 +1075,49 @@ pub enum BuilderAction {
     Saved,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SuggestionFocus {
+    #[default]
+    Balanced,
+    Synergy,
+    MissingRoles,
+    EarlyCurve,
+    Tournament,
+}
+
+impl SuggestionFocus {
+    const ALL: [Self; 5] = [
+        Self::Balanced,
+        Self::Synergy,
+        Self::MissingRoles,
+        Self::EarlyCurve,
+        Self::Tournament,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Balanced => "Balanced",
+            Self::Synergy => "Synergy",
+            Self::MissingRoles => "Missing roles",
+            Self::EarlyCurve => "Early curve",
+            Self::Tournament => "Tournament",
+        }
+    }
+}
+
+/// Exact sampling without replacement; used for an opening hand before mulligans.
+fn draw_probability(total: u64, successes: u64, draws: u64, hits: u64) -> f64 {
+    fn choose(n: u64, k: u64) -> f64 {
+        if k > n {
+            return 0.0;
+        }
+        (0..k.min(n - k)).fold(1.0, |value, i| value * (n - i) as f64 / (i + 1) as f64)
+    }
+    if draws > total || successes > total || hits > draws {
+        return 0.0;
+    }
+    choose(successes, hits) * choose(total - successes, draws - hits) / choose(total, draws)
+}
+
 /// The deck builder screen's state.
 pub struct Builder {
     pub draft: Draft,
@@ -799,6 +1140,18 @@ pub struct Builder {
     support: BTreeMap<u32, CardSupport>,
     printing_picker: Option<crate::printings::Picker>,
     large_cards: bool,
+    export_format: DeckExportFormat,
+    suggestions: Option<Result<Vec<SuggestedCard>, String>>,
+    suggestion_basis: Option<(DeckContents, Format, SuggestionFocus, i64)>,
+    suggestion_focus: SuggestionFocus,
+    synergy_tags: Vec<String>,
+    tournament_import: String,
+    tournament_list: String,
+    tournament_details: crate::tournaments::ImportDetails,
+    tournament_status: Option<Result<String, String>>,
+    tournament_benchmark: Option<crate::tournaments::Benchmark>,
+    tournament_url: String,
+    tournament_fetch: Option<crate::tournaments::mtgo::Fetch>,
 }
 
 impl Builder {
@@ -829,6 +1182,18 @@ impl Builder {
             support: BTreeMap::new(),
             printing_picker: None,
             large_cards: true,
+            export_format: DeckExportFormat::Plain,
+            suggestions: None,
+            suggestion_basis: None,
+            suggestion_focus: SuggestionFocus::default(),
+            synergy_tags: Vec::new(),
+            tournament_import: String::new(),
+            tournament_list: String::new(),
+            tournament_details: crate::tournaments::ImportDetails::default(),
+            tournament_status: None,
+            tournament_benchmark: None,
+            tournament_url: String::new(),
+            tournament_fetch: None,
         }
     }
 
@@ -923,6 +1288,7 @@ impl Builder {
             ui.radio_value(&mut self.format, Format::Commander, "Commander");
             if self.format != before {
                 self.problems = None;
+                self.suggestion_basis = None;
             }
             ui.separator();
             if ui
@@ -954,13 +1320,24 @@ impl Builder {
                     Err(error) => self.status = Some((error, false)),
                 }
             }
+            egui::ComboBox::from_id_salt("builder-export-format")
+                .selected_text(self.export_format.label())
+                .show_ui(ui, |ui| {
+                    for format in DeckExportFormat::ALL {
+                        ui.selectable_value(&mut self.export_format, format, format.label());
+                    }
+                });
             if ui
-                .add_enabled(self.draft.main_count() > 0, egui::Button::new("Copy list"))
-                .on_hover_text("copy the deck as text, to paste anywhere — or into Import")
+                .add_enabled(
+                    self.draft.main_count() > 0,
+                    egui::Button::new("Copy export"),
+                )
+                .on_hover_text("Copy the deck in the selected text, CSV, or JSON format")
                 .clicked()
             {
-                ui.ctx().copy_text(self.draft.to_text());
-                self.status = Some(("list copied".into(), true));
+                ui.ctx()
+                    .copy_text(self.draft.to_text_with_format(self.export_format));
+                self.status = Some((format!("{} list copied", self.export_format.label()), true));
             }
             if let Some((text, good)) = &self.status {
                 ui.label(RichText::new(text).color(if *good { GOOD } else { WARN }));
@@ -1290,8 +1667,323 @@ impl Builder {
             + u64::from(self.draft.commander == Some(oracle))
     }
 
+    fn refresh_suggestions(&mut self, store: &Store) {
+        let basis = (
+            self.draft.contents(),
+            self.format,
+            self.suggestion_focus,
+            crate::tournaments::today(),
+        );
+        if self.suggestion_basis.as_ref() == Some(&basis) {
+            return;
+        }
+        self.synergy_tags = self.synergy_tags_for_deck(8);
+        self.tournament_benchmark = None;
+        self.suggestions = Some(
+            if self.suggestion_focus == SuggestionFocus::Tournament
+                && self.format == Format::Constructed
+            {
+                crate::tournaments::report(store, &self.draft, crate::tournaments::today(), 10).map(
+                    |report| {
+                        let suggestions = tournament_suggestions(&report.picks);
+                        self.tournament_benchmark = Some(report.benchmark);
+                        suggestions
+                    },
+                )
+            } else {
+                self.suggest_cards(store, 10)
+            },
+        );
+        self.suggestion_basis = Some(basis);
+    }
+
+    fn synergy_tags_for_deck(&self, limit: usize) -> Vec<String> {
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        for oracle in self.draft.main.keys().copied().chain(self.draft.commander) {
+            if let Some(card) = self.draft.cards.get(&oracle) {
+                for token in synergy_tokens(&card.type_line) {
+                    *counts.entry(token).or_insert(0) += 2;
+                }
+                for token in synergy_tokens(&card.rules) {
+                    *counts.entry(token).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut ranked: Vec<(String, u32)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked
+            .into_iter()
+            .filter(|(_, score)| *score >= 2)
+            .take(limit)
+            .map(|(token, _)| token)
+            .collect()
+    }
+
+    fn suggest_cards(&self, store: &Store, limit: usize) -> Result<Vec<SuggestedCard>, String> {
+        if self.draft.main.is_empty() && self.draft.commander.is_none() {
+            return Ok(Vec::new());
+        }
+
+        if self.suggestion_focus == SuggestionFocus::Tournament {
+            if self.format != Format::Constructed {
+                return Err("Tournament suggestions currently support Modern. Commander data is kept separate.".into());
+            }
+            return crate::tournaments::report(
+                store,
+                &self.draft,
+                crate::tournaments::today(),
+                limit,
+            )
+            .map(|report| tournament_suggestions(&report.picks));
+        }
+
+        let colors = if self.format == Format::Commander {
+            self.draft
+                .commander
+                .and_then(|o| self.draft.cards.get(&o))
+                .map(|card| card.identity.clone())
+                .unwrap_or_else(|| self.draft.colors())
+        } else {
+            self.draft.colors()
+        };
+        let mut query = CardQuery {
+            legal_in: match self.format {
+                Format::Constructed => Some("modern".to_string()),
+                Format::Commander => Some("commander".to_string()),
+            },
+            ..CardQuery::default()
+        };
+        query.colors_within = Some(colors);
+        let tags = self.synergy_tags_for_deck(12);
+        let analysis = DeckAnalysis::of(&self.draft);
+        let mut searches: BTreeSet<String> = tags.iter().cloned().collect();
+        if analysis.draw == 0 && self.suggestion_focus != SuggestionFocus::Synergy {
+            searches.insert("draw".into());
+        }
+        if analysis.ramp == 0 && self.suggestion_focus != SuggestionFocus::Synergy {
+            searches.extend(["add".into(), "search land".into()]);
+        }
+        if analysis.interaction == 0 && self.suggestion_focus != SuggestionFocus::Synergy {
+            searches.extend([
+                "destroy target".into(),
+                "exile target".into(),
+                "counter target".into(),
+                "damage target".into(),
+                "return target".into(),
+            ]);
+        }
+        let mut candidates = BTreeMap::new();
+        // Search the themes across the database, rather than only its first page.
+        for search in &searches {
+            query.text = search.clone();
+            candidates.extend(
+                store
+                    .browse(&query, 200, 0)
+                    .map_err(|error| format!("Could not build suggestions: {error}"))?,
+            );
+        }
+        let curve = self.draft.curve();
+        let low_curve = curve.iter().skip(4).sum::<u64>() > curve.iter().take(3).sum::<u64>();
+        let mut existing = BTreeSet::new();
+        existing.extend(self.draft.main.keys().copied());
+        existing.extend(self.draft.side.keys().copied());
+        if let Some(commander) = self.draft.commander {
+            existing.insert(commander);
+        }
+
+        let mut picks = Vec::new();
+        for (oracle, name) in candidates {
+            if existing.contains(&oracle) {
+                continue;
+            }
+            let Some(card) = DraftCard::load(store, oracle) else {
+                continue;
+            };
+            let tokens: BTreeSet<_> =
+                synergy_tokens(&format!("{}\n{}", card.type_line, card.rules))
+                    .into_iter()
+                    .collect();
+            let mut matched = Vec::new();
+            let mut score = 0u32;
+            for tag in &tags {
+                if tokens.contains(tag) {
+                    matched.push(tag.clone());
+                    score += if self.suggestion_focus == SuggestionFocus::Synergy {
+                        4
+                    } else {
+                        2
+                    };
+                    if matched.len() >= 3 {
+                        break;
+                    }
+                }
+            }
+
+            if (low_curve || self.suggestion_focus == SuggestionFocus::EarlyCurve)
+                && card.mana_value <= 2
+                && !card.is_land()
+                && self.suggestion_focus != SuggestionFocus::Synergy
+            {
+                score += if self.suggestion_focus == SuggestionFocus::EarlyCurve {
+                    8
+                } else {
+                    2
+                };
+                matched.push("early curve".into());
+            }
+            let roles = CardRoles::of(&card);
+            for (missing, fits, role) in [
+                (analysis.draw == 0, roles.draw, "adds a draw option"),
+                (analysis.ramp == 0, roles.ramp, "adds a ramp option"),
+                (
+                    analysis.interaction == 0,
+                    roles.interaction,
+                    "adds an interaction option",
+                ),
+            ] {
+                if missing && fits && self.suggestion_focus != SuggestionFocus::Synergy {
+                    score += if self.suggestion_focus == SuggestionFocus::MissingRoles {
+                        8
+                    } else {
+                        3
+                    };
+                    matched.push(role.into());
+                }
+            }
+
+            if score == 0
+                || (self.suggestion_focus == SuggestionFocus::EarlyCurve
+                    && (card.is_land() || card.mana_value > 2))
+            {
+                continue;
+            }
+
+            let reason = matched.join(" · ");
+            picks.push(SuggestedCard {
+                oracle,
+                name,
+                reason,
+                score,
+                sources: Vec::new(),
+            });
+        }
+
+        picks.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+        picks.truncate(limit);
+        Ok(picks)
+    }
+
+    fn tournament_controls(&mut self, ui: &mut Ui, store: &Store) {
+        if let Some(result) = self
+            .tournament_fetch
+            .as_ref()
+            .and_then(|fetch| fetch.poll())
+        {
+            self.tournament_fetch = None;
+            self.tournament_status = Some(result.and_then(|json| {
+                crate::tournaments::import(store, &json, crate::tournaments::today())
+                    .map(|count| format!("Downloaded and cached {count} published MTGO lists."))
+            }));
+            if self.tournament_status.as_ref().is_some_and(Result::is_ok) {
+                self.suggestion_basis = None;
+            }
+        }
+        ui.collapsing("Download official MTGO results", |ui| {
+            ui.label("Leave blank for the latest five Modern Challenges, or enter a specific Modern event URL.");
+            ui.add(egui::TextEdit::singleline(&mut self.tournament_url).hint_text("https://www.mtgo.com/decklist/modern-…").desired_width(f32::INFINITY));
+            if self.tournament_fetch.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner(); ui.label("Downloading tournament lists…");
+                    if ui.button("Cancel download").clicked() { self.tournament_fetch = None; self.tournament_status = Some(Err("Download cancelled; cached results were retained.".into())); }
+                });
+            } else if ui.button("Download & update cache").clicked() {
+                self.tournament_status = None;
+                self.tournament_fetch = Some(crate::tournaments::mtgo::Fetch::start(ui.ctx().clone(), self.tournament_url.clone()));
+            }
+            ui.label(RichText::new("Published finishes are a selected sample. Missing cards or changed source data reject the batch and retain the existing cache.").small());
+        });
+        match crate::tournaments::count(store) {
+            Ok(count) => {
+                ui.label(format!("{count} locally cached tournament results"));
+            }
+            Err(error) => {
+                ui.label(RichText::new(error).color(WARN));
+            }
+        }
+        ui.label(RichText::new("Modern only · last 365 days · nonbasic-card similarity · 90-day recency half-life. Published finishes show adoption, not win rates.").small());
+        ui.collapsing("Import one tournament decklist", |ui| {
+            ui.label("Paste a published Modern list and its event details. A stable result id lets you update the same observation without duplicating it.");
+            egui::Grid::new("tournament-details").show(ui, |ui| {
+                for (label, value) in [
+                    ("Result id", &mut self.tournament_details.id),
+                    ("Event", &mut self.tournament_details.event),
+                    ("Date (YYYY-MM-DD)", &mut self.tournament_details.date),
+                    ("Source URL", &mut self.tournament_details.source_url),
+                    ("Placement (optional)", &mut self.tournament_details.placement),
+                ] { ui.label(label); ui.text_edit_singleline(value); ui.end_row(); }
+            });
+            ui.add(egui::TextEdit::multiline(&mut self.tournament_list).desired_rows(8).desired_width(f32::INFINITY).hint_text("4 Card name\n...\nSideboard\n2 Card name"));
+            if ui.add_enabled(!self.tournament_list.trim().is_empty(), egui::Button::new("Import decklist")).clicked() {
+                self.tournament_status = Some(crate::tournaments::import_list(store, &self.tournament_details, &self.tournament_list, crate::tournaments::today()).map(|_| "Tournament list imported.".into()));
+                if self.tournament_status.as_ref().is_some_and(Result::is_ok) { self.suggestion_basis = None; }
+            }
+        });
+        ui.collapsing("Import tournament JSON batch", |ui| {
+            ui.label("Paste a JSON array or drop a UTF-8 JSON file here. Imports merge by result id; matching ids update existing results. Unknown cards reject the whole batch.");
+            let dropped = ui.ctx().input(|input| input.raw.dropped_files.clone());
+            if !dropped.is_empty() {
+                let result = if dropped.len() == 1 { crate::app::read_deck_file(dropped[0].as_ref()) } else { Err("Drop one tournament file at a time.".into()) };
+                match result {
+                    Ok(text) => { self.tournament_import = text; self.tournament_status = None; }
+                    Err(error) => self.tournament_status = Some(Err(error)),
+                }
+            }
+            ui.add(egui::TextEdit::multiline(&mut self.tournament_import).desired_rows(6).desired_width(f32::INFINITY).hint_text("JSON tournament records; see docs/tournament-data.md"));
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!self.tournament_import.trim().is_empty(), egui::Button::new("Import results")).clicked() {
+                    self.tournament_status = Some(crate::tournaments::import(store, &self.tournament_import, crate::tournaments::today()).map(|count| format!("Imported {count} results.")));
+                    if self.tournament_status.as_ref().is_some_and(Result::is_ok) { self.suggestion_basis = None; }
+                }
+                if ui.button("Copy JSON template").clicked() { ui.ctx().copy_text(crate::tournaments::TEMPLATE.to_owned()); }
+                if ui.button("Refresh suggestions").clicked() { self.suggestion_basis = None; }
+            });
+
+        });
+        if let Some(status) = &self.tournament_status {
+            match status {
+                Ok(message) => {
+                    ui.label(RichText::new(message).color(GOOD));
+                }
+                Err(message) => {
+                    ui.label(RichText::new(message).color(WARN));
+                }
+            }
+        }
+    }
+
     /// The deck half: counts, curve, legality, and the list itself.
     pub fn deck(&mut self, ui: &mut Ui, store: &Store, art: &mut CardArt) {
+        egui::ScrollArea::vertical()
+            .id_salt("builder-sidebar")
+            .show(ui, |ui| self.deck_contents(ui, store, art));
+    }
+
+    fn deck_contents(&mut self, ui: &mut Ui, store: &Store, art: &mut CardArt) {
+        ui.horizontal(|ui| {
+            ui.label("Suggestion focus");
+            egui::ComboBox::from_id_salt("suggestion-focus")
+                .selected_text(self.suggestion_focus.label())
+                .show_ui(ui, |ui| {
+                    for focus in SuggestionFocus::ALL {
+                        ui.selectable_value(&mut self.suggestion_focus, focus, focus.label());
+                    }
+                });
+        });
+        if self.suggestion_focus == SuggestionFocus::Tournament {
+            self.tournament_controls(ui, store);
+        }
+        self.refresh_suggestions(store);
         let mut ids: Vec<u32> = self
             .draft
             .main
@@ -1333,13 +2025,83 @@ impl Builder {
                 .small(),
             );
         });
+        ui.label(
+            RichText::new(self.draft.profile.summary(self.format == Format::Commander)).small(),
+        );
+        if !self.draft.profile.rule_zero.trim().is_empty() {
+            let notes = self.draft.profile.rule_zero.trim();
+            let preview: String = notes.chars().take(120).collect();
+            ui.label(
+                RichText::new(format!(
+                    "Rule 0: {preview}{}",
+                    if notes.chars().count() > 120 {
+                        "…"
+                    } else {
+                        ""
+                    }
+                ))
+                .small(),
+            );
+        }
+        ui.collapsing("Power, competitiveness & Rule 0", |ui| {
+            let mut profile = self.draft.profile.clone();
+            profile.edit(ui, self.format == Format::Commander, &self.draft.name);
+            if let Err(error) = self.draft.set_profile(profile) {
+                ui.label(RichText::new(error).color(WARN));
+            }
+        });
         ui.add_space(8.0);
         ui.label(
             RichText::new("MANA CURVE")
                 .size(10.0)
                 .color(crate::theme::MUTED),
         );
-        curve_chart(ui, &self.draft.curve());
+        let analysis = DeckAnalysis::of(&self.draft);
+        curve_chart(ui, &analysis.creature_curve, &analysis.other_curve);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Creatures").color(GOOD).small());
+            ui.label(RichText::new("Other spells").color(ACCENT).small());
+        });
+        ui.collapsing("Deck analysis", |ui| {
+            ui.label(format!("{} lands · {:.1} average spell mana value", analysis.lands,
+                analysis.total_mana as f64 / analysis.spells.max(1) as f64));
+            let cheap: u64 = analysis.creature_curve.iter().take(3).chain(analysis.other_curve.iter().take(3)).sum();
+            ui.label(format!("{cheap} spells cost two or less ({:.1}% of spells)", cheap as f64 / analysis.spells.max(1) as f64 * 100.0));
+            if analysis.unknown > 0 {
+                ui.label(RichText::new(format!("{} copies have missing card details; analysis is incomplete.", analysis.unknown)).color(WARN));
+            }
+            if self.draft.main_count() >= 7 && analysis.unknown == 0 {
+                let total = self.draft.main_count();
+                let two_to_four: f64 = (2..=4).map(|hits| draw_probability(total, analysis.lands, 7, hits)).sum();
+                ui.label(format!("Opening seven: {:.1}% chance of 2–4 lands · {:.1}% chance of no lands", two_to_four * 100.0, draw_probability(total, analysis.lands, 7, 0) * 100.0));
+                ui.label(RichText::new("Before mulligans, with a uniform shuffle of the current main deck.").small().color(crate::theme::MUTED));
+            }
+            ui.label(format!("Likely roles: {} draw · {} ramp · {} interaction", analysis.draw, analysis.ramp, analysis.interaction));
+            if let Some(benchmark) = &self.tournament_benchmark && benchmark.samples > 0 {
+                ui.label(format!("{} similar tournament lists average {:.1} lands and {:.1} spell mana value", benchmark.samples, benchmark.lands, benchmark.average_mana));
+                egui::Grid::new("tournament-curve-comparison").show(ui, |ui| {
+                    ui.label("Mana value"); ui.label("Your spells"); ui.label("Similar-list average"); ui.end_row();
+                    for (index, reference) in benchmark.curve.iter().enumerate() {
+                        ui.label(if index == 7 { "7+".to_owned() } else { index.to_string() });
+                        ui.label((analysis.creature_curve[index] + analysis.other_curve[index]).to_string());
+                        ui.label(format!("{reference:.1}")); ui.end_row();
+                    }
+                });
+            }
+            ui.label(RichText::new("Roles are estimated from rules text. Land sources include conditional abilities; hybrid symbols count toward each possible color.").small().color(crate::theme::MUTED));
+            for (index, color) in ['W', 'U', 'B', 'R', 'G'].iter().enumerate() {
+                if analysis.demand[index] > 0 || analysis.sources[index] > 0 {
+                    ui.label(format!("{color}: {} cost symbols · {} potential land sources", analysis.demand[index], analysis.sources[index]));
+                    if self.draft.main_count() >= 7 && analysis.unknown == 0 {
+                        let probability = 1.0 - draw_probability(self.draft.main_count(), analysis.sources[index], 7, 0);
+                        ui.label(RichText::new(format!("{:.1}% chance of at least one potential {color} land source in the opening seven", probability * 100.0)).small());
+                    }
+                    if analysis.demand[index] > 0 && analysis.sources[index] == 0 {
+                        ui.label(RichText::new(format!("No identified {color} land sources.")).color(WARN));
+                    }
+                }
+            }
+        });
         if !ids.is_empty() {
             let ready = ids.iter().filter(|id| self.support[id].ready()).count();
             ui.label(
@@ -1361,6 +2123,95 @@ impl Builder {
                     }
                 });
             }
+        }
+
+        if !self.synergy_tags.is_empty() {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("SYNERGY SIGNALS")
+                    .size(10.0)
+                    .color(crate::theme::MUTED),
+            );
+            ui.label(
+                RichText::new(self.synergy_tags.join("  ·  "))
+                    .small()
+                    .color(crate::theme::MUTED),
+            );
+        }
+
+        let suggested = self
+            .suggestions
+            .as_ref()
+            .and_then(|result| result.as_ref().ok().cloned());
+        let suggestion_error = self
+            .suggestions
+            .as_ref()
+            .and_then(|result| result.as_ref().err().cloned());
+        match suggested {
+            Some(suggestions) if !suggestions.is_empty() => {
+                ui.add_space(6.0);
+                ui.collapsing("Suggested adds", |ui| {
+                    for suggestion in suggestions.iter().take(6) {
+                        ui.horizontal(|ui| {
+                            self.sidebar_card(
+                                ui,
+                                store,
+                                art,
+                                suggestion.oracle,
+                                &suggestion.name,
+                                self.count_of(suggestion.oracle),
+                            );
+                            ui.vertical(|ui| {
+                                let name = ui.add(
+                                    egui::Label::new(RichText::new(&suggestion.name).strong())
+                                        .sense(egui::Sense::click()),
+                                );
+                                let name = self.hover_card(name, store, art, suggestion.oracle);
+                                if name.clicked() {
+                                    widgets::enlarge_printing(
+                                        ui.ctx(),
+                                        &suggestion.name,
+                                        self.draft
+                                            .printings
+                                            .get(&suggestion.oracle)
+                                            .map(String::as_str),
+                                    );
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.small_button("+ Add").clicked() {
+                                        self.draft.add(store, suggestion.oracle, false);
+                                        self.problems = None;
+                                        self.suggestion_basis = None;
+                                    }
+                                    if ui.small_button("+ Side").clicked() {
+                                        self.draft.add(store, suggestion.oracle, true);
+                                        self.problems = None;
+                                        self.suggestion_basis = None;
+                                    }
+                                });
+                            });
+                        });
+                        ui.label(
+                            RichText::new(&suggestion.reason)
+                                .small()
+                                .color(crate::theme::MUTED),
+                        );
+                        for (event, url) in &suggestion.sources {
+                            ui.hyperlink_to(event, url);
+                        }
+                    }
+                });
+            }
+            _ if suggestion_error.is_some() => {
+                let error = suggestion_error
+                    .as_deref()
+                    .unwrap_or("unknown suggestion error");
+                ui.label(RichText::new(error).small().color(WARN));
+            }
+            _ if self.suggestion_focus == SuggestionFocus::Tournament => {
+                ui.label("No tournament additions found. Import recent Modern results and add nonbasic cards to find similar lists; current copy counts may already match the evidence.");
+            }
+            _ => {}
         }
 
         // Legality, recomputed when the deck changes.
@@ -1388,13 +2239,23 @@ impl Builder {
         ui.separator();
 
         let mut changed = false;
-        egui::ScrollArea::vertical().id_salt("deck").show(ui, |ui| {
+        ui.scope(|ui| {
             if let Some(commander) = self.draft.commander {
                 ui.label(RichText::new("Commander").strong());
                 let name = self.draft.name_of(commander).to_string();
                 ui.horizontal(|ui| {
-                    let r = ui.label(RichText::new(&name).color(ACCENT).strong());
-                    self.hover_card(r, store, art, commander);
+                    self.sidebar_card(ui, store, art, commander, &name, 1);
+                    let r = ui.add(
+                        egui::Label::new(RichText::new(&name).color(ACCENT).strong())
+                            .sense(egui::Sense::click()),
+                    );
+                    if self.hover_card(r, store, art, commander).clicked() {
+                        widgets::enlarge_printing(
+                            ui.ctx(),
+                            &name,
+                            self.draft.printings.get(&commander).map(String::as_str),
+                        );
+                    }
                     if ui.small_button("✖").on_hover_text("no commander").clicked() {
                         self.draft.set_commander(store, None);
                         changed = true;
@@ -1436,6 +2297,7 @@ impl Builder {
         });
         if changed {
             self.problems = None;
+            self.suggestion_basis = None;
         }
 
         self.sample_window(ui, art);
@@ -1453,7 +2315,9 @@ impl Builder {
         side: bool,
     ) -> bool {
         let mut changed = false;
+        let name = self.draft.name_of(oracle).to_string();
         ui.horizontal(|ui| {
+            self.sidebar_card(ui, store, art, oracle, &name, u64::from(n));
             if ui
                 .small_button("−")
                 .on_hover_text("Remove one copy")
@@ -1471,11 +2335,18 @@ impl Builder {
             let name_width = (ui.available_width() - 115.0).max(60.0);
             let response = ui.add_sized(
                 Vec2::new(name_width, ui.text_style_height(&egui::TextStyle::Body)),
-                egui::Label::new(name)
+                egui::Label::new(&name)
                     .truncate()
                     .sense(egui::Sense::click()),
             );
             let response = self.hover_card(response, store, art, oracle);
+            if response.clicked() {
+                widgets::enlarge_printing(
+                    ui.ctx(),
+                    &name,
+                    self.draft.printings.get(&oracle).map(String::as_str),
+                );
+            }
             if self.support.get(&oracle).is_some_and(|s| !s.ready()) {
                 ui.label(RichText::new("!").color(WARN))
                     .on_hover_ui(|ui| self.support[&oracle].explain(ui));
@@ -1521,6 +2392,32 @@ impl Builder {
             }
         });
         changed
+    }
+
+    fn sidebar_card(
+        &self,
+        ui: &mut Ui,
+        store: &Store,
+        art: &mut CardArt,
+        oracle: u32,
+        name: &str,
+        count: u64,
+    ) -> egui::Response {
+        let printing = self.draft.printings.get(&oracle).map(String::as_str);
+        let artwork = printing.map_or_else(|| name.to_owned(), |id| format!("scryfall:{id}"));
+        let response = card_tile_with_art(
+            ui,
+            art,
+            name,
+            &artwork,
+            Vec2::new(64.0, 64.0 * 680.0 / 488.0),
+            count,
+        );
+        let response = self.hover_card(response, store, art, oracle);
+        if response.clicked() {
+            widgets::enlarge_printing(ui.ctx(), name, printing);
+        }
+        response
     }
 
     fn hover_card(
@@ -1768,6 +2665,9 @@ fn card_tile_with_art(
     count: u64,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
     let painter = ui.painter();
     painter.rect_filled(
         rect.translate(Vec2::new(2.0, 4.0)),
@@ -1791,11 +2691,13 @@ fn card_tile_with_art(
                 Color32::WHITE,
                 rect.width() - 12.0,
             );
-            painter.galley(
-                rect.left_top() + Vec2::new(6.0, 8.0),
-                galley,
-                Color32::WHITE,
-            );
+            painter
+                .with_clip_rect(rect.intersect(ui.clip_rect()))
+                .galley(
+                    rect.left_top() + Vec2::new(6.0, 8.0),
+                    galley,
+                    Color32::WHITE,
+                );
         }
     }
     painter.rect_stroke(
@@ -1857,7 +2759,8 @@ fn card_preview_printing(ui: &mut Ui, art: &mut CardArt, card: &DraftCard, print
 }
 
 /// The mana curve as bars: 0 to 6, then 7+.
-fn curve_chart(ui: &mut Ui, curve: &[u64; 8]) {
+fn curve_chart(ui: &mut Ui, creatures: &[u64; 8], other: &[u64; 8]) {
+    let curve: [u64; 8] = std::array::from_fn(|i| creatures[i] + other[i]);
     let max = (*curve.iter().max().unwrap_or(&0)).max(1) as f32;
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().min(320.0), 70.0),
@@ -1872,7 +2775,37 @@ fn curve_chart(ui: &mut Ui, curve: &[u64; 8]) {
             egui::pos2(x + 4.0, rect.bottom() - 14.0 - h),
             egui::pos2(x + slot - 4.0, rect.bottom() - 14.0),
         );
-        painter.rect_filled(bar, 2.0, ACCENT);
+        let creature_height = creatures[i] as f32 / max * (rect.height() - 28.0);
+        let split = bar.bottom() - creature_height;
+        painter.rect_filled(
+            egui::Rect::from_min_max(bar.min, egui::pos2(bar.right(), split)),
+            1.0,
+            ACCENT,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(bar.left(), split), bar.max),
+            1.0,
+            GOOD,
+        );
+        ui.interact(
+            egui::Rect::from_min_max(
+                egui::pos2(x, rect.top()),
+                egui::pos2(x + slot, rect.bottom()),
+            ),
+            ui.id().with(("mana-curve", i)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(format!(
+            "Mana value {}: {} creatures, {} other spells ({} total)",
+            if i == 7 {
+                "7+".to_owned()
+            } else {
+                i.to_string()
+            },
+            creatures[i],
+            other[i],
+            n
+        ));
         let label = if i == 7 {
             "7+".to_string()
         } else {
@@ -1895,6 +2828,90 @@ fn curve_chart(ui: &mut Ui, curve: &[u64; 8]) {
             );
         }
     }
+}
+
+fn synergy_tokens(text: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "this",
+        "that",
+        "with",
+        "from",
+        "your",
+        "card",
+        "cards",
+        "target",
+        "spell",
+        "casts",
+        "cast",
+        "when",
+        "whenever",
+        "each",
+        "you",
+        "until",
+        "end",
+        "turn",
+        "then",
+        "choose",
+        "where",
+        "would",
+        "onto",
+        "into",
+        "under",
+        "over",
+        "among",
+        "activate",
+        "activated",
+        "ability",
+        "abilities",
+        "creature",
+        "creatures",
+        "battlefield",
+        "control",
+        "controls",
+        "owner",
+        "owners",
+        "only",
+        "another",
+        "have",
+        "has",
+        "their",
+        "them",
+        "does",
+        "step",
+        "beginning",
+        "combat",
+        "this",
+        "permanent",
+        "permanents",
+        "not",
+        "can",
+        "may",
+    ];
+
+    let mut out = Vec::new();
+    for raw in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if raw.len() < 3 {
+            continue;
+        }
+        let token = raw.to_ascii_lowercase();
+        let token = match token.as_str() {
+            "artifacts" => "artifact",
+            "tokens" => "token",
+            "counters" => "counter",
+            "elves" => "elf",
+            "goblins" => "goblin",
+            "treasures" => "treasure",
+            "lands" => "land",
+            "enchantments" => "enchantment",
+            "zombies" => "zombie",
+            _ => &token,
+        }
+        .to_owned();
+        if !STOP.contains(&token.as_str()) && !out.contains(&token) {
+            out.push(token);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1968,6 +2985,161 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing label: {label}"))
         };
         assert!(text_rect("Rules incomplete").top() > text_rect("Printing").bottom());
+    }
+
+    #[test]
+    fn narrow_large_sidebars_keep_controls_inside_and_scroll_to_last_card() {
+        for width in [280.0, 400.0] {
+            let (store, [_, bear, _]) = store();
+            let ctx = egui::Context::default();
+            let mut art = CardArt::start(
+                ctx.clone(),
+                crate::art::ArtConfig {
+                    names: Default::default(),
+                    db: None,
+                    cache_dir: std::env::temp_dir().join("mtgo-sidebar-layout-test"),
+                },
+            );
+            let mut draft = Draft::new("Large sidebar");
+            for index in 0..100 {
+                let mut card = store.card(bear).unwrap().unwrap();
+                let name = if index == 99 {
+                    "ZZZ last card".to_owned()
+                } else {
+                    format!("Layout creature {index:03} with a very long name")
+                };
+                card.oracle_uuid = format!("layout-{index}");
+                card.name = name.clone();
+                card.faces[0].name = name;
+                let id = store.put_card(&card, &[]).unwrap();
+                draft.add(&store, id, false);
+            }
+            let mut builder = Builder::new(draft);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(width, 640.0));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| builder.deck(ui, &store, &mut art),
+            );
+            for shape in &output.shapes {
+                if let egui::epaint::Shape::Text(text) = &shape.shape {
+                    let bounds = text.galley.rect.translate(text.pos.to_vec2());
+                    if ["+", "−", "Art"].contains(&text.galley.text())
+                        && bounds.top() >= 0.0
+                        && bounds.bottom() <= screen.bottom()
+                    {
+                        assert!(
+                            bounds.left() >= 0.0 && bounds.right() <= width,
+                            "control outside {width}-point sidebar: {bounds:?}"
+                        );
+                    }
+                }
+            }
+            output.textures_delta.clear();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![
+                    egui::Event::PointerMoved(screen.center()),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        delta: Vec2::new(0.0, -20000.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| builder.deck(ui, &store, &mut art));
+            output.textures_delta.clear();
+            // Smooth scrolling can consume several frames before reaching its destination.
+            for _ in 0..30 {
+                output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        predicted_dt: 0.1,
+                        ..Default::default()
+                    },
+                    |ui| builder.deck(ui, &store, &mut art),
+                );
+                output.textures_delta.clear();
+            }
+            assert!(
+                output.shapes.iter().any(|shape| {
+                    if let egui::epaint::Shape::Text(text) = &shape.shape {
+                        text.galley.text().starts_with("ZZZ")
+                            && shape
+                                .clip_rect
+                                .intersects(text.galley.rect.translate(text.pos.to_vec2()))
+                    } else {
+                        false
+                    }
+                }),
+                "last card was unreachable in {width}-point sidebar"
+            );
+            assert_eq!(builder.draft.main_count(), 100);
+        }
+    }
+
+    #[test]
+    fn sidebar_thumbnail_click_inspects_without_adding_a_card() {
+        let (store, [_, bear, _]) = store();
+        let ctx = egui::Context::default();
+        let mut art = CardArt::start(
+            ctx.clone(),
+            crate::art::ArtConfig {
+                names: Default::default(),
+                db: None,
+                cache_dir: std::env::temp_dir().join("mtgo-sidebar-inspection-test"),
+            },
+        );
+        let mut draft = Draft::new("Inspection");
+        draft.add(&store, bear, false);
+        let builder = Builder::new(draft);
+        let name = builder.draft.name_of(bear).to_owned();
+        let mut rect = egui::Rect::NOTHING;
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            rect = builder
+                .sidebar_card(ui, &store, &mut art, bear, &name, 1)
+                .rect;
+        });
+        output.textures_delta.clear();
+        assert!((rect.width() - 64.0).abs() < 0.1);
+        let pos = rect.center();
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            builder.sidebar_card(ui, &store, &mut art, bear, &name, 1);
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            ctx.data(|data| data.get_temp::<String>(egui::Id::new("enlarged-card"))),
+            Some(name.clone())
+        );
+        assert_eq!(builder.draft.main_count(), 1);
+        // The same popup keeps the selected printing when supplied by a sidebar entry.
+        widgets::enlarge_printing(&ctx, &name, Some("selected-printing"));
+        assert_eq!(
+            ctx.data(|data| data.get_temp::<String>(egui::Id::new("enlarged-card"))),
+            Some("scryfall:selected-printing".into())
+        );
     }
 
     #[test]
@@ -2702,6 +3874,121 @@ mod tests {
     }
 
     #[test]
+    fn exports_for_major_tools_import_back_the_same() {
+        let (mut store, [land, bear, idea]) = store();
+        let mut d = Draft::new("Export matrix");
+        for _ in 0..3 {
+            d.add(&store, bear, false);
+        }
+        d.add(&store, land, false);
+        d.add(&store, idea, true);
+        d.set_commander(&store, Some(bear));
+
+        for (id, name) in [
+            (land, "Quiet Field"),
+            (bear, "Stone Bear"),
+            (idea, "Big Idea"),
+        ] {
+            let card = store.card(id).unwrap().unwrap();
+            store
+                .put_card(&card, &[mtg_deck::resolve::normalise(name)])
+                .unwrap();
+        }
+
+        for format in DeckExportFormat::ALL {
+            let text = d.to_text_with_format(format);
+            crate::decks::import_deck(
+                &mut store,
+                format!("Roundtrip {}", format.label()).as_str(),
+                &text,
+            )
+            .unwrap();
+            let id = store
+                .deck_list()
+                .unwrap()
+                .into_iter()
+                .find(|(_, n)| n == &format!("Roundtrip {}", format.label()))
+                .unwrap()
+                .0;
+            let loaded = Draft::load(&store, id).unwrap();
+            assert_eq!(loaded.main, d.main, "{} main", format.label());
+            assert_eq!(loaded.side, d.side, "{} side", format.label());
+            assert_eq!(
+                loaded.commander,
+                d.commander,
+                "{} commander",
+                format.label()
+            );
+        }
+    }
+
+    #[test]
+    fn synergy_tokens_drop_short_and_common_words() {
+        let tags =
+            synergy_tokens("Whenever you cast an Artifact spell, draw cards and create Treasure.");
+        assert!(tags.contains(&"artifact".to_string()));
+        assert!(tags.contains(&"treasure".to_string()));
+        assert!(!tags.contains(&"spell".to_string()));
+        assert!(!tags.contains(&"you".to_string()));
+    }
+
+    #[test]
+    fn deck_profile_survives_history_save_rename_and_legacy_save_paths() {
+        use crate::deck_profile::{Competitiveness, DeckProfile, Disclosure};
+        let (mut store, [_, bear, _]) = store();
+        let mut draft = Draft::new("Profile");
+        draft.add(&store, bear, false);
+        draft.save(&mut store).unwrap();
+        let profile = DeckProfile {
+            power_level: Some(7),
+            commander_bracket: Some(3),
+            competitiveness: Competitiveness::Focused,
+            infinite_combos: Disclosure::Included,
+            rule_zero: "Proxies welcome.".into(),
+            ..Default::default()
+        };
+        draft.set_profile(profile.clone()).unwrap();
+        assert!(draft.dirty);
+        assert!(draft.undo());
+        assert_eq!(draft.profile, DeckProfile::default());
+        assert!(!draft.dirty);
+        assert!(draft.redo());
+        assert_eq!(draft.profile, profile);
+        store.put_deck("Other", None, &[]).unwrap();
+        draft.name = "Renamed profile".into();
+        let id = draft.save(&mut store).unwrap();
+        let loaded = Draft::load(&store, id).unwrap();
+        assert_eq!(loaded.profile, profile);
+        assert!(!loaded.dirty);
+        let entries = store.deck(id).unwrap().unwrap().entries;
+        let id = store
+            .put_deck_replacing(Some(id), "Legacy save", None, &entries)
+            .unwrap();
+        assert_eq!(Draft::load(&store, id).unwrap().profile, profile);
+        let invalid = DeckProfile {
+            power_level: Some(11),
+            ..Default::default()
+        };
+        assert!(draft.set_profile(invalid).is_err());
+        assert_eq!(draft.profile, profile);
+        let exported = draft.to_text_with_format(DeckExportFormat::Json);
+        crate::decks::import_deck(&mut store, "Portable profile", &exported).unwrap();
+        let portable = store
+            .deck_list()
+            .unwrap()
+            .into_iter()
+            .find(|(_, name)| name == "Portable profile")
+            .unwrap();
+        assert_eq!(Draft::load(&store, portable.0).unwrap().profile, profile);
+        let mut bad: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        bad["profile"]["power_level"] = serde_json::json!(11);
+        assert!(
+            crate::decks::import_deck(&mut store, "Portable profile", &bad.to_string()).is_err()
+        );
+        assert_eq!(Draft::load(&store, portable.0).unwrap().profile, profile);
+    }
+
+    #[test]
     fn selected_printings_survive_save_rename_history_and_portable_decks() {
         let (mut store, [land, bear, _]) = store();
         let mut draft = Draft::new("Artwork");
@@ -2831,5 +4118,204 @@ mod tests {
         assert_eq!(shown.cost, "{1}{U}{2}{R}");
         assert!(shown.type_line.contains("Instant"));
         assert!(shown.type_line.contains("Sorcery"));
+    }
+}
+
+#[cfg(test)]
+mod suggestion_regressions {
+    use super::*;
+
+    #[test]
+    fn opening_land_probabilities_match_small_exact_samples() {
+        assert!((draw_probability(4, 2, 2, 0) - 1.0 / 6.0).abs() < 1e-12);
+        assert!((draw_probability(4, 2, 2, 1) - 4.0 / 6.0).abs() < 1e-12);
+        assert!((draw_probability(4, 2, 2, 2) - 1.0 / 6.0).abs() < 1e-12);
+        assert_eq!(draw_probability(60, 0, 7, 0), 1.0);
+        assert_eq!(draw_probability(60, 60, 7, 7), 1.0);
+        assert_eq!(draw_probability(6, 3, 7, 3), 0.0);
+        let sum: f64 = (0..=7).map(|hits| draw_probability(99, 37, 7, hits)).sum();
+        assert!((sum - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn analysis_weights_main_deck_and_reports_hybrid_demand() {
+        let mut draft = Draft::new("Analysis");
+        draft.cards.insert(
+            1,
+            DraftCard {
+                oracle: 1,
+                name: "Forest".into(),
+                type_line: "Basic Land — Forest".into(),
+                rules: String::new(),
+                cost: String::new(),
+                mana_value: 0,
+                identity: "G".into(),
+            },
+        );
+        draft.cards.insert(
+            2,
+            DraftCard {
+                oracle: 2,
+                name: "Spell".into(),
+                type_line: "Instant".into(),
+                rules: "Draw a card. Destroy target artifact.".into(),
+                cost: "{2}{G/U}".into(),
+                mana_value: 3,
+                identity: "GU".into(),
+            },
+        );
+        draft.main.insert(1, 8);
+        draft.main.insert(2, 4);
+        draft.side.insert(2, 10);
+        draft.commander = Some(2);
+        let analysis = DeckAnalysis::of(&draft);
+        assert_eq!(
+            (analysis.lands, analysis.spells, analysis.total_mana),
+            (8, 4, 12)
+        );
+        assert_eq!(
+            (analysis.draw, analysis.ramp, analysis.interaction),
+            (4, 0, 4)
+        );
+        assert_eq!(analysis.demand, [0, 4, 0, 0, 4]);
+        assert_eq!(analysis.sources, [0, 0, 0, 0, 8]);
+        assert_eq!(analysis.other_curve[3], 4);
+        assert_eq!(analysis.creature_curve.iter().sum::<u64>(), 0);
+        draft.cards.get_mut(&2).unwrap().type_line = "Artifact Creature".into();
+        let analysis = DeckAnalysis::of(&draft);
+        assert_eq!(analysis.creature_curve[3], 4);
+        assert_eq!(analysis.other_curve.iter().sum::<u64>(), 0);
+    }
+
+    use mtg_store::{FaceRow, StoredCard};
+    #[test]
+    fn suggestions_find_synergies_beyond_the_first_alphabetical_page() {
+        let store = Store::in_memory().unwrap();
+        let add = |name: &str, ty: &str, rules: &str, identity: &str| {
+            let id = store
+                .put_card(
+                    &StoredCard {
+                        oracle_uuid: name.into(),
+                        name: name.into(),
+                        layout: "normal".into(),
+                        faces: vec![FaceRow {
+                            name: name.into(),
+                            type_line: ty.into(),
+                            oracle_text: Some(rules.into()),
+                            ..Default::default()
+                        }],
+                    },
+                    &[],
+                )
+                .unwrap();
+            store.set_legal_in(id, &["commander", "modern"]).unwrap();
+            store.set_color_identity(id, identity).unwrap();
+            id
+        };
+        for i in 0..310 {
+            add(
+                &format!("A filler {i:03}"),
+                "Instant",
+                "You gain 2 life.",
+                "",
+            );
+        }
+        let commander = add(
+            "Commander",
+            "Legendary Creature — Elf",
+            "Whenever an artifact enters, draw a card.",
+            "G",
+        );
+        let good = add(
+            "Z synergistic",
+            "Artifact",
+            "Whenever an artifact enters, draw a card.",
+            "G",
+        );
+        let wrong = add(
+            "Z off color",
+            "Artifact",
+            "Whenever an artifact enters, draw a card.",
+            "U",
+        );
+        let ramp = add("Z mana option", "Artifact", "{T}: Add {G}.", "G");
+        let interaction = add(
+            "Z removal option",
+            "Instant",
+            "Destroy target creature.",
+            "G",
+        );
+        let mut draft = Draft::new("Synergies");
+        draft.set_commander(&store, Some(commander));
+        // An illegal card already in the draft must not expand commander identity.
+        draft.add(&store, wrong, false);
+        let mut builder = Builder::new(draft);
+        let suggestions = builder.suggest_cards(&store, 10).unwrap();
+        assert!(suggestions.iter().any(|s| s.oracle == good));
+        assert!(!suggestions.iter().any(|s| s.oracle == wrong));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.oracle == ramp && s.reason.contains("ramp option"))
+        );
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.oracle == interaction && s.reason.contains("interaction option"))
+        );
+        builder.suggestion_focus = SuggestionFocus::Synergy;
+        assert!(
+            builder
+                .suggest_cards(&store, 10)
+                .unwrap()
+                .iter()
+                .all(|s| !s.reason.contains("option"))
+        );
+        builder.suggestion_focus = SuggestionFocus::MissingRoles;
+        let focused = builder.suggest_cards(&store, 10).unwrap();
+        assert!(focused.first().unwrap().reason.contains("option"));
+        builder.suggestion_focus = SuggestionFocus::EarlyCurve;
+        let focused = builder.suggest_cards(&store, 10).unwrap();
+        assert!(!focused.is_empty());
+        assert!(focused.iter().all(|s| s.reason.contains("early curve")));
+        builder.suggestion_focus = SuggestionFocus::Balanced;
+        let event_date: String = store
+            .conn()
+            .query_row("SELECT date('now')", [], |row| row.get(0))
+            .unwrap();
+        crate::tournaments::import(
+            &store,
+            &serde_json::json!([{
+                "id": "integration/one", "event": "Integration event", "date": event_date,
+                "format": "modern", "source_url": "https://example.com/integration",
+                "main": [{"name": "Z off color", "count": 4}, {"name": "Z synergistic", "count": 4}]
+            }])
+            .to_string(),
+            crate::tournaments::today(),
+        )
+        .unwrap();
+        builder.suggestion_focus = SuggestionFocus::Tournament;
+        assert!(
+            builder
+                .suggest_cards(&store, 10)
+                .unwrap_err()
+                .contains("Modern")
+        );
+        builder.format = Format::Constructed;
+        let suggested = builder.suggest_cards(&store, 10).unwrap();
+        let suggestion = suggested.iter().find(|s| s.oracle == good).unwrap();
+        assert_eq!(suggestion.sources[0].0, "Integration event");
+        assert!(suggestion.reason.contains("adoption, not win rate"));
+        builder.suggestion_focus = SuggestionFocus::Balanced;
+        builder.format = Format::Commander;
+        builder.draft.add(&store, ramp, false);
+        builder.draft.add(&store, interaction, false);
+        let suggestions = builder.suggest_cards(&store, 10).unwrap();
+        assert!(
+            suggestions
+                .iter()
+                .all(|s| !s.reason.contains("ramp option")
+                    && !s.reason.contains("interaction option"))
+        );
     }
 }

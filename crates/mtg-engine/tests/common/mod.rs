@@ -488,6 +488,7 @@ impl Default for TestCards {
                     }],
                     Effect::CounterSpell {
                         what: Selector::Target { index: 0 },
+                        exile: false,
                     },
                 ),
                 triggered_targeting(

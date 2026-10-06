@@ -8,23 +8,36 @@ mod abilities_extended;
 mod adventure;
 mod audit;
 mod backup;
+mod block_requirements;
 mod bestow;
+mod cast_restrictions;
 mod changeling;
 mod class;
 mod combat;
 mod copies;
 mod damage;
 mod dig;
+mod dredge;
+mod empty_battlefield;
+mod discard_costs;
+mod divided_damage;
 mod granted;
 mod graveyard;
+mod flashback_costs;
 mod harness;
+mod hand_replacement;
 mod impulse;
 mod keywords;
 mod leveler;
+mod library_positions;
+mod mana_followups;
 mod multiface;
 mod prevention;
+mod protection_qualities;
 mod search;
 mod split;
+mod tap_costs;
+mod target_discount;
 mod tokens;
 mod triggers;
 
@@ -823,6 +836,61 @@ fn scry_one_to_the_bottom() {
     assert_eq!(bottom, Some(marker), "scried to the bottom");
     let top_now = order.first().map(|id| g.engine.state.objects[id].card);
     assert_ne!(top_now, Some(marker));
+}
+
+#[test]
+fn scry_shows_the_cards_to_the_scrying_player_only() {
+    let mut t = Table::default();
+    let seer = t.card("{U}", "Sorcery", None, "Scry 1.");
+    let marker = t.card("{5}", "Artifact", None, "");
+    let mut g = Game::new(t);
+    g.lands(1);
+    let s = g.put(seer, P0, Zone::Hand);
+    g.main();
+    let top = g.put(marker, P0, Zone::Library);
+    let lib = mtg_core::ZoneRef::of(Zone::Library, P0);
+    let order = g.engine.state.zone_order.get_mut(&lib).unwrap();
+    order.retain(|o| *o != top);
+    order.insert(0, top);
+    let c = g.pending.take().unwrap();
+    g.engine
+        .answer(
+            &g.table,
+            c.id,
+            mtg_engine::choice::Answer::Action(Action::Cast { object: s }),
+        )
+        .unwrap();
+    let choice = loop {
+        match g.engine.advance(&g.table) {
+            mtg_engine::Progress::NeedsChoice(c)
+                if matches!(c.kind, mtg_engine::choice::ChoiceKind::ChooseObjects { .. }) =>
+            {
+                break c;
+            }
+            mtg_engine::Progress::NeedsChoice(c) => {
+                let a = c
+                    .default
+                    .clone()
+                    .unwrap_or(mtg_engine::choice::Answer::Pass);
+                g.engine.answer(&g.table, c.id, a).unwrap();
+            }
+            mtg_engine::Progress::Continue => {}
+            mtg_engine::Progress::GameOver { .. } => panic!("game over"),
+        }
+    };
+    assert_eq!(choice.who, P0);
+    assert_eq!(&*choice.because, "put on the bottom of your library");
+    let mine = g.engine.view_for(P0);
+    assert_eq!(
+        mine.visible.get(&top).and_then(|o| o.card),
+        Some(marker),
+        "the scrying player sees the card"
+    );
+    let theirs = g.engine.view_for(P1);
+    assert!(
+        theirs.visible.get(&top).and_then(|o| o.card).is_none(),
+        "the opponent does not"
+    );
 }
 
 #[test]
@@ -2651,6 +2719,49 @@ fn mana_ability_pays_life_and_requires_enough_life() {
     g.engine.state.players.get_mut(&P0).unwrap().life = 1;
     assert!(
         mtg_engine::mana::manual_source(&g.engine.state, &g.table, P0, source, ability).is_none()
+    );
+}
+
+#[test]
+fn filter_land_offers_each_bundle_and_makes_the_mixed_one() {
+    let mut t = Table::default();
+    let filter = t.card(
+        "",
+        "Land",
+        None,
+        "{T}: Add {C}.\n{W/U}, {T}: Add {W}{W}, {W}{U}, or {U}{U}.",
+    );
+    let spell = t.card("{W}{U}", "Sorcery", None, "Draw a card.");
+    let mut g = Game::new(t);
+    let source = g.put(filter, P0, Zone::Battlefield);
+    let cast = g.put(spell, P0, Zone::Hand);
+    g.lands(1);
+    g.main();
+    let abilities = &g.table.face(filter, 0).unwrap().abilities;
+    assert_eq!(abilities.len(), 4, "{{C}} plus one ability per bundle");
+    let bundles: Vec<_> = abilities[1..].iter().map(|a| a.id).collect();
+    for id in &bundles {
+        assert!(
+            mtg_engine::mana::manual_source(&g.engine.state, &g.table, P0, source, *id).is_some(),
+            "every bundle can be activated"
+        );
+    }
+    g.act(
+        Action::ActivateManaAbility {
+            source,
+            ability: bundles[1],
+            color: None,
+        },
+        &[],
+        &[],
+    );
+    assert!(g.engine.state.objects[&source].tapped);
+    assert_eq!(g.engine.state.player(P0).mana.total(), 2);
+    g.cast(cast, &[]);
+    assert_eq!(
+        g.engine.state.player(P0).mana.total(),
+        0,
+        "{{W}}{{U}} paid with the mixed bundle"
     );
 }
 

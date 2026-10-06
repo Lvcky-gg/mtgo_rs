@@ -1288,6 +1288,7 @@ fn disguise_ward() -> mtg_ir::Ability {
                 },
                 life: None,
                 discard: false,
+                exile: false,
             },
         },
         targets: Vec::new(),

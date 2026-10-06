@@ -555,6 +555,29 @@ impl App {
     }
 
     fn import_form(&mut self, ui: &mut Ui) {
+        let dropped = ui.ctx().input(|input| input.raw.dropped_files.clone());
+        if !dropped.is_empty() {
+            let result = if dropped.len() == 1 {
+                read_deck_file(dropped[0].as_ref())
+            } else {
+                Err("Drop one deck file at a time.".into())
+            };
+            match result {
+                Ok(text) => {
+                    self.import_text = text;
+                    self.import_result = None;
+                    if self.import_name.trim().is_empty() {
+                        self.import_name = dropped[0]
+                            .path()
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Imported deck")
+                            .to_owned();
+                    }
+                }
+                Err(error) => self.import_result = Some(Err(error)),
+            }
+        }
         ui.label(
             RichText::new("BRING YOUR OWN DECK")
                 .size(10.0)
@@ -563,7 +586,7 @@ impl App {
         ui.heading("Import a deck");
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Paste a list from Moxfield, Archidekt, Arena, MTGO or plain text (\"4 Card Name\" per line).")
+            RichText::new("Paste a list or drop a UTF-8 text, CSV, TSV, or JSON deck file. Text lists from Arena, MTGO, Moxfield, Archidekt, and TappedOut are supported. CSV/TSV use count, name, and section columns; JSON uses an entries array with count, name, and section.")
                 .weak(),
         );
         ui.horizontal(|ui| {
@@ -1482,6 +1505,19 @@ fn move_sideboard_card(
         None => to.push((key, 1)),
     }
     true
+}
+
+pub(crate) fn read_deck_file(file: &dyn egui::DroppedFile) -> Result<String, String> {
+    const LIMIT: usize = 2 * 1024 * 1024;
+    let file =
+        std::fs::File::open(file.path()).map_err(|e| format!("Could not open deck file: {e}"))?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, LIMIT as u64 + 1), &mut bytes)
+        .map_err(|e| format!("Could not read deck file: {e}"))?;
+    if bytes.len() > LIMIT {
+        return Err("Deck file exceeds 2 MiB.".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "Deck files must contain UTF-8 text.".into())
 }
 
 #[cfg(test)]

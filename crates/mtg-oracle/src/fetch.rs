@@ -74,8 +74,11 @@ pub fn needs_refresh(last_import_unix: Option<u64>, now_unix: u64, force: bool) 
 }
 
 /// When the local database was last populated.
-pub fn last_import(store: &Store) -> Option<u64> {
-    store.meta("last_import_unix").ok().flatten()?.parse().ok()
+pub fn last_import(store: &Store) -> Result<Option<u64>, FetchError> {
+    Ok(store
+        .meta("last_import_unix")
+        .map_err(FetchError::Store)?
+        .and_then(|value| value.parse().ok()))
 }
 
 fn now_unix() -> u64 {
@@ -171,7 +174,7 @@ pub fn fetch_and_import_with_progress(
     progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<Option<crate::ImportReport>, FetchError> {
     let now = now_unix();
-    if !needs_refresh(last_import(store), now, force) {
+    if !needs_refresh(last_import(store)?, now, force) {
         return Ok(None);
     }
 
@@ -204,26 +207,27 @@ pub fn fetch_and_import_with_progress(
         reader: response.body_mut().as_reader(),
         bytes: bytes.clone(),
     };
-    let report = crate::import::import_with_progress(store, reader, &mut |update| {
-        use crate::import::ImportProgress;
-        progress(match update {
-            ImportProgress::Reading {
-                processed,
-                imported,
-            } => FetchProgress::Importing {
-                downloaded: bytes.get(),
-                total,
-                processed,
-                imported,
-            },
-            ImportProgress::Committing => FetchProgress::Saving,
-        });
-    })
+    let report = crate::import::import_with_timestamp(
+        store,
+        reader,
+        &mut |update| {
+            use crate::import::ImportProgress;
+            progress(match update {
+                ImportProgress::Reading {
+                    processed,
+                    imported,
+                } => FetchProgress::Importing {
+                    downloaded: bytes.get(),
+                    total,
+                    processed,
+                    imported,
+                },
+                ImportProgress::Committing => FetchProgress::Saving,
+            });
+        },
+        Some(now),
+    )
     .map_err(FetchError::Import)?;
-
-    store
-        .set_meta("last_import_unix", &now.to_string())
-        .map_err(FetchError::Store)?;
 
     Ok(Some(report))
 }
@@ -282,17 +286,25 @@ pub fn import_from_with_progress<R: Read>(
     reader: R,
     progress: &mut dyn FnMut(crate::import::ImportProgress),
 ) -> Result<crate::ImportReport, FetchError> {
-    let report =
-        crate::import::import_with_progress(store, reader, progress).map_err(FetchError::Import)?;
-    store
-        .set_meta("last_import_unix", &now_unix().to_string())
-        .map_err(FetchError::Store)?;
-    Ok(report)
+    crate::import::import_with_timestamp(store, reader, progress, Some(now_unix()))
+        .map_err(FetchError::Import)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_metadata_distinguishes_missing_values_from_database_errors() {
+        let store = Store::in_memory().unwrap();
+        assert_eq!(last_import(&store).unwrap(), None);
+        store.set_meta("last_import_unix", "123").unwrap();
+        assert_eq!(last_import(&store).unwrap(), Some(123));
+        store.set_meta("last_import_unix", "invalid").unwrap();
+        assert_eq!(last_import(&store).unwrap(), None);
+        store.conn().execute_batch("DROP TABLE meta").unwrap();
+        assert!(matches!(last_import(&store), Err(FetchError::Store(_))));
+    }
 
     #[test]
     fn a_fresh_database_needs_a_download() {

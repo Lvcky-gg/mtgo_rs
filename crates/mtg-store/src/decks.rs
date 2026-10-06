@@ -5,7 +5,7 @@
 //! it should see the correction, which only works if decks store identities rather than
 //! copies.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{Result, Store};
 
@@ -25,11 +25,19 @@ impl Section {
         }
     }
 
-    fn parse(s: &str) -> Self {
+    fn parse(s: &str) -> rusqlite::Result<Self> {
         match s {
-            "sideboard" => Section::Sideboard,
-            "commander" => Section::Commander,
-            _ => Section::Main,
+            "main" => Ok(Section::Main),
+            "sideboard" => Ok(Section::Sideboard),
+            "commander" => Ok(Section::Commander),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown deck section {s:?}"),
+                )),
+            )),
         }
     }
 }
@@ -41,6 +49,12 @@ pub struct DeckRow {
     pub format: Option<String>,
     /// (oracle id, count, section)
     pub entries: Vec<(u32, u32, Section)>,
+}
+
+/// Optional additional deck data saved in the same transaction as composition.
+pub struct DeckDetails<'a> {
+    pub printings: &'a [(u32, String)],
+    pub profile: Option<&'a str>,
 }
 
 impl Store {
@@ -75,7 +89,35 @@ impl Store {
         entries: &[(u32, u32, Section)],
         printings: &[(u32, String)],
     ) -> Result<i64> {
+        self.put_deck_with_details(
+            previous_id,
+            name,
+            format,
+            entries,
+            DeckDetails {
+                printings,
+                profile: None,
+            },
+        )
+    }
+
+    pub fn put_deck_with_details(
+        &mut self,
+        previous_id: Option<i64>,
+        name: &str,
+        format: Option<&str>,
+        entries: &[(u32, u32, Section)],
+        details: DeckDetails<'_>,
+    ) -> Result<i64> {
         let tx = self.conn.transaction()?;
+        let previous_profile: Option<String> = tx.query_row(
+            "SELECT profile FROM decks WHERE id = ?1 OR name = ?2 ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END LIMIT 1",
+            params![previous_id, name], |row| row.get(0),
+        ).optional()?;
+        let profile = details
+            .profile
+            .or(previous_profile.as_deref())
+            .unwrap_or("{}");
 
         // Replacing by name is what re-pasting an edited list should mean. Entries go
         // with it via ON DELETE CASCADE.
@@ -84,8 +126,8 @@ impl Store {
             tx.execute("DELETE FROM decks WHERE id = ?1", params![id])?;
         }
         tx.execute(
-            "INSERT INTO decks (name, format, created) VALUES (?1, ?2, datetime('now'))",
-            params![name, format],
+            "INSERT INTO decks (name, format, created, profile) VALUES (?1, ?2, datetime('now'), ?3)",
+            params![name, format, profile],
         )?;
         let id = tx.last_insert_rowid();
 
@@ -96,7 +138,7 @@ impl Store {
             )?;
         }
 
-        for (oracle, printing) in printings {
+        for (oracle, printing) in details.printings {
             tx.execute(
                 "INSERT INTO deck_printings (deck, oracle, printing) VALUES (?1, ?2, ?3)",
                 params![id, oracle, printing],
@@ -104,6 +146,14 @@ impl Store {
         }
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn deck_profile(&self, id: i64) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT profile FROM decks WHERE id=?1", [id], |row| {
+                row.get(0)
+            })?)
     }
 
     pub fn deck_printings(&self, id: i64) -> Result<Vec<(u32, String)>> {
@@ -140,9 +190,9 @@ impl Store {
             .prepare("SELECT oracle, count, section FROM deck_entries WHERE deck = ?1")?;
         let rows = q.query_map(params![id], |r| {
             Ok((
-                r.get::<_, i64>(0)? as u32,
-                r.get::<_, i64>(1)? as u32,
-                Section::parse(&r.get::<_, String>(2)?),
+                r.get::<_, u32>(0)?,
+                r.get::<_, u32>(1)?,
+                Section::parse(&r.get::<_, String>(2)?)?,
             ))
         })?;
         let mut entries = Vec::new();

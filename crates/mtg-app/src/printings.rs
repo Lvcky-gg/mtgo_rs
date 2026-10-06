@@ -89,6 +89,21 @@ impl Picker {
         }
     }
 
+    fn poll_result(&mut self) {
+        if self.result.is_some() {
+            return;
+        }
+        match self.ready.try_recv() {
+            Ok(result) => self.result = Some(result),
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.result = Some(Err(
+                    "Printing loader stopped before returning a result.".into()
+                ));
+            }
+        }
+    }
+
     /// Selection has an outer option for an action, and an inner option for default art.
     pub fn show(
         &mut self,
@@ -96,9 +111,7 @@ impl Picker {
         art: &mut CardArt,
         selected: Option<&str>,
     ) -> (bool, Option<Option<String>>) {
-        if let Ok(result) = self.ready.try_recv() {
-            self.result = Some(result);
-        }
+        self.poll_result();
         let mut open = true;
         let mut selection = None;
         egui::Window::new(format!("Printings · {}", self.name))
@@ -349,17 +362,10 @@ fn fetch_printings(uuid: &str) -> Result<Vec<Printing>, String> {
         .timeout_global(Some(Duration::from_secs(25)))
         .build()
         .into();
-    let mut url = format!(
-        "https://api.scryfall.com/cards/search?q=oracleid%3A{uuid}&unique=prints&include_extras=true&include_multilingual=true&include_variations=true"
-    );
-    let mut all = Vec::new();
-    loop {
-        if !url.starts_with("https://api.scryfall.com/") {
-            return Err("Unexpected printing pagination URL.".into());
-        }
-        crate::art::wait_api_turn(&url);
+    load_printings(uuid, |url| {
+        crate::art::wait_api_turn(url);
         let body = agent
-            .get(&url)
+            .get(url)
             .header(
                 "User-Agent",
                 concat!("mtgo_rs/", env!("CARGO_PKG_VERSION"), " (personal client)"),
@@ -370,8 +376,27 @@ fn fetch_printings(uuid: &str) -> Result<Vec<Printing>, String> {
             .body_mut()
             .read_to_string()
             .map_err(|e| format!("Could not read printings: {e}"))?;
-        let page: Page = serde_json::from_str(&body)
-            .map_err(|e| format!("Could not read printing data: {e}"))?;
+        serde_json::from_str(&body).map_err(|e| format!("Could not read printing data: {e}"))
+    })
+}
+
+fn load_printings(
+    uuid: &str,
+    mut fetch: impl FnMut(&str) -> Result<Page, String>,
+) -> Result<Vec<Printing>, String> {
+    let mut url = format!(
+        "https://api.scryfall.com/cards/search?q=oracleid%3A{uuid}&unique=prints&include_extras=true&include_multilingual=true&include_variations=true"
+    );
+    let mut all = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !url.starts_with("https://api.scryfall.com/") {
+            return Err("Unexpected printing pagination URL.".into());
+        }
+        if !visited.insert(url.clone()) {
+            return Err("Printing response repeats a pagination URL.".into());
+        }
+        let page = fetch(&url)?;
         all.extend(page.data.into_iter().filter(|p| p.oracle_id == uuid));
         if !page.has_more {
             break;
@@ -386,6 +411,103 @@ fn fetch_printings(uuid: &str) -> Result<Vec<Printing>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_picker(ready: Receiver<Result<Vec<Printing>, String>>) -> Picker {
+        Picker {
+            oracle: 1,
+            name: "Sample".into(),
+            uuid: "sample".into(),
+            ready,
+            result: None,
+            filter: String::new(),
+            newest_first: true,
+            english_only: false,
+        }
+    }
+
+    #[test]
+    fn disconnected_loader_reports_error() {
+        let (sender, ready) = mpsc::channel();
+        let mut picker = empty_picker(ready);
+        picker.poll_result();
+        assert!(picker.result.is_none());
+        drop(sender);
+        picker.poll_result();
+        assert!(matches!(picker.result, Some(Err(_))));
+    }
+
+    #[test]
+    fn completed_loader_keeps_result_after_disconnect() {
+        let (sender, ready) = mpsc::channel();
+        sender.send(Ok(Vec::new())).unwrap();
+        drop(sender);
+        let mut picker = empty_picker(ready);
+        picker.poll_result();
+        picker.poll_result();
+        assert!(matches!(picker.result, Some(Ok(ref rows)) if rows.is_empty()));
+    }
+
+    #[test]
+    fn pagination_rejects_missing_or_external_next_pages() {
+        for next_page in [None, Some("https://example.com/cards".into())] {
+            let mut calls = 0;
+            let result = load_printings("sample", |_| {
+                calls += 1;
+                Ok(Page {
+                    data: Vec::new(),
+                    has_more: true,
+                    next_page: next_page.clone(),
+                })
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn pagination_collects_matching_printings_from_every_page() {
+        let mut calls = 0;
+        let rows = load_printings("sample", |_| {
+            calls += 1;
+            serde_json::from_value(serde_json::json!({
+                "data": [
+                    {"id": format!("printing-{calls}"), "oracle_id": "sample",
+                     "set_name": "Set", "collector_number": "1", "lang": "en"},
+                    {"id": "unrelated", "oracle_id": "other",
+                     "set_name": "Set", "collector_number": "2", "lang": "en"}
+                ],
+                "has_more": calls == 1,
+                "next_page": "https://api.scryfall.com/cards/search?page=2"
+            }))
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["printing-1", "printing-2"]
+        );
+    }
+
+    #[test]
+    fn repeated_pagination_stops_before_fetching_again() {
+        let mut calls = 0;
+        let result = load_printings("sample", |url| {
+            calls += 1;
+            assert!(calls <= 2);
+            Ok(Page {
+                data: Vec::new(),
+                has_more: true,
+                next_page: Some(if calls == 1 {
+                    "https://api.scryfall.com/cards/search?page=2".into()
+                } else {
+                    url.into()
+                }),
+            })
+        });
+        assert!(result.unwrap_err().contains("repeats"));
+        assert_eq!(calls, 2);
+    }
 
     #[test]
     fn printing_picker_hover_offers_enlargement_without_selecting() {

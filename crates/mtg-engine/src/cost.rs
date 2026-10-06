@@ -156,6 +156,48 @@ pub fn modify(
     apply_delta(base, increase, reduction)
 }
 
+/// "This spell costs {2} less to cast if it targets a tapped creature": what a target has
+/// to match for the spell's own cost to change.
+pub fn target_discount(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+) -> Option<mtg_ir::ObjectFilter> {
+    let obj = state.objects.get(&object).filter(|o| !o.face_down)?;
+    cards
+        .face(obj.card, obj.face)?
+        .abilities
+        .iter()
+        .find_map(|a| match &a.kind {
+            mtg_ir::AbilityKind::Static {
+                what: mtg_ir::Selector::SelfSource,
+                modification: Modification::Restriction(Restriction::CostModifier { .. }),
+                condition: Some(mtg_ir::trigger::Condition::TargetsMatching(f)),
+            } => Some(f.clone()),
+            _ => None,
+        })
+}
+
+/// What casting `object` would cost with `target` among its targets — for offering a spell
+/// that only its target-dependent discount makes affordable.
+pub fn cost_with_target(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    controller: PlayerId,
+    target: mtg_core::Target,
+) -> Option<ManaCost> {
+    let mut state = state.clone();
+    let cc = state
+        .objects
+        .get_mut(&object)?
+        .cast_context
+        .get_or_insert_with(Default::default);
+    cc.targets = vec![target];
+    cc.empty_slots.clear();
+    total_cost(&state, cards, object, controller)
+}
+
 /// Adjust the generic portion of a cost, leaving coloured symbols untouched.
 fn apply_delta(cost: ManaCost, increase: i64, reduction: i64) -> ManaCost {
     let generic: i64 = cost
@@ -179,6 +221,51 @@ fn apply_delta(cost: ManaCost, increase: i64, reduction: i64) -> ManaCost {
         symbols.insert(0, ManaSymbol::Generic(adjusted.min(u8::MAX as i64) as u8));
     }
     ManaCost { symbols }
+}
+
+/// Whether a "can't cast" restriction stops `who` casting this spell now: "your opponents
+/// can't cast creature spells", "each player can't cast more than one spell each turn".
+pub fn cast_forbidden(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    who: PlayerId,
+) -> bool {
+    let chars = ComputedChars(cards);
+    crate::layers::effects(state, cards).iter().any(|e| {
+        let mtg_ir::effect::Modification::Restriction(mtg_ir::effect::Restriction::CantCast {
+            who: players,
+            spells,
+            beyond,
+        }) = &e.modification
+        else {
+            return false;
+        };
+        let Some(controller) = e
+            .controller
+            .or_else(|| crate::layers::controller(state, e.source))
+        else {
+            return false;
+        };
+        let ctx = Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        eval::players(&ctx, players)
+            .unwrap_or_default()
+            .contains(&who)
+            && eval::matches(&ctx, spells, object).unwrap_or(false)
+            && beyond.is_none_or(|n| {
+                state.spells_by_player.get(&who).copied().unwrap_or(0) >= u32::from(n)
+            })
+    })
 }
 
 /// Whether a card can be cast from a zone at this moment, ignoring cost.
@@ -511,6 +598,20 @@ pub fn cost_candidates(
             .collect();
         return Some((from, (*n).max(0) as u32));
     }
+    if let A::TapUntapped {
+        filter,
+        count: Value::Fixed(n),
+    } = part
+    {
+        let from = state
+            .battlefield()
+            .into_iter()
+            .filter(|id| crate::layers::controller(state, *id) == Some(who))
+            .filter(|id| state.objects.get(id).is_some_and(|o| !o.tapped))
+            .filter(|id| eval::matches(&ctx, filter, *id).unwrap_or(false))
+            .collect();
+        return Some((from, (*n).max(0) as u32));
+    }
     let (zone, filter, n) = match part {
         A::Sacrifice {
             what:
@@ -661,4 +762,30 @@ pub fn total_power(state: &GameState, cards: &dyn PrintedCards, ids: &[ObjectId]
         .filter_map(|id| crate::layers::compute(state, cards, *id).and_then(|c| c.power))
         .map(|p| p.max(0))
         .sum()
+}
+
+/// Whether every condition holds for `source` controlled by `who` — an alternative cost's
+/// "if an opponent lost life this turn" (spectacle).
+pub fn conditions_hold(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    who: PlayerId,
+    conditions: &[mtg_ir::trigger::Condition],
+) -> bool {
+    let chars = ComputedChars(cards);
+    let ctx = Ctx {
+        state,
+        cards,
+        chars: &chars,
+        source,
+        controller: who,
+        targets: &[],
+        target_legal: &[],
+        x: 0,
+        bindings: crate::empty_bindings(),
+    };
+    conditions
+        .iter()
+        .all(|c| eval::condition(&ctx, c).unwrap_or(false))
 }

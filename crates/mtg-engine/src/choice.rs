@@ -120,6 +120,10 @@ pub enum ChoiceKind {
     /// illegal one is rejected rather than silently corrected.
     DeclareBlockers {
         eligible: Vec<(ObjectId, Vec<ObjectId>)>,
+        /// Blockers that may block more than one attacker, and how many (CR 509.1a);
+        /// every other blocker blocks at most one.
+        #[serde(default)]
+        capacity: Vec<(ObjectId, u32)>,
     },
     /// Order blockers to assign combat damage among (CR 509.2).
     OrderBlockers {

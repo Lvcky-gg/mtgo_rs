@@ -5,18 +5,21 @@
 //! through a seeded deserializer: the visitor is handed a `SeqAccess` and pulls one card
 //! at a time, so peak memory is one card regardless of file size.
 //!
-//! Errors are reported, not fatal. A bulk file spanning the game's whole history contains
-//! rows this client does not understand, and an import that aborted on the first one would
+//! Unsupported card rows are reported, not fatal. A bulk file spanning the game's whole
+//! history contains rows this client does not understand, and an import that aborted on the first one would
 //! never finish. Everything unhandled is counted in [`ImportReport`], which is the point:
 //! the report is how the gap between "card exists" and "card is playable" stays visible.
+//! Database failures abort and roll back the import, preserving the previous data.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 
 use mtg_store::Store;
 use serde::de::{DeserializeSeed, SeqAccess, Visitor};
 
 use crate::{convert, manacost, scryfall, typeline};
+
+const MAX_GZIP_LAYERS: usize = 4;
 
 /// What an import did, and what it could not do.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -29,7 +32,7 @@ pub struct ImportReport {
     pub unparsed_costs: u64,
     /// Cards whose type line contained a word this build does not know.
     pub unknown_type_words: u64,
-    /// Rows that failed to write. Non-zero means something is wrong with the database.
+    /// Rows that could not be read or converted. Database write failures abort the import.
     pub failed: u64,
     /// Distinct subtypes interned.
     pub subtypes: u64,
@@ -99,32 +102,55 @@ pub fn import_with_progress<R: Read>(
     reader: R,
     progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<ImportReport, String> {
+    import_with_timestamp(store, reader, progress, None)
+}
+
+/// File/download wrappers commit their refresh timestamp alongside the imported data.
+pub(crate) fn import_with_timestamp<R: Read>(
+    store: &mut Store,
+    reader: R,
+    progress: &mut dyn FnMut(ImportProgress),
+    timestamp: Option<u64>,
+) -> Result<ImportReport, String> {
     progress(ImportProgress::Reading {
         processed: 0,
         imported: 0,
     });
-    import_boxed(store, Box::new(reader), progress)
+    import_boxed(store, Box::new(reader), progress, timestamp, 0)
 }
 
 /// The body of [`import`], taking a boxed reader so that unwrapping gzip can recurse without
 /// the reader's type growing with each level.
 fn import_boxed(
     store: &mut Store,
-    reader: Box<dyn Read + '_>,
+    mut reader: Box<dyn Read + '_>,
     progress: &mut dyn FnMut(ImportProgress),
+    timestamp: Option<u64>,
+    gzip_layers: usize,
 ) -> Result<ImportReport, String> {
-    let mut reader = BufReader::new(reader);
-    if reader
-        .fill_buf()
-        .map_err(|e| e.to_string())?
-        .starts_with(&[0x1f, 0x8b])
-    {
+    // Read may return only one byte even when more data is coming. Preserve the
+    // prefix so both gzip decoding and JSON parsing still consume the whole input.
+    let mut prefix = Vec::with_capacity(2);
+    reader
+        .by_ref()
+        .take(2)
+        .read_to_end(&mut prefix)
+        .map_err(|e| e.to_string())?;
+    let compressed = prefix == [0x1f, 0x8b];
+    let reader = Cursor::new(prefix).chain(reader);
+    if compressed {
+        if gzip_layers >= MAX_GZIP_LAYERS {
+            return Err("too many nested gzip layers in the card export".into());
+        }
         return import_boxed(
             store,
-            Box::new(flate2::read::GzDecoder::new(reader)),
+            Box::new(flate2::read::MultiGzDecoder::new(reader)),
             progress,
+            timestamp,
+            gzip_layers + 1,
         );
     }
+    let mut reader = BufReader::new(reader);
     let first = loop {
         let buf = reader.fill_buf().map_err(|e| e.to_string())?;
         match buf.iter().position(|b| !b.is_ascii_whitespace()) {
@@ -154,6 +180,7 @@ fn import_boxed(
             Some(b'[') => {
                 let mut de = serde_json::Deserializer::from_reader(reader);
                 sink.deserialize(&mut de).map_err(|e| e.to_string())?;
+                de.end().map_err(|e| e.to_string())?;
             }
             Some(b'{') => {
                 // JSON Lines: stream line by line, so peak memory is still one card. A line
@@ -165,7 +192,7 @@ fn import_boxed(
                     }
                     match serde_json::from_str::<scryfall::Card>(&line) {
                         Ok(card) => match card.importable() {
-                            Ok(()) => sink.write(&card),
+                            Ok(()) => sink.write(&card).map_err(|e| e.to_string())?,
                             Err(reason) => sink.report.skip(reason),
                         },
                         Err(_) => sink.report.failed += 1,
@@ -187,11 +214,21 @@ fn import_boxed(
         imported: report.imported,
     });
     progress(ImportProgress::Committing);
-    tx.commit().map_err(|e| e.to_string())?;
-
-    store
-        .set_meta("cards_imported", &report.imported.to_string())
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('cards_imported', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [report.imported.to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(timestamp) = timestamp {
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('last_import_unix', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [timestamp.to_string()],
+        )
         .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(report)
 }
@@ -239,7 +276,7 @@ impl<'de> Visitor<'de> for Sink<'_> {
                 self.row_processed();
                 continue;
             }
-            self.write(&card);
+            self.write(&card).map_err(serde::de::Error::custom)?;
             self.row_processed();
         }
         Ok(())
@@ -257,10 +294,10 @@ impl Sink<'_> {
         }
     }
 
-    fn write(&mut self, card: &scryfall::Card) {
+    fn write(&mut self, card: &scryfall::Card) -> Result<(), mtg_store::rusqlite::Error> {
         let Some(stored) = convert::to_stored(card) else {
             self.report.failed += 1;
-            return;
+            return Ok(());
         };
 
         // Note what this build did not fully understand, per card rather than per symbol,
@@ -277,9 +314,9 @@ impl Sink<'_> {
             }
             for sub in &parsed.subtypes {
                 if self.seen_subtypes.insert(sub.clone()) {
+                    intern_subtype(self.tx, sub)?;
                     self.report.subtypes += 1;
                 }
-                let _ = intern_subtype(self.tx, sub);
             }
         }
         if cost_gap {
@@ -308,15 +345,13 @@ impl Sink<'_> {
         } else {
             format!(",{},", legal.join(","))
         };
-        match put_card(self.tx, &stored, &keys).and_then(|()| {
-            self.tx.execute(
-                "UPDATE cards SET color_identity = ?1, legal_in = ?2 WHERE oracle_uuid = ?3",
-                mtg_store::rusqlite::params![identity, legal_in, stored.oracle_uuid],
-            )
-        }) {
-            Ok(_) => self.report.imported += 1,
-            Err(_) => self.report.failed += 1,
-        }
+        put_card(self.tx, &stored, &keys)?;
+        self.tx.execute(
+            "UPDATE cards SET color_identity = ?1, legal_in = ?2 WHERE oracle_uuid = ?3",
+            mtg_store::rusqlite::params![identity, legal_in, stored.oracle_uuid],
+        )?;
+        self.report.imported += 1;
+        Ok(())
     }
 }
 
@@ -333,6 +368,9 @@ fn intern_subtype(
         "INSERT INTO subtypes (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
         [name],
     )?;
+    tx.query_row("SELECT id FROM subtypes WHERE name = ?1", [name], |row| {
+        row.get::<_, u16>(0)
+    })?;
     Ok(())
 }
 

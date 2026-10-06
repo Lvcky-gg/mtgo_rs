@@ -17,14 +17,19 @@ pub fn offer_card_enlargement(ui: &mut Ui, name: &str) {
 
 pub fn offer_printing_enlargement(ui: &mut Ui, name: &str, printing: Option<&str>) {
     if ui.button("Enlarge card").clicked() {
-        ui.ctx().data_mut(|data| {
-            data.insert_temp(
-                egui::Id::new("enlarged-card"),
-                printing.map_or_else(|| name.to_owned(), |id| format!("scryfall:{id}")),
-            );
-            data.insert_temp(egui::Id::new("enlarged-card-title"), name.to_owned());
-        });
+        enlarge_printing(ui.ctx(), name, printing);
     }
+}
+
+/// Open inspection without changing card selection or deck composition.
+pub fn enlarge_printing(ctx: &egui::Context, name: &str, printing: Option<&str>) {
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("enlarged-card"),
+            printing.map_or_else(|| name.to_owned(), |id| format!("scryfall:{id}")),
+        );
+        data.insert_temp(egui::Id::new("enlarged-card-title"), name.to_owned());
+    });
 }
 
 /// Shared persistent inspection window for match, builder, and sample cards.

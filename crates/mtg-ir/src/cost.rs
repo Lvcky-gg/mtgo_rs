@@ -44,6 +44,13 @@ pub enum AdditionalCost {
     Untap {
         what: Selector,
     },
+    /// "Tap an untapped creature you control", "tap two untapped artifacts you control":
+    /// objects chosen as the cost is paid (CR 601.2h). Unlike {T}, summoning sickness
+    /// doesn't matter (CR 302.6).
+    TapUntapped {
+        filter: ObjectFilter,
+        count: Value,
+    },
     Sacrifice {
         what: Selector,
         count: Value,

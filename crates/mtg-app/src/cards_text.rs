@@ -16,6 +16,7 @@ pub struct CardText {
     pub name: String,
     pub printing: Option<String>,
     pub cost: String,
+    pub graveyard_cost: Option<String>,
     pub type_line: String,
     pub power_toughness: Option<String>,
     /// Printed rules text, shown so a player can read what a card says even when the engine has
@@ -97,6 +98,8 @@ impl CardTexts {
                         name: face.name.to_string(),
                         printing: None,
                         cost: crate::format::mana_cost(&face.mana_cost),
+                        graveyard_cost: mtg_engine::cost::graveyard_cast(cards, id, index)
+                            .map(|(mana, _)| crate::format::mana_cost(&mana)),
                         type_line: crate::format::type_line(&ch, |s| {
                             cards.subtype_name(s).unwrap_or("").to_string()
                         }),
@@ -132,6 +135,9 @@ impl CardTexts {
                                 use mtg_ir::ability::AltCost;
                                 let name = match kind {
                                     AltCost::Dash => "dash",
+                                    AltCost::Blitz => "blitz",
+                                    AltCost::Surge => "surge",
+                                    AltCost::Spectacle => "spectacle",
                                     AltCost::Evoke => "evoke",
                                     AltCost::Overload => "overload",
                                     AltCost::Warp => "warp",

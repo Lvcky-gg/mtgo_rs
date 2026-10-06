@@ -326,3 +326,24 @@ fn an_ability_exiles_its_card_from_the_graveyard() {
     assert_eq!(g.life(P0), 22);
     assert_eq!(exiled(&g), 1);
 }
+
+#[test]
+fn scavenge_exiles_the_card_for_counters_equal_to_its_power() {
+    let mut t = Table::default();
+    let ooze = t.card(
+        "{2}{G}",
+        "Creature — Zombie",
+        Some((3, 2)),
+        "Scavenge {1}{G}",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(2);
+    let o = g.put(ooze, P0, Zone::Graveyard);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let actions = g.main();
+    assert!(offers(&actions, o));
+    g.act(activate(o, 0), &[mtg_core::Target::Object(b)], &[]);
+    assert_eq!(g.pt(b), (5, 5), "three counters, its power");
+    assert_eq!(g.count(Zone::Graveyard, P0), 0, "exiled as the cost");
+}

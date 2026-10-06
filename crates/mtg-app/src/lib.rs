@@ -27,6 +27,7 @@ pub mod art;
 pub mod board;
 pub mod builder;
 pub mod cards_text;
+pub mod deck_profile;
 pub mod decks;
 pub mod format;
 pub mod mana_text;
@@ -34,6 +35,7 @@ pub mod narrate;
 pub mod net;
 pub mod seat;
 pub mod theme;
+mod tournaments;
 pub mod ui;
 pub mod widgets;
 

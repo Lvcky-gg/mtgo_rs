@@ -393,7 +393,7 @@ pub fn resolve(
             let n = value_asking(state, cards, rc, count)?;
             for p in players {
                 for _ in 0..n.max(0) {
-                    draw_one(state, log, p, cause);
+                    draw_one(state, cards, log, rc, p, cause)?;
                 }
             }
             Ok(())
@@ -411,70 +411,30 @@ pub fn resolve(
             if n <= 0 {
                 return Ok(());
             }
-            let (deathtouch, lifelink) = with_ctx(state, cards, rc, |ctx| {
-                Ok((
-                    ctx.has_keyword(src, Keyword::Deathtouch).unwrap_or(false),
-                    ctx.has_keyword(src, Keyword::Lifelink).unwrap_or(false),
-                ))
-            })?;
-            let recipient_count = recipients.len();
-            // Damage from one source to several recipients is simultaneous.
-            let (wither, infect) = with_ctx(state, cards, rc, |ctx| {
-                Ok((
-                    ctx.has_keyword(src, Keyword::Wither).unwrap_or(false),
-                    ctx.has_keyword(src, Keyword::Infect).unwrap_or(false),
-                ))
-            })?;
-            let mut events: Vec<Event> = Vec::new();
-            let mut dealt = 0i32;
-            for t in recipients {
-                // Protection prevents damage from sources with the quality.
-                if let Target::Object(o) = t
-                    && crate::eval::protected_from(state, cards, o, src)
-                {
-                    continue;
-                }
-                let amount =
-                    crate::prevention::prevent(state, cards, src, t, n as u32, false, &mut events);
-                if amount == 0 {
-                    continue;
-                }
-                dealt += amount as i32;
-                match t {
-                    Target::Object(o) => {
-                        events.push(object_damage_event(
-                            state,
-                            cards,
-                            src,
-                            o,
-                            amount,
-                            deathtouch,
-                            wither || infect,
-                        ));
-                    }
-                    Target::Player(p) => {
-                        events.push(Event::DamageDealtToPlayer {
-                            source: src,
-                            player: p,
-                            amount,
-                            counters: infect,
-                        });
+            let shares: Vec<(Target, u32)> =
+                recipients.into_iter().map(|t| (t, n as u32)).collect();
+            deal_damage(state, cards, log, rc, cause, src, &shares)
+        }
+
+        Effect::DealDamageDivided { source, shares } => {
+            let (src, shares) = with_ctx(state, cards, rc, |ctx| {
+                let src = eval::objects(ctx, source)?
+                    .first()
+                    .copied()
+                    .unwrap_or(ctx.source);
+                // A target that has become illegal is dealt none of its share (CR 608.2b).
+                let mut tally: Vec<(Target, u32)> = Vec::new();
+                for share in shares {
+                    for t in targets_of(ctx, share)? {
+                        match tally.iter_mut().find(|(u, _)| *u == t) {
+                            Some((_, n)) => *n += 1,
+                            None => tally.push((t, 1)),
+                        }
                     }
                 }
-            }
-            // CR 702.15b — lifelink gains the life in the same event as the damage.
-            let _ = recipient_count;
-            if lifelink
-                && dealt > 0
-                && let Some(controller) = crate::layers::controller(state, src)
-            {
-                events.push(Event::LifeChanged {
-                    player: controller,
-                    delta: dealt,
-                });
-            }
-            apply::apply_simultaneous(state, cause, events, log);
-            Ok(())
+                Ok((src, tally))
+            })?;
+            deal_damage(state, cards, log, rc, cause, src, &shares)
         }
 
         Effect::Tap { what } => {
@@ -1142,7 +1102,12 @@ pub fn resolve(
                 }
                 // The scry/surveil shape: choose any subset to move elsewhere; the rest
                 // stay where they are.
-                let moved = ask_objects(rc, p, top.clone(), 0, top.len() as u32, "put aside")?;
+                let because = match other_zone {
+                    Zone::Library => "put on the bottom of your library",
+                    Zone::Graveyard => "put into your graveyard",
+                    _ => "put aside",
+                };
+                let moved = ask_objects(rc, p, top.clone(), 0, top.len() as u32, because)?;
                 let kept: Vec<ObjectId> = top
                     .iter()
                     .copied()
@@ -1271,7 +1236,7 @@ pub fn resolve(
                 let Some(who) = crate::layers::controller(state, creature) else {
                     continue;
                 };
-                draw_one(state, log, who, cause);
+                draw_one(state, cards, log, rc, who, cause)?;
                 let hand = state.objects_in(ZoneRef::of(Zone::Hand, who));
                 if hand.is_empty() {
                     continue;
@@ -1745,6 +1710,7 @@ pub fn resolve(
             mana,
             life,
             discard,
+            exile,
         } => {
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
             for id in ids {
@@ -1768,7 +1734,7 @@ pub fn resolve(
                         Some(card) => {
                             self::discard(state, cards, log, *card, cause);
                         }
-                        None => counter_object(state, cards, log, id, cause),
+                        None => counter_object(state, cards, log, id, *exile, cause),
                     }
                     continue;
                 }
@@ -1788,7 +1754,7 @@ pub fn resolve(
                         );
                         continue;
                     }
-                    counter_object(state, cards, log, id, cause);
+                    counter_object(state, cards, log, id, *exile, cause);
                     continue;
                 }
                 // The payer decides; paying is only offered when it can be paid.
@@ -1799,15 +1765,15 @@ pub fn resolve(
                     pay_plan(state, cards, log, payer, &plan);
                     continue;
                 }
-                counter_object(state, cards, log, id, cause);
+                counter_object(state, cards, log, id, *exile, cause);
             }
             Ok(())
         }
 
-        Effect::CounterSpell { what } => {
+        Effect::CounterSpell { what, exile } => {
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
             for id in ids {
-                counter_object(state, cards, log, id, cause);
+                counter_object(state, cards, log, id, *exile, cause);
             }
             Ok(())
         }
@@ -2032,6 +1998,7 @@ fn cast_during_resolution(
     };
     if face.card_types.contains(&mtg_core::CardType::Land)
         || crate::cost::additional_cast_cost(face).is_some()
+        || crate::cost::cast_forbidden(state, cards, card, who)
     {
         return Ok(false);
     }
@@ -2155,15 +2122,16 @@ fn cast_during_resolution(
         cc.modes = modes;
         cc.x = 0;
     }
-    let targeted: Vec<Event> = targets
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !empty.contains(&(*i as u8)))
-        .map(|(_, t)| Event::Targeted {
+    let mut targeted: Vec<Event> = Vec::new();
+    for (i, t) in targets.iter().enumerate() {
+        let e = Event::Targeted {
             object: on_stack,
             target: *t,
-        })
-        .collect();
+        };
+        if !empty.contains(&(i as u8)) && !targeted.contains(&e) {
+            targeted.push(e);
+        }
+    }
     if !targeted.is_empty() {
         apply::apply_simultaneous(state, Cause::PlayerAction(who), targeted, log);
     }
@@ -2271,6 +2239,7 @@ fn counter_object(
     cards: &dyn PrintedCards,
     log: &mut Vec<StampedEvent>,
     id: ObjectId,
+    exile_instead: bool,
     cause: Cause,
 ) {
     // The target may already have left the stack — resolved, or countered by
@@ -2291,7 +2260,7 @@ fn counter_object(
         .as_ref()
         .is_some_and(|c| c.ability.is_some());
     let owner = obj.owner;
-    let exile = obj.cast_context.as_ref().is_some_and(|c| c.exile_on_leave);
+    let exile = exile_instead || obj.cast_context.as_ref().is_some_and(|c| c.exile_on_leave);
 
     apply::apply(state, cause, Event::Countered { object: id }, log);
 
@@ -2718,8 +2687,139 @@ fn targets_of(ctx: &Ctx, sel: &Selector) -> Result<Vec<Target>, EvalError> {
     Ok(out)
 }
 
+/// One source deals damage to several recipients at once, each its own amount (CR 120.2):
+/// protection and prevention apply per recipient, and lifelink gains the total.
+fn deal_damage(
+    state: &mut GameState,
+    cards: &dyn PrintedCards,
+    log: &mut Vec<StampedEvent>,
+    rc: &ResolveCtx,
+    cause: Cause,
+    src: ObjectId,
+    shares: &[(Target, u32)],
+) -> Result<(), ResolveError> {
+    let (deathtouch, lifelink, wither, infect) = with_ctx(state, cards, rc, |ctx| {
+        Ok((
+            ctx.has_keyword(src, Keyword::Deathtouch).unwrap_or(false),
+            ctx.has_keyword(src, Keyword::Lifelink).unwrap_or(false),
+            ctx.has_keyword(src, Keyword::Wither).unwrap_or(false),
+            ctx.has_keyword(src, Keyword::Infect).unwrap_or(false),
+        ))
+    })?;
+    let mut events: Vec<Event> = Vec::new();
+    let mut dealt = 0i32;
+    for (t, n) in shares {
+        let t = *t;
+        if *n == 0 {
+            continue;
+        }
+        // Protection prevents damage from sources with the quality.
+        if let Target::Object(o) = t
+            && crate::eval::protected_from(state, cards, o, src)
+        {
+            continue;
+        }
+        let amount = crate::prevention::prevent(state, cards, src, t, *n, false, &mut events);
+        if amount == 0 {
+            continue;
+        }
+        dealt += amount as i32;
+        match t {
+            Target::Object(o) => {
+                events.push(object_damage_event(
+                    state,
+                    cards,
+                    src,
+                    o,
+                    amount,
+                    deathtouch,
+                    wither || infect,
+                ));
+            }
+            Target::Player(p) => {
+                events.push(Event::DamageDealtToPlayer {
+                    source: src,
+                    player: p,
+                    amount,
+                    counters: infect,
+                });
+            }
+        }
+    }
+    // CR 702.15b — lifelink gains the life in the same event as the damage.
+    if lifelink
+        && dealt > 0
+        && let Some(controller) = crate::layers::controller(state, src)
+    {
+        events.push(Event::LifeChanged {
+            player: controller,
+            delta: dealt,
+        });
+    }
+    apply::apply_simultaneous(state, cause, events, log);
+    Ok(())
+}
+
+/// CR 702.52 — dredge: before a draw, the drawing player may instead mill N and return a
+/// card with dredge N from their graveyard to their hand, if their library holds at least
+/// N cards. Whether the draw was replaced.
+fn dredge(
+    state: &mut GameState,
+    cards: &dyn PrintedCards,
+    log: &mut Vec<StampedEvent>,
+    rc: &mut ResolveCtx,
+    player: PlayerId,
+    cause: Cause,
+) -> Result<bool, ResolveError> {
+    let library = state.objects_in(ZoneRef::of(Zone::Library, player));
+    let dredgers: Vec<(ObjectId, usize)> = state
+        .objects_in(ZoneRef::of(Zone::Graveyard, player))
+        .into_iter()
+        .filter_map(|id| {
+            let o = state.objects.get(&id)?;
+            cards
+                .face(o.card, o.face)?
+                .abilities
+                .iter()
+                .find_map(|a| match a.kind {
+                    mtg_ir::AbilityKind::Dredge(n) if library.len() >= usize::from(n) => {
+                        Some((id, usize::from(n)))
+                    }
+                    _ => None,
+                })
+        })
+        .collect();
+    if dredgers.is_empty() {
+        return Ok(false);
+    }
+    let from = dredgers.iter().map(|(id, _)| *id).collect();
+    let chosen = ask_objects(rc, player, from, 0, 1, "dredge instead of drawing")?;
+    let Some((card, n)) = chosen
+        .first()
+        .and_then(|c| dredgers.iter().find(|(id, _)| id == c))
+        .copied()
+    else {
+        return Ok(false);
+    };
+    for id in library.into_iter().take(n) {
+        move_to(state, log, id, Zone::Graveyard, cause);
+    }
+    move_to(state, log, card, Zone::Hand, cause);
+    Ok(true)
+}
+
 /// Draw one card, or record the failed attempt (CR 121.3, CR 704.5b).
-fn draw_one(state: &mut GameState, log: &mut Vec<StampedEvent>, player: PlayerId, cause: Cause) {
+fn draw_one(
+    state: &mut GameState,
+    cards: &dyn PrintedCards,
+    log: &mut Vec<StampedEvent>,
+    rc: &mut ResolveCtx,
+    player: PlayerId,
+    cause: Cause,
+) -> Result<(), ResolveError> {
+    if dredge(state, cards, log, rc, player, cause)? {
+        return Ok(());
+    }
     let library = ZoneRef::of(Zone::Library, player);
     let Some(top) = state.objects_in(library).first().copied() else {
         // Drawing from an empty library does not lose the game immediately; the
@@ -2730,7 +2830,7 @@ fn draw_one(state: &mut GameState, log: &mut Vec<StampedEvent>, player: PlayerId
             Event::AttemptedDrawFromEmptyLibrary { player },
             log,
         );
-        return;
+        return Ok(());
     };
     let new_id = state.new_object_id();
     apply::apply(
@@ -2754,6 +2854,7 @@ fn draw_one(state: &mut GameState, log: &mut Vec<StampedEvent>, player: PlayerId
         },
         log,
     );
+    Ok(())
 }
 
 /// Move a permanent to one of its owner's zones.
