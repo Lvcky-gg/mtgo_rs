@@ -5359,6 +5359,9 @@ impl Engine {
                 if self.state.prevent_combat_damage {
                     events.push(Event::CombatDamagePreventionChanged { active: false });
                 }
+                if self.state.damage_unpreventable {
+                    events.push(Event::DamageUnpreventableChanged { active: false });
+                }
                 events.extend(self.state.prevent_damage_to.iter().map(|target| {
                     Event::DamagePreventionChanged {
                         target: *target,
@@ -5395,7 +5398,7 @@ impl Engine {
     ) {
         // Prevented damage never happens: no lifelink, counters, commander
         // damage, deathtouch, loyalty loss, or damage triggers (CR 615.6).
-        if self.state.prevent_combat_damage {
+        if self.state.prevent_combat_damage && !self.state.damage_unpreventable {
             return;
         }
         let mut assignments: Vec<crate::combat::Assignment> = Vec::new();
@@ -5599,16 +5602,34 @@ impl Engine {
                 // Turn over: an extra turn if one is waiting (CR 500.7), else the next living
                 // player after whoever's ordinary turn this was.
                 let current = self.state.active_player;
-                let next = match self.state.extra_turns.pop() {
-                    Some(p) => {
-                        self.state.rotation_from.get_or_insert(current);
-                        p
+                let mut next;
+                // A skipped turn is passed over and used up (CR 614.10); the guard only
+                // stops a loop if every turn were skipped forever.
+                let mut guard = self.state.skipped_turns.len() + 2;
+                loop {
+                    next = match self.state.extra_turns.pop() {
+                        Some(p) => {
+                            self.state.rotation_from.get_or_insert(current);
+                            p
+                        }
+                        None => {
+                            let from = self.state.rotation_from.take().unwrap_or(current);
+                            turn::next_player(&self.state, from)
+                        }
+                    };
+                    let Some(i) = self.state.skipped_turns.iter().position(|p| *p == next) else {
+                        break;
+                    };
+                    guard -= 1;
+                    if guard == 0 {
+                        break;
                     }
-                    None => {
-                        let from = self.state.rotation_from.take().unwrap_or(current);
-                        turn::next_player(&self.state, from)
+                    self.state.skipped_turns.remove(i);
+                    // The ordinary rotation continues after the skipped player.
+                    if self.state.rotation_from.is_none() {
+                        self.state.rotation_from = Some(next);
                     }
-                };
+                }
                 self.state.active_player = next;
                 self.state.turn += 1;
                 self.state.step = Step::Untap;

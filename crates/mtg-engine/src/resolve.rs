@@ -195,6 +195,15 @@ pub fn resolve(
             );
             Ok(())
         }
+        Effect::DamageCantBePrevented => {
+            apply::apply(
+                state,
+                cause,
+                Event::DamageUnpreventableChanged { active: true },
+                log,
+            );
+            Ok(())
+        }
         Effect::PreventDamage { to } => {
             let recipients = with_ctx(state, cards, rc, |ctx| targets_of(ctx, to))?;
             for target in recipients {
@@ -1510,6 +1519,13 @@ pub fn resolve(
             let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
             for player in players {
                 apply::apply(state, cause, Event::ExtraTurnAdded { player }, log);
+            }
+            Ok(())
+        }
+        Effect::SkipNextTurn { who } => {
+            let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+            for player in players {
+                apply::apply(state, cause, Event::TurnSkipAdded { player }, log);
             }
             Ok(())
         }

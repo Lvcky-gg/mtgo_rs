@@ -420,6 +420,9 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
 }
 
 fn prevent_combat_damage<'s>(s: &'s str, _: &mut Cx) -> Option<(Effect, &'s str)> {
+    if let Some(rest) = s.strip_prefix("damage can't be prevented this turn") {
+        return Some((Effect::DamageCantBePrevented, rest));
+    }
     let rest = s.strip_prefix("prevent all combat damage that would be dealt this turn")?;
     Some((Effect::PreventAllCombatDamage, rest))
 }
@@ -2278,6 +2281,14 @@ fn player_verb<'s>(
     if let Some(r) = verb(r, "mill") {
         let (n, r) = count_of(r.strip_prefix(' ')?, "card", cx)?;
         return Some((mill(who, n), r));
+    }
+    // "you skip your next turn", "target player skips their next turn"
+    if let Some(r) = verb(r, "skip")
+        && let Some(r) = r
+            .strip_prefix(" your next turn")
+            .or_else(|| r.strip_prefix(" their next turn"))
+    {
+        return Some((Effect::SkipNextTurn { who }, r));
     }
     // "take an extra turn after this one" (CR 500.7)
     if let Some(r) = verb(r, "take")

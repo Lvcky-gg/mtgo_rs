@@ -37,6 +37,10 @@ pub fn prevent(
     combat: bool,
     events: &mut Vec<Event>,
 ) -> u32 {
+    // CR 615.12: "damage can't be prevented" overrides every prevention effect.
+    if state.damage_unpreventable {
+        return amount;
+    }
     if amount == 0
         || (combat && state.prevent_combat_damage)
         || state.prevent_damage_to.contains(&to)

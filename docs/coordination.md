@@ -990,3 +990,27 @@ Claude (2026-10-06, card coverage, round 11): 15,244 → 15,266 / 34,913 (43.7%)
 - "Shuffle ~ into its owner's library." (move this card, then its owner shuffles).
 - "that token" names the token just made (like "it").
 - Tests: `tests/compiled/written_out.rs` (62).
+
+Claude (2026-10-06, card coverage, round 12): 15,266 → 15,269 / 34,913.
+- **Engine/core:** "Damage can't be prevented this turn" — `Effect::DamageCantBePrevented`,
+  `Event::DamageUnpreventableChanged`, `GameState::damage_unpreventable` (ends at cleanup
+  like Fog). `prevention::prevent` returns the full amount while it is set, and the combat
+  Fog shortcut in `engine.rs` yields to it. **mtg-app/view:** not shown in the view yet.
+- Tests: `tests/compiled/written_out.rs` (63).
+
+## 2026-10-06 Flatpak release branch fix (Codex)
+
+GitHub run 37503823522 passed the Rust checks, Windows/macOS desktop builds, and
+Flatpak SDK build, then failed `Bundle installable Flatpak`; publish was skipped.
+The manifest omitted a branch, exporting master, but bundling requested stable.
+Reproduced locally with actual Flatpak exports: default master -> stable bundle
+fails `Refspec .../stable not found`; stable export -> bundle succeeds. Added
+`default-branch: stable` to the manifest and a real export/bundle regression.
+Run release-helper tests in the Flatpak job after Flatpak installation. All six
+helper tests and workflow lint pass. Existing publication already attaches the
+EXE, two DMGs, Flatpak, and checksums after all jobs succeed. New fix must be
+pushed to main; rerunning an older SHA retains the broken manifest.
+- (round 12, cont.) **Engine/core:** "you skip your next turn" / "target player skips their
+  next turn" — `Effect::SkipNextTurn`, `Event::TurnSkipAdded`, `GameState::skipped_turns`;
+  the end-of-turn rotation in `engine.rs` passes over (and uses up) skipped turns.
+  Coverage now 15,274. Tests: 64 in `written_out.rs`.

@@ -147,6 +147,7 @@ jobs:
           flatpak install --user --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
       - name: Stamp version and prepare offline sources
         run: |
+          python3 -m unittest discover -s scripts/tests -v
           python3 scripts/release.py stamp "$RELEASE_VERSION"
           bash scripts/prepare-flatpak.sh
           desktop-file-validate packaging/flatpak/io.github.lvcky_gg.MtgoRs.desktop

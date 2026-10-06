@@ -105,9 +105,17 @@ The workflow stages are:
 2. Run the release-helper tests, Rust formatting, workspace tests, and Clippy.
 3. Build Windows and both macOS architectures on their native runners. Vendor
    dependencies for Linux, then compile offline inside Freedesktop SDK 25.08.
+   The Flatpak manifest exports the `stable` branch, matching the bundle command.
 4. Verify all assets are present, generate checksums, upload to a draft release,
    then publish the complete release. Retries replace assets on the existing
    release for that commit.
+
+The Windows executable and macOS disk images appear under **Assets** on each
+GitHub release. If any required job fails, the publish job is skipped and its
+artifacts remain on the workflow run rather than appearing as a public release.
+After fixing a workflow or manifest, push the fix to `main` to build and publish
+the corrected release. Re-running an older commit uses that commit's files and
+therefore does not pick up a fix committed later.
 
 ## Local checks and rebuilds
 

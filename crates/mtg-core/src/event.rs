@@ -305,6 +305,10 @@ pub enum Event {
     CombatDamagePreventionChanged {
         active: bool,
     },
+    /// "Damage can't be prevented this turn": begins on resolution, ends at cleanup.
+    DamageUnpreventableChanged {
+        active: bool,
+    },
     /// A recipient gains or loses prevention of all damage until cleanup.
     DamagePreventionChanged {
         target: Target,
@@ -390,6 +394,10 @@ pub enum Event {
     },
     /// CR 500.7 — `player` will take an extra turn after this one.
     ExtraTurnAdded {
+        player: PlayerId,
+    },
+    /// "You skip your next turn": `player`'s next turn is skipped.
+    TurnSkipAdded {
         player: PlayerId,
     },
     /// CR 724 — a player becomes the monarch. `emblem` is the object that carries the

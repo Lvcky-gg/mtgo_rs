@@ -574,6 +574,9 @@ fn perform(state: &mut GameState, event: &Event) {
         Event::CombatDamagePreventionChanged { active } => {
             state.prevent_combat_damage = *active;
         }
+        Event::DamageUnpreventableChanged { active } => {
+            state.damage_unpreventable = *active;
+        }
         Event::DamagePreventionChanged { target, active } => {
             if *active {
                 if !state.prevent_damage_to.contains(target) {
@@ -630,6 +633,7 @@ fn perform(state: &mut GameState, event: &Event) {
             }
         }
         Event::ExtraTurnAdded { player } => state.extra_turns.push(*player),
+        Event::TurnSkipAdded { player } => state.skipped_turns.push(*player),
         Event::ReflexiveTriggered { .. } => {}
         Event::SpentToCast { object, mana } => {
             if let Some(o) = state.objects.get_mut(object) {

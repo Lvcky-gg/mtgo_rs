@@ -306,6 +306,7 @@ impl Visitor<'_> {
         match e {
             Effect::Nothing
             | Effect::PreventAllCombatDamage
+            | Effect::DamageCantBePrevented
             | Effect::Cascade
             | Effect::Proliferate
             | Effect::GainClassLevel { .. }
@@ -465,7 +466,7 @@ impl Visitor<'_> {
                 self.selector(who);
                 self.filter(filter);
             }
-            Effect::ExtraTurn { who } => self.selector(who),
+            Effect::ExtraTurn { who } | Effect::SkipNextTurn { who } => self.selector(who),
             Effect::SpendOnly { only, effect, .. } => {
                 self.filter(only);
                 self.effect(effect);

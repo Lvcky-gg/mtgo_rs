@@ -44,6 +44,8 @@ pub struct GameState {
     pub continuous: Vec<ContinuousEffect>,
     /// Global Fog-style prevention, lasting until cleanup.
     pub prevent_combat_damage: bool,
+    /// "Damage can't be prevented this turn" (CR 615.12), until cleanup.
+    pub damage_unpreventable: bool,
     /// Recipient identities shielded from all damage until cleanup.
     pub prevent_damage_to: Vec<mtg_core::Target>,
     /// For each player, when their previous and their most recent upkeep began — what
@@ -84,6 +86,8 @@ pub struct GameState {
     /// whose turn the ordinary rotation continues from once they are taken.
     pub extra_turns: Vec<PlayerId>,
     pub rotation_from: Option<PlayerId>,
+    /// One entry per turn a player is to skip ("you skip your next turn").
+    pub skipped_turns: Vec<PlayerId>,
     /// Players who can't gain life ("players can't gain life"), as of the last time the
     /// engine settled — what `apply::replace` consults.
     pub no_life_gain: Vec<PlayerId>,
@@ -593,6 +597,7 @@ impl GameState {
             continuous: Vec::new(),
             revealed_cards: Vec::new(),
             prevent_combat_damage: false,
+            damage_unpreventable: false,
             prevent_damage_to: Vec::new(),
             upkeeps: BTreeMap::new(),
             spells_cast_this_turn: 0,
@@ -603,6 +608,7 @@ impl GameState {
             monarch: None,
             extra_turns: Vec::new(),
             rotation_from: None,
+            skipped_turns: Vec::new(),
             no_life_gain: Vec::new(),
             life_gain_boost: BTreeMap::new(),
             sees_top: Vec::new(),

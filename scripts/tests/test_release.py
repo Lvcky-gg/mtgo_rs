@@ -64,6 +64,34 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any(value.startswith("--filesystem=") for value in manifest["finish-args"]))
         self.assertIn("--frozen", manifest["modules"][0]["build-commands"][0])
 
+    @unittest.skipUnless(shutil.which("flatpak"), "Flatpak is not installed")
+    def test_flatpak_export_branch_can_be_bundled_by_the_release_workflow(self):
+        manifest = json.loads((ROOT / "packaging/flatpak/io.github.lvcky_gg.MtgoRs.json").read_text())
+        # The bundle command names stable. Without a declared branch the builder
+        # exports master, and build-bundle fails with "Refspec .../stable not found".
+        self.assertEqual(manifest.get("default-branch"), "stable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "app"
+            (app / "files/bin").mkdir(parents=True)
+            (app / "export").mkdir()
+            arch = subprocess.check_output(["flatpak", "--default-arch"], text=True).strip()
+            (app / "metadata").write_text(
+                f'[Application]\nname={manifest["app-id"]}\n'
+                f'runtime={manifest["runtime"]}/{arch}/{manifest["runtime-version"]}\n'
+                f'command={manifest["command"]}\n')
+            executable = app / "files/bin" / manifest["command"]
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            subprocess.run(["flatpak", "build-export", "--disable-sandbox",
+                            str(root / "repo"), str(app), manifest["default-branch"]],
+                           check=True, capture_output=True)
+            bundle = root / "release.flatpak"
+            subprocess.run(["flatpak", "build-bundle", str(root / "repo"),
+                            str(bundle), manifest["app-id"], "stable"],
+                           check=True, capture_output=True)
+            self.assertGreater(bundle.stat().st_size, 0)
+
     def test_version_is_numeric_and_retries_reuse_the_commit_tag(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

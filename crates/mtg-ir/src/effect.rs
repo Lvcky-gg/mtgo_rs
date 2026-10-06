@@ -26,6 +26,8 @@ pub enum Effect {
     Nothing,
     /// CR 615: prevent all combat damage until the cleanup step of this turn.
     PreventAllCombatDamage,
+    /// "Damage can't be prevented this turn."
+    DamageCantBePrevented,
     /// Prevent all damage to the selected recipients until cleanup.
     PreventDamage {
         to: Selector,
@@ -295,6 +297,10 @@ pub enum Effect {
     },
     /// "Take an extra turn after this one" (CR 500.7).
     ExtraTurn {
+        who: Selector,
+    },
+    /// "You skip your next turn" (CR 614.10).
+    SkipNextTurn {
         who: Selector,
     },
     /// CR 724.1 — a player becomes the monarch. The designation's two triggered abilities

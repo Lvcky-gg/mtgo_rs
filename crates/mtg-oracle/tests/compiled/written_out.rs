@@ -1670,3 +1670,59 @@ fn that_token_is_the_one_just_made() {
     g.combat(&[token], &[], &[], &[]);
     assert_eq!(g.life(P1), 17);
 }
+
+#[test]
+fn damage_cant_be_prevented_beats_a_shield() {
+    for unpreventable in [false, true] {
+        let mut t = Table::default();
+        let shield = t.card(
+            "{W}",
+            "Instant",
+            None,
+            "Prevent all damage that would be dealt to target creature this turn.",
+        );
+        let text = if unpreventable {
+            "Damage can't be prevented this turn. ~ deals 2 damage to any target."
+        } else {
+            "~ deals 2 damage to any target."
+        };
+        let shot = t.card("{R}", "Instant", None, text);
+        let bear = t.bear();
+        let mut g = Game::new(t);
+        g.lands(2);
+        let b = g.put(bear, P1, Zone::Battlefield);
+        let s = g.put(shield, P0, Zone::Hand);
+        let x = g.put(shot, P0, Zone::Hand);
+        g.main();
+        g.cast(s, &[Target::Object(b)]);
+        g.cast(x, &[Target::Object(b)]);
+        assert_eq!(g.engine.state.objects.contains_key(&b), !unpreventable);
+    }
+}
+
+#[test]
+fn skip_your_next_turn() {
+    let mut t = Table::default();
+    let deal = t.card(
+        "{U}",
+        "Sorcery",
+        None,
+        "Draw four cards. You skip your next turn.",
+    );
+    let mut g = Game::new(t);
+    g.lands(1);
+    let d = g.put(deal, P0, Zone::Hand);
+    g.main();
+    g.cast(d, &[]);
+    let turn = g.engine.state.turn;
+    g.until(P1, Step::PrecombatMain);
+    assert_eq!(g.engine.state.turn, turn + 1);
+    // P0's turn is skipped: P1 goes again.
+    g.pending = None;
+    g.until(P1, Step::Upkeep);
+    assert_eq!(g.engine.state.turn, turn + 2);
+    assert_eq!(g.engine.state.active_player, P1);
+    g.pending = None;
+    g.until(P0, Step::Upkeep);
+    assert_eq!(g.engine.state.turn, turn + 3, "then P0 as usual");
+}

@@ -220,7 +220,7 @@ pub trait SelectorResolver {
 pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
     match effect {
         // Global prevention can interact with any combat-damage event.
-        Effect::PreventAllCombatDamage => Footprint::unanalysable(),
+        Effect::PreventAllCombatDamage | Effect::DamageCantBePrevented => Footprint::unanalysable(),
         Effect::PreventDamage { .. } | Effect::PreventDamageShield { .. } => {
             Footprint::unanalysable()
         }
@@ -229,6 +229,7 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         Effect::BecomeMonarch { .. }
         | Effect::Dig { .. }
         | Effect::ExtraTurn { .. }
+        | Effect::SkipNextTurn { .. }
         | Effect::PutAttacking { .. }
         | Effect::SpendOnly { .. }
         | Effect::ExileIfDiesThisTurn { .. }

@@ -1,5 +1,6 @@
 {
   "app-id": "io.github.lvcky_gg.MtgoRs",
+  "default-branch": "stable",
   "runtime": "org.freedesktop.Platform",
   "runtime-version": "25.08",
   "sdk": "org.freedesktop.Sdk",
