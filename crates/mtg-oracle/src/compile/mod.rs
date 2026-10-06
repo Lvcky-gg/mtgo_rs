@@ -1901,6 +1901,9 @@ pub(crate) struct Cx<'a> {
     /// Whether this sentence began "Until end of turn, …", so a later "and <subject>
     /// gets …" in it lasts until end of turn too.
     pub until_eot: bool,
+    /// The group the last group effect acted on, for "them" / "those creatures" after
+    /// "Creatures you control get +1/+1 until end of turn."
+    pub group: Option<Selector>,
     /// Whether "that much" / "that many" means the triggering event's amount.
     pub that_much: bool,
     /// Whether the trigger is "one or more …": once per batch of events.
@@ -1922,6 +1925,7 @@ impl<'a> Cx<'a> {
             that_player: None,
             moved: false,
             until_eot: false,
+            group: None,
             that_much: false,
             batch: false,
             while_: None,
@@ -2139,14 +2143,27 @@ fn mana_line(line: &str) -> Option<Vec<ManaOutput>> {
     if rest == "one mana of the chosen color" {
         return Some(vec![ManaOutput::ChosenColor]);
     }
-    if rest == "one mana of any color" {
-        return Some(vec![ManaOutput::AnyOf(vec![
+    let any = || {
+        ManaOutput::AnyOf(vec![
             Color::White,
             Color::Blue,
             Color::Black,
             Color::Red,
             Color::Green,
-        ])]);
+        ])
+    };
+    if rest == "one mana of any color" {
+        return Some(vec![any()]);
+    }
+    // "two mana of any one color": one choice, that many. ("In any combination of colors"
+    // is not read: an activation records one color choice, which would make it one color.)
+    if let Some((n, " mana of any one color")) = words::number(rest)
+        && n > 1
+    {
+        return Some(vec![ManaOutput::Repeated {
+            amount: Value::Fixed(n),
+            output: Box::new(any()),
+        }]);
     }
     if rest.contains(" or ") {
         let options: Vec<Color> = rest
@@ -5123,6 +5140,10 @@ fn restriction_predicate(r: &str, cx: &Cx) -> Option<Vec<Modification>> {
         " can attack as though it didn't have defender"
         | " can attack as though they didn't have defender" => {
             return one(R::AttackDespiteDefender);
+        }
+        " assigns combat damage equal to its toughness rather than its power"
+        | " assign combat damage equal to their toughness rather than their power" => {
+            return one(R::AssignDamageByToughness);
         }
         " can't block and can't be blocked" => {
             return Some(vec![

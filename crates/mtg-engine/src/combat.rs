@@ -792,16 +792,26 @@ pub struct Assignment {
 /// This is *an* assignment, not the only legal one: a player may assign more than
 /// lethal to an early blocker. That is a real choice, and the engine only asks when
 /// it could matter — see [`assignment_is_forced`].
+/// How much combat damage a creature assigns: its power, or its toughness under "assigns
+/// combat damage equal to its toughness rather than its power" (CR 510.1a).
+pub fn damage_amount(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) -> u32 {
+    let Some(c) = crate::layers::compute(state, cards, id) else {
+        return 0;
+    };
+    let by_toughness = restricted(state, cards, id, |r| {
+        matches!(r, Restriction::AssignDamageByToughness)
+    });
+    let n = if by_toughness { c.toughness } else { c.power };
+    n.unwrap_or(0).max(0) as u32
+}
+
 pub fn assign_attacker_damage(
     state: &GameState,
     cards: &dyn PrintedCards,
     attacker: ObjectId,
     defender: Target,
 ) -> Option<Assignment> {
-    let power = crate::layers::compute(state, cards, attacker)
-        .and_then(|c| c.power)
-        .unwrap_or(0)
-        .max(0) as u32;
+    let power = damage_amount(state, cards, attacker);
     let deathtouch = has(state, cards, attacker, Keyword::Deathtouch);
     let trample = has(state, cards, attacker, Keyword::Trample);
 
@@ -868,10 +878,7 @@ pub fn assignment_is_forced(
         .get(&attacker)
         .cloned()
         .unwrap_or_default();
-    let power = crate::layers::compute(state, cards, attacker)
-        .and_then(|c| c.power)
-        .unwrap_or(0)
-        .max(0) as u32;
+    let power = damage_amount(state, cards, attacker);
     if power == 0 || blockers.is_empty() {
         return true;
     }
@@ -897,10 +904,7 @@ pub fn assign_blocker_damage(
     blocker: ObjectId,
     attackers: &[ObjectId],
 ) -> Option<Assignment> {
-    let power = crate::layers::compute(state, cards, blocker)
-        .and_then(|c| c.power)
-        .unwrap_or(0)
-        .max(0) as u32;
+    let power = damage_amount(state, cards, blocker);
     if power == 0 || attackers.is_empty() {
         return None;
     }

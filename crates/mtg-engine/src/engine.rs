@@ -5033,9 +5033,7 @@ impl Engine {
             if !out.contains(b)
                 && crate::combat::blocked_by(&self.state, *b).len() > 1
                 && crate::combat::deals_damage_now(&self.state, cards, *b, first_strike)
-                && crate::layers::compute(&self.state, cards, *b)
-                    .and_then(|c| c.power)
-                    .is_some_and(|p| p > 0)
+                && crate::combat::damage_amount(&self.state, cards, *b) > 0
             {
                 out.push(*b);
             }
@@ -5056,10 +5054,7 @@ impl Engine {
             // A creature blocking several attackers divides its damage among them as its
             // controller chooses (CR 510.1d).
             let attackers = crate::combat::blocked_by(&self.state, blocker);
-            let power = crate::layers::compute(&self.state, cards, blocker)
-                .and_then(|c| c.power)
-                .unwrap_or(0)
-                .max(0) as u32;
+            let power = crate::combat::damage_amount(&self.state, cards, blocker);
             let who =
                 crate::layers::controller(&self.state, blocker).unwrap_or(self.state.active_player);
             let default =
@@ -5099,10 +5094,7 @@ impl Engine {
                 .get(&attacker)
                 .cloned()
                 .unwrap_or_default();
-            let power = crate::layers::compute(&self.state, cards, attacker)
-                .and_then(|c| c.power)
-                .unwrap_or(0)
-                .max(0) as u32;
+            let power = crate::combat::damage_amount(&self.state, cards, attacker);
             let who = crate::layers::controller(&self.state, attacker)
                 .unwrap_or(self.state.active_player);
 

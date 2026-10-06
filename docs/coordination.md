@@ -941,3 +941,52 @@ Claude (2026-10-06, card coverage, round 8): 15,156 → 15,175 / 34,913 (43.5%).
 - Reveal-and-choose: "a noncreature, nonland card", "a card from it with mana value N or
   greater", ", you choose …, then that player discards that card".
 - Tests: `tests/compiled/written_out.rs` (53).
+
+Claude (2026-10-06, card coverage, round 9): 15,175 → 15,216 / 34,913 (43.6%).
+- `dig`: "up to two / any number of <noun> cards … and put them / the revealed cards into
+  your hand"; colour/adjective-only nouns ("a white card", "a historic card", "a
+  noncreature, nonland card", "a permanent card"); "with power 2 or less" after "card";
+  "put one into your hand and the other …"; a bare "on the bottom of your library".
+- Mana: "Add two/three mana of any one color" (`Repeated` of `AnyOf`). "In any combination
+  of colors" deliberately not read: an activation records one colour choice.
+- **Engine fix:** `Effect::AddMana` resolution now evaluates counted amounts
+  (`mana::counted`, now `pub(crate)`). Before, a manually activated or triggered "add {G}
+  for each creature you control" made 1 mana; auto-payment was already right.
+- Tests: `tests/compiled/written_out.rs` (56).
+
+## 2026-10-06 ngrok browser links (Codex)
+
+Enabled eframe `links`: default features were disabled, so the existing hosting
+account/authtoken/domain hyperlinks emitted URL commands without opening a
+browser. Browser dependency is now locked; documented returning from the
+browser to paste the token. Verified the feature chain and GUI cargo check.
+
+Claude (2026-10-06, card coverage, round 10): 15,216 → 15,244 / 34,913 (43.7%).
+- Prevention: "… combat damage that would be dealt to and dealt by <object> this turn"
+  (two shields).
+- `Cx::group`: after a group effect ("creatures you control get +1/+1 until end of
+  turn"), "them" / "those creatures" name that group ("Untap them.").
+- `Restriction::AssignDamageByToughness` and `combat::damage_amount` — every place combat
+  damage reads power (combat.rs assignments, engine.rs damage choices) now goes through it.
+- Tests: `tests/compiled/written_out.rs` (59).
+
+## 2026-10-06 Windows application paths (Codex)
+
+Added shared `mtg-store::paths` resolution. Windows data/database and image
+cache use LOCALAPPDATA; artwork configuration uses APPDATA. Missing native
+variables fall back through USERPROFILE/HOME to the Windows temporary directory,
+never the working directory. Existing Unix locations and MTGO_RS_DB/XDG overrides
+remain supported, empty variables are ignored, and OS strings preserve paths.
+GUI artwork paths delegate to the shared module; CLI database defaults do too.
+Documented older Windows database migration without moving user files. Added
+native path tests to desktop release jobs. Local checks passed: 33 store tests,
+14 artwork tests, Clippy for store/app, GUI build, workflow lint and diff check.
+Native Windows execution remains a release-runner check.
+
+Claude (2026-10-06, card coverage, round 11): 15,244 → 15,266 / 34,913 (43.7%).
+- **Engine:** `ZonePosition::OwnerChooses` is now carried out (the owner is asked top or
+  bottom). Grammar: "<object>'s owner puts it on their choice of the top or bottom of their
+  library".
+- "Shuffle ~ into its owner's library." (move this card, then its owner shuffles).
+- "that token" names the token just made (like "it").
+- Tests: `tests/compiled/written_out.rs` (62).

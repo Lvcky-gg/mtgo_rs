@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 # Stable, and sufficient for a board of panels and card images. See ADR-009 and ADR-010.
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "links", "wayland", "x11"] }
 egui = "0.36"
 # The app hosts and joins games, so it needs the real transport.
 mtg-session = { workspace = true, features = ["transport"] }

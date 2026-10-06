@@ -311,7 +311,9 @@ pub fn resolve(
             let chosen = state.objects.get(&rc.source).and_then(|o| o.chosen_color);
             for p in players {
                 for out in produces {
-                    let out = &crate::mana::with_chosen_color(out, chosen);
+                    let out = crate::mana::with_chosen_color(out, chosen);
+                    // "Add {G} for each creature you control": counted now.
+                    let out = &crate::mana::counted(state, cards, rc.source, rc.controller, out);
                     let (color, amount) = resolve_output(out, rc);
                     if amount > 0 {
                         apply::apply(
@@ -661,6 +663,18 @@ pub fn resolve(
                 let index = match position {
                     mtg_ir::effect::ZonePosition::Bottom => Some(u32::MAX),
                     mtg_ir::effect::ZonePosition::FromTop(n) => Some(u32::from(*n)),
+                    // "its owner's choice of the top or bottom of their library"
+                    mtg_ir::effect::ZonePosition::OwnerChooses => {
+                        let Some(owner) = state.objects.get(&id).map(|o| o.owner) else {
+                            continue;
+                        };
+                        if ask_confirm(rc, owner, "put it on top of your library (or the bottom)?")?
+                        {
+                            None
+                        } else {
+                            Some(u32::MAX)
+                        }
+                    }
                     _ => None,
                 };
                 let Some(new_id) = move_to_at(state, log, id, *to, index, cause) else {

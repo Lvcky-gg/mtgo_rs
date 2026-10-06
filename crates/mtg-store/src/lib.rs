@@ -25,6 +25,7 @@
 pub mod cards;
 pub mod decks;
 pub mod identity;
+pub mod paths;
 pub mod schema;
 
 use std::path::{Path, PathBuf};
@@ -39,22 +40,13 @@ pub use cards::{CardQuery, FaceRow, StoredCard};
 pub use decks::{DeckRow, Section};
 pub use identity::{StoredFriend, StoredIdentity};
 
-/// Where the database lives: `$MTGO_RS_DB`, else `$XDG_DATA_HOME/mtgo_rs/cards.sqlite`, else
-/// `~/.local/share/mtgo_rs/cards.sqlite`.
+/// Where the database lives: `$MTGO_RS_DB`, else the application's data directory.
+/// Windows uses `%LOCALAPPDATA%/mtgo_rs`; Unix keeps its existing XDG/HOME path.
 ///
 /// Here rather than in a frontend so the CLI that imports and the window that plays agree on
 /// one file without either knowing about the other.
 pub fn default_path() -> PathBuf {
-    if let Ok(explicit) = std::env::var("MTGO_RS_DB") {
-        return PathBuf::from(explicit);
-    }
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".local/share")
-        });
-    base.join("mtgo_rs").join("cards.sqlite")
+    paths::database_path()
 }
 
 /// A handle on the local database.

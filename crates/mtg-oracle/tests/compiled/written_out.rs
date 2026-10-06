@@ -1417,3 +1417,256 @@ fn reveal_hand_choose_a_noncreature_nonland_card() {
     assert!(g.engine.state.objects.contains_key(&b));
     assert!(g.engine.state.objects.contains_key(&f));
 }
+
+#[test]
+fn dig_up_to_two_creature_cards() {
+    let mut t = Table::default();
+    let dig = t.card(
+        "{2}{G}",
+        "Sorcery",
+        None,
+        "Look at the top four cards of your library. You may reveal up to two creature cards \
+         from among them and put them into your hand. Put the rest on the bottom of your \
+         library in a random order.",
+    );
+    let bear = t.bear();
+    let rock = t.card("{2}", "Artifact", None, "");
+    let mut g = Game::new(t);
+    g.lands(3);
+    let d = g.put(dig, P0, Zone::Hand);
+    g.main();
+    let ids: Vec<_> = [bear, rock, bear, rock]
+        .iter()
+        .map(|c| g.put(*c, P0, Zone::Library))
+        .collect();
+    let lib = mtg_core::ZoneRef::of(Zone::Library, P0);
+    let order = g.engine.state.zone_order.get_mut(&lib).unwrap();
+    order.retain(|o| !ids.contains(o));
+    for (i, id) in ids.iter().enumerate() {
+        order.insert(i, *id);
+    }
+    let hand = g.count(Zone::Hand, P0);
+    g.act(
+        Action::Cast { object: d },
+        &[],
+        &[Answer::Objects(vec![ids[0], ids[2]])],
+    );
+    assert_eq!(g.count(Zone::Hand, P0), hand - 1 + 2, "both creature cards");
+    let lib = g
+        .engine
+        .state
+        .objects_in(mtg_core::ZoneRef::of(Zone::Library, P0));
+    let bottom: Vec<_> = lib[lib.len() - 2..]
+        .iter()
+        .map(|id| g.engine.state.objects[id].card)
+        .collect();
+    assert_eq!(bottom, vec![rock, rock]);
+}
+
+#[test]
+fn manual_activation_adds_mana_for_each_creature() {
+    let mut t = Table::default();
+    let cradle = t.card(
+        "",
+        "Land",
+        None,
+        "{T}: Add {G} for each creature you control.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    let c = g.put(cradle, P0, Zone::Battlefield);
+    for _ in 0..3 {
+        g.put(bear, P0, Zone::Battlefield);
+    }
+    g.main();
+    use mtg_ir::PrintedCards;
+    let ability = g.table.face(cradle, 0).unwrap().abilities[0].id;
+    g.act(
+        Action::ActivateManaAbility {
+            source: c,
+            ability,
+            color: None,
+        },
+        &[],
+        &[],
+    );
+    assert_eq!(g.engine.state.player(P0).mana.total(), 3);
+}
+
+#[test]
+fn two_mana_of_any_one_color_pays_a_double_pip() {
+    let mut t = Table::default();
+    let vault = t.card("", "Land", None, "{T}: Add two mana of any one color.");
+    let ogre = t.card("{R}{R}", "Creature — Bear", Some((3, 3)), "");
+    let mut g = Game::new(t);
+    g.put(vault, P0, Zone::Battlefield);
+    let o = g.put(ogre, P0, Zone::Hand);
+    let actions = g.main();
+    assert!(actions.contains(&Action::Cast { object: o }));
+    g.cast(o, &[]);
+    assert!(g.find(ogre).is_some());
+}
+
+#[test]
+fn prevent_combat_damage_to_and_by_target_creature() {
+    let mut t = Table::default();
+    let fog = t.card(
+        "{W}",
+        "Instant",
+        None,
+        "Prevent all combat damage that would be dealt to and dealt by target creature this \
+         turn.",
+    );
+    let ogre = t.card("{3}", "Creature — Bear", Some((3, 3)), "");
+    let mut g = Game::new(t);
+    g.lands(1);
+    let mine = g.put(ogre, P0, Zone::Battlefield);
+    let theirs = g.put(ogre, P1, Zone::Battlefield);
+    let f = g.put(fog, P0, Zone::Hand);
+    g.main();
+    g.cast(f, &[Target::Object(mine)]);
+    g.combat(&[mine], &[(theirs, mine)], &[], &[]);
+    assert_eq!(g.engine.state.objects[&mine].damage, 0, "none dealt to it");
+    assert_eq!(
+        g.engine.state.objects[&theirs].damage, 0,
+        "none dealt by it"
+    );
+}
+
+#[test]
+fn group_pump_then_untap_them() {
+    let mut t = Table::default();
+    let rally = t.card(
+        "{1}{W}",
+        "Instant",
+        None,
+        "Creatures you control get +1/+1 until end of turn. Untap them.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(2);
+    let a = g.put(bear, P0, Zone::Battlefield);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let foe = g.put(bear, P1, Zone::Battlefield);
+    let r = g.put(rally, P0, Zone::Hand);
+    g.main();
+    for id in [a, b, foe] {
+        g.engine.state.objects.get_mut(&id).unwrap().tapped = true;
+    }
+    g.cast(r, &[]);
+    assert!(!g.engine.state.objects[&a].tapped && !g.engine.state.objects[&b].tapped);
+    assert!(g.engine.state.objects[&foe].tapped, "not one of them");
+    assert_eq!(g.pt(a), (3, 3));
+}
+
+#[test]
+fn assigns_combat_damage_equal_to_toughness() {
+    let mut t = Table::default();
+    let wall = t.card(
+        "{1}{W}",
+        "Creature — Bear",
+        Some((1, 4)),
+        "This creature assigns combat damage equal to its toughness rather than its power.",
+    );
+    let mut g = Game::new(t);
+    let w = g.put(wall, P0, Zone::Battlefield);
+    g.main();
+    g.combat(&[w], &[], &[], &[]);
+    assert_eq!(g.life(P1), 16, "4 damage, not 1");
+    // Blocked by a 3/3: the blocker dies.
+    let mut t = Table::default();
+    let wall = t.card(
+        "{1}{W}",
+        "Creature — Bear",
+        Some((1, 4)),
+        "This creature assigns combat damage equal to its toughness rather than its power.",
+    );
+    let ogre = t.card("{3}", "Creature — Bear", Some((3, 3)), "");
+    let mut g = Game::new(t);
+    let w = g.put(wall, P0, Zone::Battlefield);
+    let o = g.put(ogre, P1, Zone::Battlefield);
+    g.main();
+    g.combat(&[w], &[(o, w)], &[], &[]);
+    assert!(!g.engine.state.objects.contains_key(&o));
+}
+
+#[test]
+fn spell_shuffles_itself_into_its_library() {
+    let mut t = Table::default();
+    let bolt = t.card(
+        "{R}",
+        "Instant",
+        None,
+        "~ deals 5 damage to any target. Shuffle ~ into its owner's library.",
+    );
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bolt, P0, Zone::Hand);
+    g.main();
+    let library = g.count(Zone::Library, P0);
+    g.cast(b, &[Target::Player(P1)]);
+    assert_eq!(g.life(P1), 15);
+    assert_eq!(g.count(Zone::Graveyard, P0), 0, "not in the graveyard");
+    assert_eq!(
+        g.count(Zone::Library, P0),
+        library + 1,
+        "back in the library"
+    );
+}
+
+#[test]
+fn owner_chooses_top_or_bottom() {
+    for top in [true, false] {
+        let mut t = Table::default();
+        let tuck = t.card(
+            "{1}{U}",
+            "Instant",
+            None,
+            "Target creature's owner puts it on their choice of the top or bottom of their \
+             library.",
+        );
+        let ogre = t.card("{3}", "Creature — Bear", Some((3, 3)), "");
+        let mut g = Game::new(t);
+        g.lands(2);
+        let o = g.put(ogre, P1, Zone::Battlefield);
+        let s = g.put(tuck, P0, Zone::Hand);
+        g.main();
+        g.act(
+            Action::Cast { object: s },
+            &[Target::Object(o)],
+            &[Answer::Bool(top)],
+        );
+        let lib = g
+            .engine
+            .state
+            .objects_in(mtg_core::ZoneRef::of(Zone::Library, P1));
+        let at = if top { lib[0] } else { lib[lib.len() - 1] };
+        assert_eq!(g.engine.state.objects[&at].card, ogre);
+    }
+}
+
+#[test]
+fn that_token_is_the_one_just_made() {
+    let mut t = Table::default();
+    let call = t.card(
+        "{R}",
+        "Sorcery",
+        None,
+        "Create a 3/1 red Elemental creature token. That token gains haste.",
+    );
+    let mut g = Game::new(t);
+    g.lands(1);
+    let c = g.put(call, P0, Zone::Hand);
+    g.main();
+    g.cast(c, &[]);
+    let token = g
+        .engine
+        .state
+        .battlefield()
+        .into_iter()
+        .find(|id| g.engine.state.objects[id].is_token)
+        .unwrap();
+    assert!(g.has(token, mtg_core::Keyword::Haste));
+    g.combat(&[token], &[], &[], &[]);
+    assert_eq!(g.life(P1), 17);
+}

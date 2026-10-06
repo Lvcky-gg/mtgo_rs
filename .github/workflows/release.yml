@@ -103,6 +103,8 @@ jobs:
           key: ${{ matrix.target }}
       - name: Stamp version
         run: python3 scripts/release.py stamp "$RELEASE_VERSION"
+      - name: Test application paths on the native platform
+        run: cargo test -p mtg-store --locked --target "$RELEASE_TARGET" paths::tests
       - name: Build native application
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}

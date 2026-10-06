@@ -22,6 +22,9 @@ Only the **host** needs an ngrok account. The guest needs only the game and the
 invite link. Ngrok is built into the game; you do **not** need to download its
 app, run terminal commands, or forward a port.
 
+The account, authtoken, and domain links on the hosting screen open your default
+web browser. After signing in and copying your token, return to the game to paste it.
+
 1. [Create a free ngrok account](https://dashboard.ngrok.com/signup) and complete
    any account verification ngrok asks for.
 2. Open [Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken)

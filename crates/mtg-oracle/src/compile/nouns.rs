@@ -562,6 +562,22 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
     {
         return Some((cx.it.clone()?, true, r));
     }
+    // "Create a 1/1 Goblin creature token. That token gains haste.": what was just made.
+    if let Some(r) = s.strip_prefix("that token").filter(|r| !r.starts_with('s'))
+        && cx.it == Some(Selector::Bound(mtg_ir::selector::Binding::It))
+    {
+        return Some((cx.it.clone()?, false, r));
+    }
+    // "Creatures you control get +1/+1 until end of turn. Untap them.": the group the
+    // previous clause acted on.
+    if let Some(r) = s
+        .strip_prefix("them")
+        .filter(|r| !r.starts_with(|c: char| c.is_alphanumeric()))
+        .or_else(|| s.strip_prefix("those creatures"))
+        && let Some(group) = cx.group.clone()
+    {
+        return Some((group, true, r));
+    }
     for (prefix, kind) in [
         ("that creature", CardType::Creature),
         ("that permanent", CardType::Creature),

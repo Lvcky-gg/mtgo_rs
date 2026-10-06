@@ -550,6 +550,8 @@ pub enum Restriction {
     CantAttack,
     /// "Can attack as though it didn't have defender" (CR 702.3b).
     AttackDespiteDefender,
+    /// "Assigns combat damage equal to its toughness rather than its power" (CR 510.1a).
+    AssignDamageByToughness,
     CantBlock,
     CantBeBlockedExceptBy(ObjectFilter),
     /// "Can block only creatures with flying": what this creature may block.

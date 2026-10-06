@@ -65,6 +65,33 @@ not submit the application to Flathub or create an automatic-update remote.
 Flatpak keeps decks, card data and settings in the application's own data area.
 Card files are downloaded through the app; releases do not bundle a card database.
 
+## Local files
+
+Windows uses the current user's application-data folders, independently of the
+executable's location or working directory:
+
+| File | Windows default |
+| --- | --- |
+| Database, decks, identity and saved settings | `%LOCALAPPDATA%\mtgo_rs\cards.sqlite` |
+| Downloaded card images and mana symbols | `%LOCALAPPDATA%\mtgo_rs\images` |
+| Optional artwork name mappings | `%APPDATA%\mtgo_rs\art.txt` |
+
+The folder choices follow [Windows application-data environment variables](https://learn.microsoft.com/en-us/windows/deployment/usmt/usmt-recognized-environment-variables).
+If the application-data variables are missing, the client derives those folders
+from `USERPROFILE`. Linux, Flatpak and existing macOS installations retain their
+current XDG/HOME locations.
+
+`MTGO_RS_DB` still overrides the database file. `XDG_DATA_HOME`, `XDG_CACHE_HOME`
+and `XDG_CONFIG_HOME` still override the corresponding directories, including on
+Windows. Empty variables are ignored, and non-Unicode filesystem paths are
+preserved.
+
+An older Windows build may have saved its database beneath `HOME\.local\share`
+or its working directory. Existing databases are not moved automatically. To
+retain an older Windows collection, close the app and copy its `mtgo_rs` data
+folder to `%LOCALAPPDATA%\mtgo_rs`, keeping a backup, or point `MTGO_RS_DB` at
+the original database. This change does not relocate existing Linux/macOS data.
+
 ## Repository setup
 
 Enable GitHub Actions for the repository. The publish job requests

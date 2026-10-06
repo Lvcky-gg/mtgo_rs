@@ -797,7 +797,7 @@ pub fn manual_source(
 /// Pull the mana an effect produces out of its tree.
 /// "Add {G} for each creature you control", as the number it is now, so the planner
 /// neither counts mana that isn't there nor misses mana that is.
-fn counted(
+pub(crate) fn counted(
     state: &GameState,
     cards: &dyn PrintedCards,
     source: ObjectId,

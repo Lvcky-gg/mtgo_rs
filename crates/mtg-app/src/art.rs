@@ -91,11 +91,9 @@ impl ArtNames {
             .unwrap_or_default()
     }
 
-    /// `$XDG_CONFIG_HOME/mtgo_rs/art.txt`, or `~/.config/mtgo_rs/art.txt`.
+    /// `art.txt` in the shared application configuration directory.
     pub fn default_path() -> PathBuf {
-        xdg_dir("XDG_CONFIG_HOME", ".config")
-            .join("mtgo_rs")
-            .join("art.txt")
+        mtg_store::paths::config_dir().join("art.txt")
     }
 
     /// The real name a shown name is mapped to, if any.
@@ -104,18 +102,9 @@ impl ArtNames {
     }
 }
 
-/// `$XDG_CACHE_HOME/mtgo_rs/images`, or `~/.cache/mtgo_rs/images`.
+/// Downloaded card images in the shared application cache directory.
 pub fn default_cache_dir() -> PathBuf {
-    xdg_dir("XDG_CACHE_HOME", ".cache")
-        .join("mtgo_rs")
-        .join("images")
-}
-
-fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
-    std::env::var(var).map(PathBuf::from).unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(fallback)
-    })
+    mtg_store::paths::cache_dir().join("images")
 }
 
 /// The cache file for a complete real card name, with a stable bounded filename.

@@ -259,6 +259,7 @@ impl Visitor<'_> {
                 }
                 Restriction::CantAttack
                 | Restriction::AttackDespiteDefender
+                | Restriction::AssignDamageByToughness
                 | Restriction::CantBlock
                 | Restriction::MustAttackIfAble
                 | Restriction::Goaded

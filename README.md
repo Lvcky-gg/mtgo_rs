@@ -36,6 +36,11 @@ builds need ALSA development headers and pkg-config (on Debian/Ubuntu:
 `sudo apt install libasound2-dev pkg-config`). Audio-device failure leaves the game
 usable without sound. The original cues and generator are in [assets/sounds](assets/sounds/README.md).
 
+Windows stores the database and image cache under `%LOCALAPPDATA%\mtgo_rs`,
+and optional artwork mappings under `%APPDATA%\mtgo_rs`. Existing Unix paths
+and explicit environment overrides are preserved. See
+[local file locations](docs/releases.md#local-files).
+
 The deck builder suggests cards from shared rules and type themes, filters suggestions
 by format and color identity, suggests roles missing from the main deck, and shows
 estimated roles, mana curve, average spell
