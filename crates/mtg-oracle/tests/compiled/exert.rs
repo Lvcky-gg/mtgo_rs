@@ -54,7 +54,10 @@ fn declining_to_exert_untaps_as_usual_and_targets_only_when_exerted() {
     game.main();
     game.combat(&[striker], &[], &[], &[Answer::Objects(vec![])]);
     assert_eq!(game.life(P1), 18);
-    assert!(game.engine.state.objects.contains_key(&bear), "not exerted: no damage");
+    assert!(
+        game.engine.state.objects.contains_key(&bear),
+        "not exerted: no damage"
+    );
     game.until(P0, mtg_core::Step::PrecombatMain);
     assert!(!tapped(&game, striker), "not exerted: it untapped");
     game.combat(
@@ -63,7 +66,10 @@ fn declining_to_exert_untaps_as_usual_and_targets_only_when_exerted() {
         &[Target::Object(bear)],
         &[Answer::Objects(vec![striker])],
     );
-    assert!(!game.engine.state.objects.contains_key(&bear), "exerted: 4 damage");
+    assert!(
+        !game.engine.state.objects.contains_key(&bear),
+        "exerted: 4 damage"
+    );
     assert_eq!(game.count(Zone::Graveyard, P1), 1);
 }
 

@@ -365,7 +365,11 @@ fn spree_pays_for_each_chosen_mode() {
             &[Target::Player(P1)],
             &[Answer::Modes(vec![0, 1])],
         );
-        assert_eq!((g.life(P1), g.life(P0)), (their_life, my_life), "{lands} lands");
+        assert_eq!(
+            (g.life(P1), g.life(P0)),
+            (their_life, my_life),
+            "{lands} lands"
+        );
         assert_eq!(tapped(&g), lands);
     }
 }

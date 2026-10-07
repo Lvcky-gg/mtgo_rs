@@ -50,7 +50,9 @@ Each release includes:
   drag **MTGO RS** into **Applications**.
 - `mtgo-rs-vVERSION-macos-x64.dmg`: Intel Macs, installed the same way.
 - `mtgo-rs-vVERSION-linux-x64.flatpak`: install on 64-bit Linux with Flatpak.
-- `SHA256SUMS.txt`: SHA-256 checksums for all four downloads.
+- `mtgo-rs-vVERSION-macos-arm64.zip` and `mtgo-rs-vVERSION-macos-x64.zip`:
+  signed app bundles used by the launch-time updater.
+- `SHA256SUMS.txt`: SHA-256 checksums for every download.
 
 macOS bundles are ad-hoc signed. They are not Developer ID signed or notarized:
 that requires Apple developer credentials, which this repository has not been
@@ -67,9 +69,41 @@ flatpak run io.github.lvcky_gg.MtgoRs
 
 Replace `VERSION` with the downloaded version. Later bundles can be installed
 with the same command. This publishes downloadable bundles on GitHub; it does
-not submit the application to Flathub or create an automatic-update remote.
+not submit the application to Flathub or create an update remote. The client
+updates from the verified GitHub release bundle instead.
 Flatpak keeps decks, card data and settings in the application's own data area.
 Card files are downloaded through the app; releases do not bundle a card database.
+
+## Launch-time client updates
+
+Packaged clients check the latest stable GitHub release on launch, before opening
+application data. A newer version is downloaded for the same platform and
+architecture, checked against `SHA256SUMS.txt`, installed, and restarted. Equal
+or older versions, draft releases, and prereleases are not installed. The first
+restart skips the check once to avoid update loops.
+
+Windows replaces the executable after the current process exits. macOS replaces
+the whole signed app bundle, preserving its signing metadata. The installation
+folder must be writable by the current user; an app running from a mounted DMG
+must first be copied into a writable Applications folder. Linux installs the
+verified Flatpak bundle per user using `flatpak install --or-update`. The package
+allows `org.freedesktop.Flatpak` host-command access for installation and restart;
+this permission is needed by `flatpak-spawn --host` as described in the
+[Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html).
+
+The updater only replaces application files. It never opens, deletes, copies,
+or relocates `cards.sqlite`, its WAL files, decks, settings, identity, or image
+cache. If a custom data path points inside a macOS app bundle, the updater
+keeps the current client rather than replacing that data. Native restarts inherit the working directory and environment; Flatpak
+restarts preserve database and XDG path overrides. Download/check failures let
+the installed client open with an update error message. Native file-swap failures
+restore the previous executable/bundle and reopen it. Successful native updates remove their own staging directory; failed swaps
+keep their error report for diagnosis.
+
+Source builds do not self-update. The release workflow sets
+`MTGO_RS_RELEASE_PLATFORM` to enable checks only in distributable builds. Older
+clients without this feature need one manual upgrade to the first release that
+includes it. No release is published by a local build or test.
 
 ## Local files
 

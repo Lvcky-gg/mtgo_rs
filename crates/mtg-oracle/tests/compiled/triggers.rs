@@ -1021,7 +1021,12 @@ fn that_card_is_the_one_the_death_moved() {
         "Enchant creature\nWhen enchanted creature dies, return that card to the battlefield \
          under your control.",
     );
-    let bolt = t.card("{R}", "Instant", None, "~ deals 3 damage to target creature.");
+    let bolt = t.card(
+        "{R}",
+        "Instant",
+        None,
+        "~ deals 3 damage to target creature.",
+    );
     let bear = t.bear();
     let mut g = Game::new(t);
     g.lands(1);
@@ -1040,8 +1045,7 @@ fn that_card_is_the_one_the_death_moved() {
         .collect();
     assert_eq!(back.len(), 1, "it came back");
     assert_eq!(
-        g.engine.state.objects[&back[0]].controller,
-        P0,
+        g.engine.state.objects[&back[0]].controller, P0,
         "under the aura's controller"
     );
 }
@@ -1079,7 +1083,12 @@ fn a_spell_that_targets_a_creature_triggers_by_type_and_target() {
         "Whenever you cast an instant or sorcery spell that targets a creature, put a +1/+1 \
          counter on this creature.",
     );
-    let growth = t.card("{G}", "Instant", None, "Target creature gets +1/+1 until end of turn.");
+    let growth = t.card(
+        "{G}",
+        "Instant",
+        None,
+        "Target creature gets +1/+1 until end of turn.",
+    );
     let shock = t.card("{R}", "Instant", None, "~ deals 1 damage to any target.");
     let mut g = Game::new(t);
     g.lands(2);
@@ -1176,7 +1185,12 @@ fn a_dying_creature_passes_its_counters_on() {
         Some((1, 1)),
         "When this creature dies, put its counters on target creature you control.",
     );
-    let bolt = t.card("{R}", "Instant", None, "~ deals 5 damage to target creature.");
+    let bolt = t.card(
+        "{R}",
+        "Instant",
+        None,
+        "~ deals 5 damage to target creature.",
+    );
     let bear = t.bear();
     let mut g = Game::new(t);
     g.lands(1);

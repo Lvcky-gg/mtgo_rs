@@ -68,22 +68,29 @@ fn instant_or_card_with_flash_can_find_flash_creatures_only_in_second_branch() {
         1,
         vec![ids[1]],
     );
-    assert!(g
-        .engine
-        .state
-        .objects_in(ZoneRef::of(Zone::Hand, P0))
-        .iter()
-        .any(|id| g.engine.state.objects[id].card == flash));
+    assert!(
+        g.engine
+            .state
+            .objects_in(ZoneRef::of(Zone::Hand, P0))
+            .iter()
+            .any(|id| g.engine.state.objects[id].card == flash)
+    );
 }
 
 #[test]
 fn repeated_and_or_nouns_and_multi_card_or_nouns_remain_rejected() {
-    use mtg_oracle::compile::{compile, FaceText, SubtypeNames};
+    use mtg_oracle::compile::{FaceText, SubtypeNames, compile};
     for text in [
         "Search your library for an instant card and/or a sorcery card, reveal them, put them into your hand, then shuffle.",
         "Search your library for two basic land cards or two Desert cards, reveal them, put them into your hand, then shuffle.",
     ] {
-        let face = FaceText { name: "Separate quotas", card_types: &[mtg_core::CardType::Sorcery], subtypes: &[], oracle_text: Some(text), mana_cost: "{G}" };
+        let face = FaceText {
+            name: "Separate quotas",
+            card_types: &[mtg_core::CardType::Sorcery],
+            subtypes: &[],
+            oracle_text: Some(text),
+            mana_cost: "{G}",
+        };
         assert!(!compile(&face, &SubtypeNames(vec![])).understood());
     }
 }
@@ -112,10 +119,11 @@ fn second_alternative_mana_value_limit_does_not_restrict_the_first() {
         1,
         vec![ids[0]],
     );
-    assert!(g
-        .engine
-        .state
-        .objects_in(ZoneRef::of(Zone::Hand, P0))
-        .iter()
-        .any(|id| g.engine.state.objects[id].card == artifact));
+    assert!(
+        g.engine
+            .state
+            .objects_in(ZoneRef::of(Zone::Hand, P0))
+            .iter()
+            .any(|id| g.engine.state.objects[id].card == artifact)
+    );
 }

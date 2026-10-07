@@ -8,9 +8,7 @@ use mtg_engine::choice::Answer;
 /// The index of a creature type among the options the engine offers (sorted names).
 fn type_option(game: &Game, name: &str) -> u8 {
     let mut names: Vec<&str> = (0..64u16)
-        .filter_map(|i| {
-            mtg_ir::PrintedCards::subtype_name(&game.table, mtg_core::Subtype(i))
-        })
+        .filter_map(|i| mtg_ir::PrintedCards::subtype_name(&game.table, mtg_core::Subtype(i)))
         .filter(|n| mtg_core::is_creature_type(n))
         .collect();
     names.sort_unstable();
@@ -76,4 +74,107 @@ fn a_count_of_the_chosen_type_is_fixed_as_it_resolves() {
         !game.engine.state.objects.contains_key(&target),
         "two Elves: -2/-2 kills the 2/2"
     );
+}
+
+#[test]
+fn becoming_the_chosen_creature_type_replaces_the_others() {
+    let mut table = Table::default();
+    let shifter = table.card(
+        "{1}{U}",
+        "Creature — Bear",
+        Some((2, 2)),
+        "{1}: This creature becomes the creature type of your choice until end of turn.",
+    );
+    let mut game = Game::new(table);
+    game.lands(1);
+    let shifter = game.put(shifter, P0, Zone::Battlefield);
+    game.main();
+    let elf = type_option(&game, "Elf");
+    game.act(activate(shifter, 0), &[], &[Answer::Modes(vec![elf])]);
+    let ch = game
+        .engine
+        .characteristics(&game.table, shifter)
+        .unwrap()
+        .clone();
+    let named = |n: &str| {
+        mtg_ir::PrintedCards::subtype_named(&game.table, n)
+            .is_some_and(|s| ch.subtypes.contains(&s))
+    };
+    assert!(named("Elf"), "an Elf now");
+    assert!(!named("Bear"), "and no longer a Bear");
+}
+
+#[test]
+fn becoming_the_chosen_color() {
+    let mut table = Table::default();
+    let shifter = table.card(
+        "{1}{R}",
+        "Creature — Bear",
+        Some((2, 2)),
+        "{1}: This creature becomes the color of your choice until end of turn.",
+    );
+    let mut game = Game::new(table);
+    game.lands(1);
+    let shifter = game.put(shifter, P0, Zone::Battlefield);
+    game.main();
+    // Options are white, blue, black, red, green.
+    game.act(activate(shifter, 0), &[], &[Answer::Modes(vec![1])]);
+    let ch = game
+        .engine
+        .characteristics(&game.table, shifter)
+        .unwrap()
+        .clone();
+    assert_eq!(ch.colors, mtg_core::ColorSet::single(mtg_core::Color::Blue));
+}
+
+#[test]
+fn an_excluded_type_is_not_offered() {
+    use mtg_engine::{Progress, choice::ChoiceKind};
+    let mut table = Table::default();
+    let shifter = table.card(
+        "{1}{U}",
+        "Creature — Bear",
+        Some((2, 2)),
+        "{1}: Choose a creature type other than Wall. Target creature becomes that type until \
+         end of turn.",
+    );
+    let mut game = Game::new(table);
+    game.lands(1);
+    let shifter = game.put(shifter, P0, Zone::Battlefield);
+    game.main();
+    let prompt = game.pending.take().unwrap().id;
+    game.engine
+        .answer(&game.table, prompt, Answer::Action(activate(shifter, 0)))
+        .unwrap();
+    let mut offered = Vec::new();
+    loop {
+        let Progress::NeedsChoice(c) = game.engine.advance(&game.table) else {
+            continue;
+        };
+        match &c.kind {
+            ChoiceKind::ChooseTargets { .. } => {
+                let t = vec![vec![Target::Object(shifter)]];
+                game.engine
+                    .answer(&game.table, c.id, Answer::Targets(t))
+                    .unwrap();
+            }
+            ChoiceKind::ChooseModes { available, .. } => {
+                offered = available.iter().map(|l| l.to_string()).collect();
+                let elf = offered.iter().position(|l| l == "Elf").unwrap() as u8;
+                game.engine
+                    .answer(&game.table, c.id, Answer::Modes(vec![elf]))
+                    .unwrap();
+            }
+            ChoiceKind::Priority { .. } if game.stack().is_empty() => break,
+            _ => game.engine.answer(&game.table, c.id, Answer::Pass).unwrap(),
+        }
+    }
+    assert!(!offered.is_empty() && !offered.iter().any(|l| l == "Wall"));
+    let ch = game
+        .engine
+        .characteristics(&game.table, shifter)
+        .unwrap()
+        .clone();
+    let elf = mtg_ir::PrintedCards::subtype_named(&game.table, "Elf").unwrap();
+    assert!(ch.subtypes.contains(&elf));
 }

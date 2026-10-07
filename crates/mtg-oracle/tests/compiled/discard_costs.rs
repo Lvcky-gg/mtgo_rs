@@ -115,10 +115,17 @@ fn an_additional_cost_of_one_thing_or_another() {
                 Answer::Objects(v) if v.is_empty() => Answer::Objects(vec![b.unwrap()]),
                 other => other,
             })
-            .chain(b.filter(|_| lands == 5 && !left).map(|b| Answer::Objects(vec![b])))
+            .chain(
+                b.filter(|_| lands == 5 && !left)
+                    .map(|b| Answer::Objects(vec![b])),
+            )
             .collect();
         let hand = g.count(Zone::Hand, P0);
-        g.act(mtg_engine::actions::Action::Cast { object: s }, &[], &answers);
+        g.act(
+            mtg_engine::actions::Action::Cast { object: s },
+            &[],
+            &answers,
+        );
         assert_eq!(g.count(Zone::Hand, P0), hand + 1, "cast and drew two");
         if let Some(b) = b {
             assert_eq!(g.engine.state.objects.contains_key(&b), left);

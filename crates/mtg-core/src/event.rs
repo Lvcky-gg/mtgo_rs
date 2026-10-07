@@ -88,6 +88,22 @@ pub enum Event {
     Regenerated {
         object: ObjectId,
     },
+    /// A player rolled a die (CR 706).
+    DieRolled {
+        player: PlayerId,
+        sides: u32,
+        result: u32,
+    },
+    /// A player flipped a coin (CR 705) and won or lost the flip.
+    CoinFlipped {
+        player: PlayerId,
+        won: bool,
+    },
+    /// A player clashed (CR 701.23) and won or didn't.
+    Clashed {
+        player: PlayerId,
+        won: bool,
+    },
     /// A player sacrificed a permanent (CR 701.21): `object` is its identity on the
     /// battlefield, read through last-known information.
     Sacrificed {

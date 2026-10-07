@@ -67,12 +67,13 @@ fn comma_in_name_is_preserved_and_equipment_alternative_keeps_its_type() {
         1,
         vec![ids[0]],
     );
-    assert!(g
-        .engine
-        .state
-        .objects_in(ZoneRef::of(Zone::Hand, P0))
-        .iter()
-        .any(|id| g.engine.state.objects[id].card == halvar));
+    assert!(
+        g.engine
+            .state
+            .objects_in(ZoneRef::of(Zone::Hand, P0))
+            .iter()
+            .any(|id| g.engine.state.objects[id].card == halvar)
+    );
     assert_eq!(g.engine.state.revealed_cards.len(), 1);
 }
 
@@ -113,12 +114,18 @@ fn source_name_search_still_finds_only_other_copies() {
 
 #[test]
 fn named_search_does_not_accept_separate_quotas_or_partial_self_reference() {
-    use mtg_oracle::compile::{compile, FaceText, SubtypeNames};
+    use mtg_oracle::compile::{FaceText, SubtypeNames, compile};
     for text in [
         "Search your library for a card named Alpine Watchdog and/or a card named Igneous Cur, reveal them, put them into your hand, then shuffle.",
         "Search your library for a card named ~ Replica, reveal it, put it into your hand, then shuffle.",
     ] {
-        let face = FaceText { name: "Unsupported", card_types: &[mtg_core::CardType::Sorcery], subtypes: &[], oracle_text: Some(text), mana_cost: "{G}" };
+        let face = FaceText {
+            name: "Unsupported",
+            card_types: &[mtg_core::CardType::Sorcery],
+            subtypes: &[],
+            oracle_text: Some(text),
+            mana_cost: "{G}",
+        };
         assert!(!compile(&face, &SubtypeNames(vec![])).understood());
     }
 }

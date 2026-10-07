@@ -1179,6 +1179,9 @@ fn eval_filter(
             state.combat.is_attacking(id) || state.combat.is_blocking(id)
         }
         ObjectFilter::Attacking => state.combat.is_attacking(id),
+        ObjectFilter::AttackingAlone => {
+            state.combat.attackers.len() == 1 && state.combat.is_attacking(id)
+        }
         ObjectFilter::Blocking => state.combat.is_blocking(id),
         ObjectFilter::BlockingSource => selves.iter().flatten().any(|s| {
             state
@@ -1216,7 +1219,7 @@ fn eval_filter(
         }
         ObjectFilter::OwnedBy(sel) => selector_covers_player(state, sel, obj.owner, controller),
         // Not something a trigger's event filter asks.
-        ObjectFilter::SharesColorWith(_) => false,
+        ObjectFilter::SharesColorWith(_) | ObjectFilter::SharesCreatureTypeWith(_) => false,
         ObjectFilter::PowerAtLeast(v) => chars.power.unwrap_or(0) >= static_value(v),
         ObjectFilter::PowerAtMost(v) => chars.power.unwrap_or(0) <= static_value(v),
         ObjectFilter::ManaValueAtMost(v) => chars.mana_cost.mana_value() as i32 <= static_value(v),

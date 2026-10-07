@@ -221,3 +221,69 @@ fn removing_x_counters_pays_for_an_x_damage_ability() {
         1
     );
 }
+
+/// A storage land kept tapped through the untap step gains a counter at upkeep; "it" in
+/// "if this land is tapped, put a storage counter on it" is the land.
+#[test]
+fn storage_land_kept_tapped_gains_a_counter_at_upkeep() {
+    let mut table = Table::default();
+    let vault = table.card(
+        "",
+        "Land",
+        None,
+        "You may choose not to untap this land during your untap step.\nAt the beginning of \
+         your upkeep, if this land is tapped, put a storage counter on it.\n{T}, Remove any \
+         number of storage counters from this land: Add {B} for each storage counter removed \
+         this way.",
+    );
+    let mut game = Game::new(table);
+    let vault = game.put(vault, P0, Zone::Battlefield);
+    game.engine.state.objects.get_mut(&vault).unwrap().tapped = true;
+    let (_, kind) = mana_ability(&game, vault);
+    let kind = kind.unwrap();
+    // Keep it tapped when asked during the untap step.
+    loop {
+        match game.engine.advance(&game.table) {
+            mtg_engine::Progress::Continue => {}
+            mtg_engine::Progress::NeedsChoice(c) => {
+                if let mtg_engine::choice::ChoiceKind::ChooseObjects { from, .. } = &c.kind {
+                    assert!(from.contains(&vault));
+                    game.engine
+                        .answer(&game.table, c.id, Answer::Objects(vec![vault]))
+                        .unwrap();
+                    break;
+                }
+                panic!("unexpected question {:?}", c.kind);
+            }
+            mtg_engine::Progress::GameOver { .. } => panic!("game ended"),
+        }
+    }
+    game.main();
+    assert!(game.engine.state.objects[&vault].tapped);
+    assert_eq!(
+        game.engine.state.objects[&vault].counters.get(&kind),
+        Some(&1)
+    );
+}
+
+#[test]
+fn tapped_artifact_hurts_its_controller_at_the_draw_step() {
+    let mut table = Table::default();
+    let vault = table.card(
+        "{1}",
+        "Artifact",
+        None,
+        "This artifact doesn't untap during your untap step.\nAt the beginning of your draw \
+         step, if this artifact is tapped, it deals 1 damage to you.",
+    );
+    let mut game = Game::new(table);
+    let vault = game.put(vault, P0, Zone::Battlefield);
+    game.engine.state.objects.get_mut(&vault).unwrap().tapped = true;
+    game.main();
+    assert!(game.engine.state.objects[&vault].tapped);
+    assert_eq!(
+        game.life(P0),
+        19,
+        "\"it\" is the artifact, which deals the damage"
+    );
+}

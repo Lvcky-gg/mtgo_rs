@@ -1747,7 +1747,11 @@ fn life_for_each_creature_destroyed_this_way() {
     let s = g.put(wrath, P0, Zone::Hand);
     g.main();
     g.cast(s, &[]);
-    assert_eq!(g.life(P0), 23, "three destroyed; the indestructible one isn't");
+    assert_eq!(
+        g.life(P0),
+        23,
+        "three destroyed; the indestructible one isn't"
+    );
     assert!(g.engine.state.objects.contains_key(&w));
 }
 
@@ -1777,7 +1781,12 @@ fn creatures_target_player_controls() {
 #[test]
 fn destroy_target_creature_and_target_land() {
     let mut t = Table::default();
-    let rain = t.card("{B}", "Sorcery", None, "Destroy target creature and target land.");
+    let rain = t.card(
+        "{B}",
+        "Sorcery",
+        None,
+        "Destroy target creature and target land.",
+    );
     let bear = t.bear();
     let land = t.card("", "Land", None, "");
     let mut g = Game::new(t);
@@ -1897,7 +1906,11 @@ fn each_player_discards_their_hand_then_draws_seven() {
     g.cast(s, &[]);
     assert_eq!(g.count(Zone::Hand, P0), 7);
     assert_eq!(g.count(Zone::Hand, P1), 7);
-    assert_eq!(g.count(Zone::Graveyard, P0), mine + 1, "its hand and the spell");
+    assert_eq!(
+        g.count(Zone::Graveyard, P0),
+        mine + 1,
+        "its hand and the spell"
+    );
     assert_eq!(g.count(Zone::Graveyard, P1), theirs);
 }
 
@@ -1930,7 +1943,11 @@ fn counter_unless_it_pays_one_for_each_card_in_your_graveyard() {
             &[Target::Object(spell)],
             &[Answer::Bool(true)],
         );
-        assert_eq!(g.life(P1), if countered { 20 } else { 18 }, "{in_graveyard} cards");
+        assert_eq!(
+            g.life(P1),
+            if countered { 20 } else { 18 },
+            "{in_graveyard} cards"
+        );
     }
 }
 
@@ -2113,7 +2130,12 @@ fn where_x_is_reaches_a_prevention_shield() {
         "{T}: Prevent the next X damage that would be dealt to target creature this turn, \
          where X is the number of Wizards on the battlefield.",
     );
-    let bolt = t.card("{R}", "Instant", None, "~ deals 3 damage to target creature.");
+    let bolt = t.card(
+        "{R}",
+        "Instant",
+        None,
+        "~ deals 3 damage to target creature.",
+    );
     let bear = t.card("{1}", "Creature — Bear", Some((2, 4)), "");
     let mut g = Game::new(t);
     g.lands(1);
@@ -2124,7 +2146,10 @@ fn where_x_is_reaches_a_prevention_shield() {
     g.main();
     g.act(activate(m, 0), &[Target::Object(b)], &[]);
     g.cast(s, &[Target::Object(b)]);
-    assert_eq!(g.engine.state.objects[&b].damage, 1, "two Wizards prevent 2 of 3");
+    assert_eq!(
+        g.engine.state.objects[&b].damage, 1,
+        "two Wizards prevent 2 of 3"
+    );
 }
 
 #[test]
@@ -2136,7 +2161,12 @@ fn granted_ward_counters_unless_paid() {
         None,
         "Creatures you control have ward {2}.",
     );
-    let bolt = t.card("{R}", "Instant", None, "~ deals 3 damage to target creature.");
+    let bolt = t.card(
+        "{R}",
+        "Instant",
+        None,
+        "~ deals 3 damage to target creature.",
+    );
     let bear = t.bear();
     let mut g = Game::new(t);
     g.lands(1);
@@ -2176,7 +2206,9 @@ fn a_leyline_begins_the_game_on_the_battlefield() {
                     asked_leyline = true;
                     assert_eq!(c.who, P0);
                     let all = from.clone();
-                    g.engine.answer(&g.table, c.id, Answer::Objects(all)).unwrap();
+                    g.engine
+                        .answer(&g.table, c.id, Answer::Objects(all))
+                        .unwrap();
                 }
                 _ => break,
             },

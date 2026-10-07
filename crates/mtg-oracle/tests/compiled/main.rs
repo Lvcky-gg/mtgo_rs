@@ -5,65 +5,79 @@
 //! the first half; these hold the second, one scenario per shape the compiler emits.
 
 mod abilities_extended;
-mod announced_mana;
-mod choose_on_resolution;
-mod announced_mana_view;
-mod exert;
-mod no_combat_damage;
-mod any_number;
-mod plural_library;
-mod shuffle_selected;
-mod owner_shuffle;
-mod life_buyback;
 mod adventure;
+mod announced_mana;
+mod announced_mana_view;
+mod any_number;
+mod any_player_activates;
 mod audit;
+mod aura_protection;
 mod backup;
 mod bestow;
 mod block_requirements;
 mod cast_restrictions;
 mod changeling;
+mod choose_on_resolution;
 mod class;
 mod combat;
 mod copies;
+mod create_number;
 mod damage;
-mod dig;
-mod untap_triggers;
-mod reveal_hand;
-mod variable_scry;
-mod reorder_library;
-mod keep_top;
 mod defined_dig;
+mod dice;
+mod dig;
 mod dig_wording;
-mod two_quality_dig;
 mod discard_costs;
 mod divided_damage;
 mod dredge;
 mod empty_battlefield;
+mod enduring;
+mod exert;
+mod graveyard_lands;
 mod flashback_costs;
+mod flips_and_clashes;
 mod granted;
 mod graveyard;
 mod hand_replacement;
 mod harness;
 mod impulse;
+mod its_controller_may;
+mod keep_top;
 mod keywords;
+mod kinship;
 mod leveler;
 mod library_positions;
 mod library_qualities;
+mod life_buyback;
 mod mana_followups;
 mod multiface;
 mod multikicker;
+mod named_search;
+mod no_combat_damage;
+mod once_each_turn;
 mod optional_target_prompts;
+mod owner_shuffle;
+mod pay_x;
+mod plural_library;
 mod prevention;
 mod protection_qualities;
-mod named_search;
+mod reorder_library;
+mod reveal_hand;
+mod rift;
 mod search;
 mod search_alternatives;
+mod shuffle_instead;
+mod shuffle_selected;
 mod split;
 mod tap_costs;
 mod tapped_dig;
 mod target_discount;
 mod tokens;
 mod triggers;
+mod two_quality_dig;
+mod untap_choices;
+mod untap_triggers;
+mod variable_scry;
 mod written_out;
 
 use harness::*;
@@ -3676,3 +3690,29 @@ mod labeled_triggers;
 mod labeled_modes;
 
 mod unblockable_pump;
+
+mod return_land_costs;
+
+mod targeted_counts;
+
+mod hand_library;
+
+mod reveal_costs;
+
+mod opponent_hand_library;
+
+mod delayed_targets;
+
+mod attacks_alone;
+
+mod combat_durations;
+
+mod reveal_hands;
+
+mod opponent_graveyard;
+
+mod remove_all_counters;
+
+mod next_turn_pumps;
+
+mod untap_goad;

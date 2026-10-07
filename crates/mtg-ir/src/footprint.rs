@@ -238,7 +238,14 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::SpendOnly { .. }
         | Effect::ExileIfDiesThisTurn { .. }
         | Effect::Reflexive { .. }
-        | Effect::Choose { .. } => Footprint::unanalysable(),
+        | Effect::Choose { .. }
+        | Effect::FlipCoin { .. }
+        | Effect::ExileSelfWithCounters { .. }
+        | Effect::RollDie { .. }
+        | Effect::AsPlayer { .. }
+        | Effect::OnceEachTurn { .. }
+        | Effect::MarkOnceEachTurn
+        | Effect::Clash { .. } => Footprint::unanalysable(),
         Effect::GrantPlay { what, .. } | Effect::GrantCastLater { what } => objects_write(what, r),
 
         Effect::Sequence(items) => items
@@ -520,9 +527,11 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         | Value::TimesKicked
         | Value::ManaSpentOfColor(_) => Footprint::default(),
         // Fixed as the spell was cast.
-        Value::SpellsCastBefore | Value::DiedThisTurn(_) | Value::CastX | Value::OpponentsAttacked => {
-            Footprint::default()
-        }
+        Value::SpellsCastBefore
+        | Value::RollResult
+        | Value::DiedThisTurn(_)
+        | Value::CastX
+        | Value::OpponentsAttacked => Footprint::default(),
         Value::Count(s)
         | Value::ManaValue(s)
         | Value::CardTypesAmong(s)

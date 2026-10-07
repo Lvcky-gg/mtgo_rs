@@ -329,8 +329,15 @@ fn from_a_single_graveyard_keeps_to_the_first_targets_owner() {
             Progress::GameOver { .. } => panic!(),
         }
     }
-    assert!(offered[0].contains(&Target::Object(mine)), "any graveyard at first");
-    assert_eq!(offered[1], vec![Target::Object(theirs2)], "then only theirs");
+    assert!(
+        offered[0].contains(&Target::Object(mine)),
+        "any graveyard at first"
+    );
+    assert_eq!(
+        offered[1],
+        vec![Target::Object(theirs2)],
+        "then only theirs"
+    );
     assert!(g.engine.state.objects.contains_key(&mine));
     assert!(!g.engine.state.objects.contains_key(&theirs2));
 }

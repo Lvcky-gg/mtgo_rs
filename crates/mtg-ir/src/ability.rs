@@ -367,14 +367,26 @@ pub enum ActivationTiming {
     MaxSpeed,
     /// "Activate only during your turn, before attackers are declared."
     YourTurnBeforeAttackers,
+    /// "Any player may activate this ability." (CR 602.1b): whoever activates it controls
+    /// it and pays for it.
+    AnyPlayer,
+    /// "Any player may activate this ability but only as a sorcery."
+    AnyPlayerSorcery,
 }
 
 impl ActivationTiming {
     pub fn sorcery_only(self) -> bool {
         matches!(
             self,
-            Self::SorcerySpeed | Self::SorceryOncePerTurn | Self::ClassLevel(_)
+            Self::SorcerySpeed
+                | Self::SorceryOncePerTurn
+                | Self::ClassLevel(_)
+                | Self::AnyPlayerSorcery
         )
+    }
+    /// Whether players other than its controller may activate it.
+    pub fn any_player(self) -> bool {
+        matches!(self, Self::AnyPlayer | Self::AnyPlayerSorcery)
     }
     /// Whether a turn-and-step restriction allows activation now.
     pub fn allows(self, yours: bool, step: mtg_core::Step) -> bool {

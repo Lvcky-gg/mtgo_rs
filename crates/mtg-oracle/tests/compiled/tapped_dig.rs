@@ -38,9 +38,11 @@ fn cartographers_survey_selects_up_to_two_lands_and_taps_them() {
         }
         let lib = g.engine.state.objects_in(ZoneRef::of(Zone::Library, P0));
         let bottom = &lib[lib.len() - (7 - take)..];
-        assert!(bottom
-            .iter()
-            .all(|id| [bear, land, other].contains(&g.engine.state.objects[id].card)));
+        assert!(
+            bottom
+                .iter()
+                .all(|id| [bear, land, other].contains(&g.engine.state.objects[id].card))
+        );
     }
 }
 

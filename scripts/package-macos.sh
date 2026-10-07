@@ -29,6 +29,8 @@ PY
 # does not imply Developer ID signing or Apple notarization.
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
+# The updater replaces the signed bundle as a whole, using this archive.
+ditto -c -k --sequesterRsrc --keepParent "$app" "dist/mtgo-rs-v$version-$platform.zip"
 ln -s /Applications dist/macos-staging/Applications
 hdiutil create -volname "MTGO RS $version" -srcfolder dist/macos-staging \
     -ov -format UDZO "dist/mtgo-rs-v$version-$platform.dmg"

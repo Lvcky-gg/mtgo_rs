@@ -103,10 +103,13 @@ jobs:
           key: ${{ matrix.target }}
       - name: Stamp version
         run: python3 scripts/release.py stamp "$RELEASE_VERSION"
+      - name: Test native updater scripts
+        run: python3 -m unittest discover -s scripts/tests -p test_updater.py -v
       - name: Test application paths on the native platform
         run: cargo test -p mtg-store --locked --target "$RELEASE_TARGET" paths::tests
       - name: Build native application
         env:
+          MTGO_RS_RELEASE_PLATFORM: ${{ matrix.platform }}
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: cargo build -p mtg-app --bin mtg-gui --release --locked --target "$RELEASE_TARGET"
       - name: Package Windows executable
@@ -123,6 +126,7 @@ jobs:
           path: |
             dist/*.exe
             dist/*.dmg
+            dist/*.zip
           if-no-files-found: error
 
   flatpak:
@@ -188,8 +192,10 @@ jobs:
           test -f "dist/mtgo-rs-v$RELEASE_VERSION-macos-arm64.dmg"
           test -f "dist/mtgo-rs-v$RELEASE_VERSION-macos-x64.dmg"
           test -f "dist/mtgo-rs-v$RELEASE_VERSION-linux-x64.flatpak"
+          test -f "dist/mtgo-rs-v$RELEASE_VERSION-macos-arm64.zip"
+          test -f "dist/mtgo-rs-v$RELEASE_VERSION-macos-x64.zip"
           cd dist
-          sha256sum -- *.exe *.dmg *.flatpak > SHA256SUMS.txt
+          sha256sum -- *.exe *.dmg *.zip *.flatpak > SHA256SUMS.txt
       - name: Create or update the release for this commit
         run: |
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then

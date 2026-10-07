@@ -12,12 +12,13 @@
 //! ([`crate::sba`]) and triggered abilities, and keeping them out of here is what
 //! stops the engine growing a second, implicit rules path.
 
-use mtg_core::{Cause, Event, ObjectId, StampedEvent, Zone, ZoneRef};
+use mtg_core::{Cause, Event, ObjectId, PlayerId, StampedEvent, Zone, ZoneRef};
 
 use crate::state::GameState;
 
 /// Append an event to the log and apply it.
 pub fn apply(state: &mut GameState, cause: Cause, event: Event, log: &mut Vec<StampedEvent>) {
+    let shuffles = shuffled_instead(state, &event);
     let event = replace(state, event);
     let at = state.bump();
     let id = state.next_event.advance();
@@ -29,6 +30,20 @@ pub fn apply(state: &mut GameState, cause: Cause, event: Event, log: &mut Vec<St
         cause,
         event,
     });
+    if let Some(player) = shuffles {
+        apply(state, cause, Event::Shuffled { player }, log);
+    }
+}
+
+/// The owner whose library a card is shuffled into instead of going to a graveyard
+/// ("reveal ~ and shuffle it into its owner's library instead"), if this is that event.
+fn shuffled_instead(state: &GameState, event: &Event) -> Option<PlayerId> {
+    let Event::ZoneChange { object, to, .. } = event else {
+        return None;
+    };
+    let o = state.objects.get(object)?;
+    (to.zone == Zone::Graveyard && state.shuffled_instead_of_graveyard.contains(&o.card))
+        .then_some(o.owner)
 }
 
 /// Apply a whole batch as one simultaneous happening.
@@ -43,7 +58,9 @@ pub fn apply_simultaneous(
     log: &mut Vec<StampedEvent>,
 ) {
     let at = state.bump();
+    let mut shuffles = Vec::new();
     for event in events {
+        shuffles.extend(shuffled_instead(state, &event));
         let event = replace(state, event);
         let id = state.next_event.advance();
         perform(state, &event);
@@ -54,6 +71,10 @@ pub fn apply_simultaneous(
             cause,
             event,
         });
+    }
+    shuffles.dedup();
+    for player in shuffles {
+        apply(state, cause, Event::Shuffled { player }, log);
     }
 }
 
@@ -166,6 +187,28 @@ fn replace(state: &GameState, event: Event) -> Event {
                 index: None,
             }
         }
+        // "… reveal ~ and shuffle it into its owner's library instead."
+        Event::ZoneChange {
+            object,
+            new_object,
+            from,
+            to,
+            ..
+        } if to.zone == Zone::Graveyard
+            && state
+                .objects
+                .get(&object)
+                .is_some_and(|o| state.shuffled_instead_of_graveyard.contains(&o.card)) =>
+        {
+            let owner = state.objects[&object].owner;
+            Event::ZoneChange {
+                object,
+                new_object,
+                from,
+                to: ZoneRef::of(Zone::Library, owner),
+                index: None,
+            }
+        }
         other => other,
     }
 }
@@ -257,7 +300,12 @@ fn perform(state: &mut GameState, event: &Event) {
         }
 
         // A record for triggers; the discard was its own zone change.
-        Event::Cycled { .. } | Event::Sacrificed { .. } | Event::Scried { .. } => {}
+        Event::Cycled { .. }
+        | Event::Sacrificed { .. }
+        | Event::Scried { .. }
+        | Event::CoinFlipped { .. }
+        | Event::DieRolled { .. }
+        | Event::Clashed { .. } => {}
 
         Event::DamageRemoved { object } => {
             if let Some(o) = state.objects.get_mut(object) {

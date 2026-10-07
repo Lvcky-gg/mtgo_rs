@@ -67,6 +67,9 @@ const SUBTYPES: &[&str] = &[
     "Gargoyle",
     "Hero",
     "Monk",
+    "Dinosaur",
+    "Kithkin",
+    "Golem",
 ];
 
 #[derive(Default)]

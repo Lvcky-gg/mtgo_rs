@@ -418,6 +418,21 @@ fn apply_one(
             }
         }
         M::SetTypes(ts) => ch.card_types = ts.clone(),
+        M::SetCreatureTypes(ss) => {
+            ch.subtypes.retain(|s| {
+                !printed
+                    .subtype_name(*s)
+                    .is_some_and(mtg_core::is_creature_type)
+            });
+            ch.every_creature_type = false;
+            for s in ss {
+                if !ch.subtypes.contains(s) {
+                    ch.subtypes.push(*s);
+                }
+            }
+        }
+        // Replaced by the choice as the effect begins (`resolve`); nothing until then.
+        M::BecomesChosen(_) => {}
         M::SetColors(cs) => {
             ch.colors = cs.iter().fold(mtg_core::ColorSet::COLORLESS, |a, c| {
                 a.union(mtg_core::ColorSet::single(*c))

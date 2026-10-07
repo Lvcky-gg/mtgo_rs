@@ -570,7 +570,10 @@ fn a_blocked_creature_slips_out_of_combat() {
     let w = g.put(wall, P1, Zone::Battlefield);
     g.main();
     g.combat(&[r], &[(w, r)], &[], &[Answer::Bool(true)]);
-    assert!(g.engine.state.objects.contains_key(&r), "dealt no damage, took none");
+    assert!(
+        g.engine.state.objects.contains_key(&r),
+        "dealt no damage, took none"
+    );
     assert!(!g.engine.state.objects[&r].tapped, "untapped");
     assert_eq!(g.engine.state.objects[&w].damage, 0);
 }
@@ -639,7 +642,10 @@ fn an_additional_combat_phase_after_this_main_phase() {
     assert_eq!(g.life(P1), 18);
     assert!(g.engine.state.objects[&b].tapped);
     g.cast(s, &[]);
-    assert!(!g.engine.state.objects[&b].tapped, "it attacked, so it untaps");
+    assert!(
+        !g.engine.state.objects[&b].tapped,
+        "it attacked, so it untaps"
+    );
     g.combat(&[b], &[], &[], &[]);
     assert_eq!(g.life(P1), 16, "a second combat");
     assert_eq!(g.engine.state.turn, 2);

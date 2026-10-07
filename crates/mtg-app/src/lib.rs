@@ -37,6 +37,7 @@ pub mod seat;
 pub mod theme;
 mod tournaments;
 pub mod ui;
+pub mod update;
 pub mod widgets;
 
 use std::sync::mpsc::{Receiver, Sender};

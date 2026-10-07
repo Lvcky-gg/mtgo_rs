@@ -1,6 +1,6 @@
 # Exert, "assigns no combat damage", choosing as a spell resolves
 
-Claude, card coverage round 29. 16,251 → 16,302 / 34,913 (46.7%), +51; zero faces lost
+Claude, card coverage round 29. 16,251 → 16,302 / 34,913 (46.7%), +51 (16,311 with Codex's concurrent work); zero faces lost
 against HEAD and against the end of round 28.
 
 ## Exert (CR 701.43)

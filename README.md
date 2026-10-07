@@ -16,7 +16,8 @@ Full architecture and the reasoning behind each decision:
 Pushes to `main` automatically create semantically versioned Windows, macOS
 (Apple Silicon and Intel), and Linux Flatpak releases. See
 [release downloads](https://github.com/Lvcky-gg/mtgo_rs/releases) and
-[release setup and installation](docs/releases.md).
+[release setup and installation](docs/releases.md). Packaged clients check for
+updates on launch and preserve the existing card database, decks, and settings.
 
 The engine plays a turn. Turn structure, priority passing, state-based actions, the
 layer system, the evaluator and trigger placement all work and are tested. What is
@@ -171,7 +172,7 @@ cargo run -p mtg-headless --bin mtg-cards -- coverage 0 --list   # every accepte
 cargo run -p mtg-headless --bin mtg-cards -- parse Instant "Draw two cards."
 ```
 
-Currently **16,251 of 34,913 cards (46.5%)** are playable as printed, up from 1,258. Every shape the
+Currently **16,571 of 34,913 cards (47.5%)** are playable as printed, up from 1,258. Every shape the
 compiler emits has an end-to-end test in `crates/mtg-oracle/tests/compiled/` that takes printed
 text through import and plays it in the engine.
 

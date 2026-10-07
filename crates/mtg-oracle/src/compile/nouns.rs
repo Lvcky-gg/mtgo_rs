@@ -172,6 +172,13 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
             parts.push(ObjectFilter::OwnedBy(Box::new(Selector::You)));
             rest = r;
         } else if let Some(r) = rest
+            .strip_prefix(" from an opponent's graveyard")
+            .or_else(|| rest.strip_prefix(" in an opponent's graveyard"))
+            .filter(|_| zone == Zone::Graveyard)
+        {
+            parts.push(ObjectFilter::OwnedBy(Box::new(Selector::Opponents)));
+            rest = r;
+        } else if let Some(r) = rest
             .strip_prefix(" from a graveyard")
             .or_else(|| rest.strip_prefix(" in a graveyard"))
             .filter(|_| zone == Zone::Graveyard)
@@ -453,6 +460,8 @@ fn card_zone<'s>(
         || rest.starts_with(" in your graveyard")
         || rest.starts_with(" from a graveyard")
         || rest.starts_with(" in a graveyard")
+        || rest.starts_with(" from an opponent's graveyard")
+        || rest.starts_with(" in an opponent's graveyard")
     {
         Zone::Graveyard
     } else if rest.starts_with(" in your hand") || rest.starts_with(" from your hand") {
@@ -979,13 +988,10 @@ pub fn player<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
             .and_then(|(n, r)| Some((n as usize, false, r.strip_prefix(" target ")?)))
     };
     if let Some((n, up_to, r)) = several
-        && let Some((players, r)) = r
-            .strip_prefix("players")
-            .map(|r| (None, r))
-            .or_else(|| {
-                r.strip_prefix("opponents")
-                    .map(|r| (Some(Selector::Opponents), r))
-            })
+        && let Some((players, r)) = r.strip_prefix("players").map(|r| (None, r)).or_else(|| {
+            r.strip_prefix("opponents")
+                .map(|r| (Some(Selector::Opponents), r))
+        })
         && let Some(r) = r.strip_prefix(" each")
     {
         let slots = (0..n)

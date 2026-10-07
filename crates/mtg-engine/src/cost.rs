@@ -677,6 +677,18 @@ pub fn cost_candidates(
         return Some((from, (*n).max(0) as u32));
     }
     let (zone, filter, n) = match part {
+        A::Reveal {
+            filter,
+            count: Value::Fixed(n),
+        } => (mtg_core::ZoneRef::of(mtg_core::Zone::Hand, who), filter, *n),
+        A::ReturnToHand {
+            filter,
+            count: Value::Fixed(n),
+        } => (
+            mtg_core::ZoneRef::shared(mtg_core::Zone::Battlefield),
+            filter,
+            *n,
+        ),
         A::Sacrifice {
             what:
                 Selector::All {
@@ -803,10 +815,7 @@ pub fn payable_cost_choices(
     let Some(obj) = state.objects.get(&object) else {
         return Vec::new();
     };
-    let Some(options) = cards
-        .face(obj.card, obj.face)
-        .and_then(cost_choice_options)
-    else {
+    let Some(options) = cards.face(obj.card, obj.face).and_then(cost_choice_options) else {
         return Vec::new();
     };
     let Some(total) = total_cost(state, cards, object, who) else {

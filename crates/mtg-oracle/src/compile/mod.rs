@@ -132,7 +132,9 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
         .any(|t| matches!(t, CardType::Instant | CardType::Sorcery));
     let normalised = normalise(text, face.name);
     // A leveler (CR 711) or a Class (CR 716): its brackets are read as a whole.
-    if normalised.lines().any(|l| l.starts_with("level up ") || l == "station")
+    if normalised
+        .lines()
+        .any(|l| l.starts_with("level up ") || l == "station")
         || face.subtypes.iter().any(|s| s == "Class")
     {
         return leveler(face, subtypes, &normalised, text, out);
@@ -144,7 +146,39 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
     let mut spell_cx = Cx::new(subtypes);
     spell_cx.x = face.mana_cost.contains("{X}");
 
-    let lines: Vec<&str> = normalised.lines().collect();
+    let mut lines: Vec<&str> = normalised.lines().collect();
+    // CR 706 — a die roll's results table ("1—9 | …", "20 | …") follows the line that
+    // rolls: its rows are compiled here and attached to that roll once every line is.
+    let mut tables: Vec<Vec<(u32, u32, Effect)>> = Vec::new();
+    let mut k = 1;
+    while k < lines.len() {
+        if die_row(lines[k]).is_none() || die_row(lines[k - 1]).is_some() {
+            k += 1;
+            continue;
+        }
+        let start = k;
+        while k < lines.len() && die_row(lines[k]).is_some() {
+            k += 1;
+        }
+        let rows: Option<Vec<(u32, u32, Effect)>> = lines[start..k]
+            .iter()
+            .map(|l| {
+                let (lo, hi, text) = die_row(l)?;
+                let mut cx = Cx::new(subtypes);
+                cx.x = spell_cx.x;
+                let e = clauses::effect(text, &mut cx)?;
+                // A row that targets would need its targets chosen up front.
+                cx.targets.is_empty().then_some((lo, hi, e))
+            })
+            .collect();
+        if let Some(rows) = rows {
+            tables.push(rows);
+            for l in &mut lines[start..k] {
+                *l = "";
+            }
+        }
+    }
+    let lines = lines;
     let mut i = 0;
     let mut spell_modal = false;
     // "Backup N": where the abilities it hands on begin.
@@ -565,7 +599,74 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
             None,
         );
     }
+    // Each results table goes to the next roll without one, in order.
+    if !tables.is_empty() {
+        let mut tables = tables.into_iter();
+        for a in &mut out.abilities {
+            if let AbilityKind::SpellEffect(e)
+            | AbilityKind::Activated { effect: e, .. }
+            | AbilityKind::Triggered { effect: e, .. } = &mut a.kind
+            {
+                fill_die_tables(e, &mut tables);
+            }
+        }
+        if tables.next().is_some() {
+            out.unparsed.push("a results table with no die roll".into());
+        }
+    }
     out
+}
+
+/// Put `MarkOnceEachTurn` at the start of what saying yes to a "you may" does. `false`
+/// when the effect isn't a "you may …".
+fn mark_once_each_turn(e: &mut Effect) -> bool {
+    match e {
+        Effect::May { then, .. } | Effect::MayPay { then, .. } => {
+            let rest = std::mem::replace(&mut **then, Effect::Nothing);
+            **then = Effect::Sequence(vec![Effect::MarkOnceEachTurn, rest]);
+            true
+        }
+        // "You may discard a card. If you do, …" is offered only when it can be done.
+        Effect::If {
+            then, otherwise, ..
+        } if **otherwise == Effect::Nothing => mark_once_each_turn(then),
+        _ => false,
+    }
+}
+
+/// "1—9 | Draw a card.", "20 | …": a row of a die roll's results table.
+fn die_row(line: &str) -> Option<(u32, u32, &str)> {
+    let (range, text) = line.split_once(" | ")?;
+    let (lo, hi) = range.split_once('—').unwrap_or((range, range));
+    Some((lo.parse().ok()?, hi.parse().ok()?, text))
+}
+
+/// Give each `RollDie` with no table the next table, in order.
+fn fill_die_tables(e: &mut Effect, tables: &mut impl Iterator<Item = Vec<(u32, u32, Effect)>>) {
+    match e {
+        Effect::RollDie { outcomes, then, .. } => {
+            if outcomes.is_empty()
+                && let Some(t) = tables.next()
+            {
+                *outcomes = t;
+            }
+            fill_die_tables(then, tables);
+        }
+        Effect::Sequence(items) => {
+            for item in items {
+                fill_die_tables(item, tables);
+            }
+        }
+        Effect::May { then, .. } | Effect::MayPay { then, .. } => fill_die_tables(then, tables),
+        Effect::If {
+            then, otherwise, ..
+        } => {
+            fill_die_tables(then, tables);
+            fill_die_tables(otherwise, tables);
+        }
+        Effect::Reflexive { effect, .. } => fill_die_tables(effect, tables),
+        _ => {}
+    }
 }
 
 /// Backup N (CR 702.165): "When this creature enters, put N +1/+1 counters on target
@@ -1067,6 +1168,44 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
         )]))
     };
     let line = words::strip_ability_word(line);
+
+    // "Whenever you gain life, you may put that many +1/+1 counters on each creature you
+    // control. Do this only once each turn." — only doing it counts, not declining.
+    if let Some(head) = line.strip_suffix(" do this only once each turn.")
+        && let Some(Line::Abilities(mut list)) = compile_line(head, face, cx)
+        && let [(AbilityKind::Triggered { effect, .. }, _)] = list.as_mut_slice()
+        && mark_once_each_turn(effect)
+    {
+        let body = std::mem::replace(effect, Effect::Nothing);
+        *effect = Effect::OnceEachTurn {
+            body: Box::new(body),
+        };
+        return Some(Line::Abilities(list));
+    }
+    // "Enchanted creature has protection from green. This effect doesn't remove this Aura."
+    if let Some(head) = line.strip_suffix(" this effect doesn't remove ~.")
+        && face.subtypes.iter().any(|s| s.eq_ignore_ascii_case("aura"))
+        && let Some(Line::Abilities(mut list)) = compile_line(head, face, cx)
+    {
+        let mut spared = false;
+        for (kind, _) in &mut list {
+            if let AbilityKind::Static {
+                modification:
+                    Modification::Restriction(mtg_ir::effect::Restriction::Protection {
+                        spares_source,
+                        ..
+                    }),
+                ..
+            } = kind
+            {
+                *spares_source = true;
+                spared = true;
+            }
+        }
+        if spared {
+            return Some(Line::Abilities(list));
+        }
+    }
 
     // "Max speed — <ability>" (CR 702.179f): the ability exists only at max speed. Speed
     // never goes down, so a trigger's condition is checked as an intervening "if".
@@ -2265,6 +2404,22 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
             cx,
         );
     }
+    if line
+        == "if ~ would be put into a graveyard from anywhere, reveal ~ and shuffle it into its \
+            owner's library instead."
+    {
+        return one(
+            AbilityKind::ReplacementEffect(Replacement {
+                matches: EventPattern::ZoneChange {
+                    who: ObjectFilter::IsSelf,
+                    from: None,
+                    to: Some(Zone::Graveyard),
+                },
+                kind: ReplacementKind::RedirectZoneChange { to: Zone::Library },
+            }),
+            cx,
+        );
+    }
     if line == "if ~ would be put into a graveyard from anywhere, exile it instead." {
         return one(
             AbilityKind::ReplacementEffect(Replacement {
@@ -3132,6 +3287,16 @@ fn triggered(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     };
     let (on, timing, it, rest) = trigger_condition(line, cx)?;
     let mut body = rest.strip_prefix(", ")?;
+    // "When ~ dies, if it was a creature, …": only a creature dies, so it was.
+    if matches!(
+        on,
+        EventPattern::Dies {
+            who: ObjectFilter::IsSelf
+        }
+    ) && let Some(r) = body.strip_prefix("if it was a creature, ")
+    {
+        body = r;
+    }
     cx.it = it;
     cx.that_creature = other_creature(&on).map(Selector::Bound);
     // "Whenever ~ deals combat damage to a player, that player …" — the other party to
@@ -3192,10 +3357,52 @@ fn triggered(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
         && let Some((cond, r)) = conditions::condition(r, cx)
         && let Some(r) = r.strip_prefix(", ")
     {
+        // "if this land is tapped, put a storage counter on it": with no other antecedent,
+        // "it" is the object the condition names.
+        if cx.it.is_none() && body.starts_with("if ~ ") {
+            cx.it = Some(Selector::SelfSource);
+        }
         intervening_if = Some(cond);
         body = r;
     }
-    let effect = clauses::effect(body, cx)?;
+    // Kinship: "you may look at the top card of your library. If it shares a creature type
+    // with ~, you may reveal it. If you do, …" — looking changes nothing, so it is the
+    // reveal, offered when the top card shares a type.
+    let kinship = body
+        .strip_prefix(
+            "you may look at the top card of your library. if it shares a creature type with \
+             ~, you may reveal it. if you do, ",
+        )
+        .and_then(|payoff| {
+            let then = clauses::effect(payoff, cx)?;
+            let it = mtg_ir::selector::Binding::It;
+            Some(Effect::Let {
+                slot: it,
+                what: Selector::TopOfLibrary {
+                    player: Box::new(Selector::You),
+                    count: Value::ONE,
+                },
+                body: Box::new(Effect::If {
+                    cond: mtg_ir::trigger::Condition::Exists(Selector::All {
+                        zone: Zone::Library,
+                        filter: ObjectFilter::And(vec![
+                            ObjectFilter::InBinding(it),
+                            ObjectFilter::SharesCreatureTypeWith(Box::new(Selector::SelfSource)),
+                        ]),
+                    }),
+                    then: Box::new(Effect::May {
+                        prompt: "reveal the top card of your library".into(),
+                        then: Box::new(then),
+                        otherwise: None,
+                    }),
+                    otherwise: Box::new(Effect::Nothing),
+                }),
+            })
+        });
+    let effect = match kinship {
+        Some(e) => e,
+        None => clauses::effect(body, cx)?,
+    };
     if let Some(c) = cx.while_.take() {
         intervening_if = Some(match intervening_if {
             Some(i) => mtg_ir::trigger::Condition::And(vec![c, i]),
@@ -3366,6 +3573,13 @@ fn self_trigger(r: &str) -> Option<Condition<'_>> {
         (
             "attacks and isn't blocked",
             EventPattern::AttacksUnblocked { who: me.clone() },
+            normal,
+        ),
+        (
+            "attacks alone",
+            EventPattern::Attacks {
+                who: ObjectFilter::And(vec![me.clone(), ObjectFilter::AttackingAlone]),
+            },
             normal,
         ),
         ("attacks", EventPattern::Attacks { who: me.clone() }, normal),
@@ -4147,16 +4361,9 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
             " leaves the battlefield" => EventPattern::Leaves { who },
             " attacks" => EventPattern::Attacks { who },
             // CR 506.5: the only creature declared as an attacker.
-            " attacks alone" => {
-                cx.while_ = Some(mtg_ir::trigger::Condition::CountAtMost {
-                    what: Selector::All {
-                        zone: Zone::Battlefield,
-                        filter: ObjectFilter::Attacking,
-                    },
-                    at_most: Value::ONE,
-                });
-                EventPattern::Attacks { who }
-            }
+            " attacks alone" => EventPattern::Attacks {
+                who: ObjectFilter::And(vec![who, ObjectFilter::AttackingAlone]),
+            },
             " becomes blocked" => EventPattern::BecomesBlocked { who },
             " becomes tapped" => EventPattern::BecomesTapped { who },
             " becomes untapped" => EventPattern::BecomesUntapped { who },
@@ -4251,7 +4458,7 @@ fn activate_only_if(
 pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     let (cost_text, body) = line.split_once(": ")?;
     let loyalty = loyalty_delta(cost_text);
-    let cost = if let Some(delta) = loyalty {
+    let mut cost = if let Some(delta) = loyalty {
         Cost {
             additional: vec![AdditionalCost::Loyalty { delta }],
             ..Cost::free()
@@ -4261,6 +4468,12 @@ pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     };
     let (body, mut timing) = if let Some(b) = body.strip_suffix(" activate only as a sorcery.") {
         (b, ActivationTiming::SorcerySpeed)
+    } else if let Some(b) = body.strip_suffix(" any player may activate this ability.") {
+        (b, ActivationTiming::AnyPlayer)
+    } else if let Some(b) =
+        body.strip_suffix(" any player may activate this ability but only as a sorcery.")
+    {
+        (b, ActivationTiming::AnyPlayerSorcery)
     } else if let Some(b) = body.strip_suffix(" activate only once each turn.") {
         (b, ActivationTiming::InstantOncePerTurn)
     } else if let Some(b) = body.strip_suffix(" activate no more than twice each turn.") {
@@ -4277,6 +4490,21 @@ pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
         (b, ActivationTiming::YourTurn)
     } else if let Some(b) = body.strip_suffix(" activate only during your upkeep.") {
         (b, ActivationTiming::YourUpkeep)
+    } else if let Some(b) = body.strip_suffix(" activate only during combat.") {
+        cost.timing.push(mtg_ir::trigger::Condition::Or(
+            [
+                Step::BeginCombat,
+                Step::DeclareAttackers,
+                Step::DeclareBlockers,
+                Step::FirstStrikeCombatDamage,
+                Step::CombatDamage,
+                Step::EndCombat,
+            ]
+            .into_iter()
+            .map(mtg_ir::trigger::Condition::DuringStep)
+            .collect(),
+        ));
+        (b, ActivationTiming::Instant)
     } else {
         (body, ActivationTiming::Instant)
     };
@@ -4729,9 +4957,28 @@ fn one_additional_cost(r: &str, cx: &Cx) -> Option<Cost> {
             amount: Value::Fixed(n),
         });
     } else {
-        cost.additional.push(chosen_cost(r, cx)?);
+        cost.additional
+            .push(reveal_hand_cost(r, cx).or_else(|| chosen_cost(r, cx))?);
     }
     Some(cost)
+}
+
+/// Reveal matching cards from hand as an additional casting cost.
+fn reveal_hand_cost(part: &str, cx: &Cx) -> Option<AdditionalCost> {
+    let r = part.strip_prefix("reveal ")?;
+    let (n, r) = words::number(r)?;
+    let r = r.strip_prefix(' ')?.strip_suffix(" from your hand")?;
+    let phrase = format!("{r} in your hand");
+    let (noun, "") = nouns::noun(&phrase, cx)? else {
+        return None;
+    };
+    if n < 1 || noun.zone != Zone::Hand || noun.plural != (n > 1) {
+        return None;
+    }
+    Some(AdditionalCost::Reveal {
+        filter: noun.filter,
+        count: Value::Fixed(n),
+    })
 }
 
 /// A cost the engine can pay: mana, {T}, {Q}, "sacrifice ~", "pay N life", "remove a
@@ -5135,6 +5382,10 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
         }
     }
     for (phrase, r) in [
+        (
+            "you may play lands from your graveyard",
+            Restriction::PlayLandsFromGraveyard,
+        ),
         ("skip your draw step", Restriction::SkipDrawStep),
         (
             "you may look at the top card of your library any time",
@@ -5896,7 +6147,8 @@ fn restriction_predicate(r: &str, cx: &Cx) -> Option<Vec<Modification>> {
         }
         " is goaded" | " are goaded" => return one(R::Goaded),
         " doesn't untap during its controller's untap step and its activated abilities can't be activated"
-        | " doesn't untap during its controller's untap step, and its activated abilities can't be activated" => {
+        | " doesn't untap during its controller's untap step, and its activated abilities can't be activated" =>
+        {
             return Some(vec![
                 Modification::Restriction(R::CantUntapDuringUntapStep),
                 Modification::Restriction(R::CantActivateAbilities),
@@ -6047,6 +6299,11 @@ fn plain_alternative_cost(line: &str, cx: &Cx) -> Option<AbilityKind> {
     }
     let mut cost = if rest.is_empty() {
         Cost::free()
+    } else if rest.len() == 1 && rest[0].starts_with("return ") {
+        Cost {
+            additional: vec![return_hand_cost(rest[0], cx)?],
+            ..Cost::free()
+        }
     } else {
         cost(&rest.join(", "), cx)?
     };
@@ -6055,6 +6312,7 @@ fn plain_alternative_cost(line: &str, cx: &Cx) -> Option<AbilityKind> {
             matches!(
                 p,
                 AdditionalCost::PayLife { .. }
+                    | AdditionalCost::ReturnToHand { .. }
                     | AdditionalCost::Sacrifice {
                         what: Selector::All { .. },
                         ..
@@ -6075,6 +6333,30 @@ fn plain_alternative_cost(line: &str, cx: &Cx) -> Option<AbilityKind> {
         cost,
         kind: mtg_ir::ability::AltCost::Pay,
         instead: None,
+    })
+}
+
+/// A non-mana alternative cost that returns permanents to their owners' hands.
+fn return_hand_cost(part: &str, cx: &Cx) -> Option<AdditionalCost> {
+    let r = part.strip_prefix("return ")?;
+    let (n, r) = words::number(r)?;
+    let (noun, r) = nouns::noun(r.strip_prefix(' ')?, cx)?;
+    let owner = if n == 1 {
+        " to its owner's hand"
+    } else {
+        " to their owner's hand"
+    };
+    if n < 1
+        || noun.zone != Zone::Battlefield
+        || noun.plural != (n > 1)
+        || (r != owner && r != " to their owners' hands")
+        || !part.contains(" you control")
+    {
+        return None;
+    }
+    Some(AdditionalCost::ReturnToHand {
+        filter: noun.filter,
+        count: Value::Fixed(n),
     })
 }
 
@@ -6944,16 +7226,11 @@ fn keyword_trigger(line: &str) -> Option<AbilityKind> {
             EventPattern::Attacks {
                 who: ObjectFilter::And(vec![
                     ObjectFilter::HasType(CardType::Creature),
+                    ObjectFilter::AttackingAlone,
                     ObjectFilter::ControlledBy(Box::new(Selector::You)),
                 ]),
             },
-            Some(mtg_ir::trigger::Condition::CountAtMost {
-                what: Selector::All {
-                    zone: Zone::Battlefield,
-                    filter: ObjectFilter::Attacking,
-                },
-                at_most: Value::ONE,
-            }),
+            None,
             pump(1, Selector::Bound(mtg_ir::selector::Binding::EventSubject)),
         ));
     }

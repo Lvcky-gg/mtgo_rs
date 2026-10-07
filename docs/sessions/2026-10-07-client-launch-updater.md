@@ -1,0 +1,13 @@
+# Client launch updater
+
+New task supersedes coverage work: automatically check for a newer client on launch and update while preserving the database.
+
+Packaged builds opt into a GitHub stable-release check through MTGO_RS_RELEASE_PLATFORM, stamped by the release workflow. The launch window waits before constructing the existing App, so an update does not open or modify SQLite. Source builds continue directly. New releases must have an exact matching platform asset, a trusted repository download URL, a bounded published size, and a matching SHA-256 checksum. Metadata and transfers have finite deadlines; failed checks/transfers allow the installed app to open with an error message. Equal/older releases and draft/prerelease versions are skipped.
+
+Windows stages an executable in its installation folder and launches a PowerShell helper that waits for exit, swaps it with a rollback copy, and restarts with the original working directory/environment. macOS downloads a signed bundle ZIP, verifies codesigning, and swaps the whole bundle with equivalent rollback. Successful native installs clean their own staging directory. A custom database or data path inside a bundle blocks replacement to preserve it. Flatpak downloads into persistent cache, installs the verified bundle per user via host flatpak install --or-update, and restarts with database/XDG overrides preserved (relative overrides are made absolute). The manifest grants the host-command D-Bus permission.
+
+The workflow now publishes and checksums macOS updater ZIP assets alongside existing DMGs, Windows executables, and Flatpak bundles. Native runner jobs exercise the installer scripts. Existing clients without this feature need a first manual update; this work does not publish a release.
+
+Validation: full workspace with all features and locked dependencies passed (1,745 tests, 44 ignored at the validation snapshot); all-target/all-feature workspace Clippy with warnings denied passed; formatting passed. Seven Python release/installer tests passed, with the Windows-only test skipped on this Linux host. The POSIX installer test exercises actual successful and failed swaps while checking an open SQLite database plus WAL/SHM byte-for-byte, existing deck rows, restart arguments/environment, and cleanup. Rust tests cover numeric versions, stable-release selection, exact architecture assets, missing/foreign assets, malformed/duplicate checksums, corrupted/truncated/oversized downloads, overwrite prevention, installation scope, and embedded-data rejection. Script syntax checks passed.
+
+Windows PowerShell execution and actual macOS signature/package installation require native release runners; a live Flatpak install/restart was not performed locally. Changes remain uncommitted.

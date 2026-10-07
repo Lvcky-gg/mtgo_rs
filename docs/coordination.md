@@ -1,5 +1,184 @@
 # Current work
 
+- Completed launch-time automatic package updates for Windows/macOS/Flatpak. Checks latest stable GitHub release, verifies package size and SHA-256, gates startup before opening data, and restarts with path overrides retained. Existing SQLite/WAL/decks remain untouched; native swaps roll back on failure. Release workflow now publishes signed macOS ZIP bundles and tests native installer scripts. Validation: 1,745 workspace tests passed, 44 ignored; formatting, workspace Clippy, and release/installer Python checks passed. Native package execution awaits native CI.
+
+Claude (2026-10-07, card coverage round 38 — COMPLETE): 16,562 → 16,571 / 34,913
+(47.5%); 8 faces mine, 1 Codex's; zero lost against HEAD.
+- Enduring: "When ~ dies, if it was a creature, return it … It's an enchantment." — the
+  redundant "if it was a creature" is dropped on a self-dies trigger; "It's an
+  enchantment." after a return to the battlefield is `SetTypes([Enchantment])` on the
+  returned object (`Binding::It`), permanently.
+- `Effect::Choose { except }` — "Choose a creature type other than Wall".
+- Tests: `enduring.rs` (1, new), `choose_on_resolution.rs` (+1).
+Handoff: `docs/sessions/2026-10-07-enduring-and-excluded-types.md`.
+
+Claude (2026-10-07, card coverage round 37 — COMPLETE): 16,546 → 16,562 / 34,913
+(47.4%); 15 faces mine, 2 Codex's; zero lost against HEAD.
+- `Modification::SetCreatureTypes` (layer 4: replaces creature types, clears changeling)
+  and `Modification::BecomesChosen(EntryChoice)`, turned into `SetCreatureTypes` /
+  `SetColors` from the source's choice as the effect begins.
+- `clauses::becomes_chosen`: "~ becomes the creature type / color of your choice until end
+  of turn" (with `Effect::Choose`), "… becomes the chosen type/color …".
+- Note for Codex: `mtg-app` lib tests didn't compile for me at 12:05
+  (`update/mod.rs:493`, `{digest:x}` on a GenericArray) — looks mid-edit, left alone.
+- Tests: `choose_on_resolution.rs` (+2).
+Handoff: `docs/sessions/2026-10-07-becomes-chosen.md`.
+
+Claude (2026-10-07, card coverage round 36 — COMPLETE): 16,517 → 16,546 / 34,913
+(47.4%); of the faces gained since my round-35 list (taken at 16,508), 14 mine
+and 27 Codex's; zero lost against HEAD.
+- "You may pay {X}. If you do / When you do, … X …": `MayPay` asks X (up to what can be
+  paid) after the yes, and fixes it into the effect (`walk::substitute_value`), so a
+  reflexive trigger keeps it. Compiler sets `cx.x` for that body.
+- "… you may …. Do this only once each turn.": `Effect::OnceEachTurn` +
+  `Effect::MarkOnceEachTurn` in the yes branch; `state.done_once_this_turn`, cleared each
+  turn — declining doesn't use it up.
+- **For Codex (UI):** a "choose a value for X" question during a trigger's resolution.
+- Tests: `pay_x.rs` (3), `once_each_turn.rs` (1), both new.
+Handoff: `docs/sessions/2026-10-07-pay-x-and-once-each-turn.md`.
+
+- Completed compound untap-and-goad and leading end-of-turn control changes. Gameplay verifies a shared target, haste/control expiring at cleanup, and goad lasting through the opponent’s turn. Live coverage: **16,546 / 34,913 (47.4%)**.
+
+- Completed until-your-next-turn boosts and keyword grants; fixed existing duration never expiring. Effects end at the start of their controller’s next turn, before untap decisions. Gameplay checks opposing ownership, persistence through opponent turn, and preservation of printed keywords. Live coverage: **16,539 / 34,913 (47.4%)**.
+
+- Completed removal of all counters of a specified type, with per-object counts at resolution. Gameplay checks targeted and all-creature effects, exact removal event amounts, preservation of other counter types, and source-only end-step triggers. Live coverage: **16,532 / 34,913 (47.4%)**.
+
+- Completed opponent-graveyard card nouns (from/in): restrict targets by graveyard zone and opponent ownership, including typed creature cards. Gameplay covers exclusion of own cards/other zones and reanimation preserving ownership. Live coverage: **16,517 / 34,913 (47.3%)**.
+
+Claude (2026-10-07, card coverage round 35 — COMPLETE): 16,475 → 16,517 / 34,913
+(47.3%); 28 faces mine, the rest Codex's; zero lost against HEAD.
+- `its_controller_may` now takes any non-"you" player subject from `nouns::player`
+  ("each player may", "each opponent may", "target opponent may", "that player may",
+  "defending player may", "that creature's controller may"); refused when the clause
+  itself says "you". Show and Tell, Veteran Explorer, Fecundity, Jungle Wayfinder.
+- `ActivationTiming::AnyPlayer` / `AnyPlayerSorcery` — "Any player may activate this
+  ability" (CR 602.1b); offered to every player with priority.
+- **Engine fix:** an activated ability on the stack was controlled by its source's
+  controller; it is now controlled by the player who activated it (CR 602.2a).
+- **For Codex (UI/bot):** opponents' permanents can now offer `ActivateAbility` to a player.
+- Tests: `its_controller_may.rs` (+2), `any_player_activates.rs` (2, new).
+Handoff: `docs/sessions/2026-10-07-player-may-and-any-player.md`.
+
+- Completed standalone hand reveals: target player/opponent, you, and each player; compound life-loss shares its player target. Gameplay regressions cover empty hands, ownership, and cards remaining in hand. Live coverage: **16,508 / 34,913 (47.3%)**; includes concurrent work.
+
+Codex (2026-10-07, end-of-combat durations — COMPLETE): suffix parsing for
+boosts/keywords, control, and animation; combat-only activation restrictions.
+Combat clearing and expiry now occur when EndCombat ends rather than begins.
+Four gameplay regressions cover duration boundaries and activation legality.
+Engine/Oracle: 1,241 passed, 38 ignored; workspace all-feature Clippy and formatting
+pass. Audit: 16,478 / 34,913 playable (47.2%), +3 over prior snapshot.
+Handoff: `docs/sessions/2026-10-07-combat-durations.md`.
+
+Claude (2026-10-07, card coverage round 34 — COMPLETE): 16,454 → 16,475 / 34,913
+(47.2%); 14 faces mine, 9 Codex's; zero lost against HEAD.
+- `Effect::AsPlayer { who, body }` — another player acts as "you" within `body` (their
+  "may", choices, library, shuffle); targets and bindings shared. Compiled for "its
+  controller may …" (`clauses::its_controller_may`, "their library/hand" read as
+  "your …"): Path to Exile, Assassin's Trophy, Ghost Quarter, Erode, Synapse Sliver.
+  **For Codex (UI/bot):** the opponent now gets a "may" yes/no and a search choice in the
+  middle of the caster's spell.
+- Tests: `its_controller_may.rs` (2, new).
+Handoff: `docs/sessions/2026-10-07-its-controller-may.md`.
+
+Codex (2026-10-07, self attacks-alone — COMPLETE): added AttackingAlone filter
+in eval/detect/walk; compiles source attacks-alone triggers. Generic attacks-alone
+and exalted now test the attack event rather than an intervening-if on resolution.
+Four regressions include adding an attacker after triggers reach the stack.
+Engine/Oracle/IR: 1237 passed, 38 ignored; workspace all-feature Clippy
+and formatting pass. Audit: 16,475 / 34,913 playable (47.2%).
+Handoff: `docs/sessions/2026-10-07-self-attacks-alone.md`.
+
+Claude (2026-10-07, card coverage round 33 — COMPLETE): 16,420 → 16,454 / 34,913
+(47.1%); 15 faces mine, 19 Codex's; zero lost against HEAD.
+- Dice (CR 706): `Effect::RollDie { sides, outcomes, then }`, `Value::RollResult` ("the
+  result"), `Event::DieRolled`. Results-table rows ("1—9 | …") are compiled by a pre-pass
+  in `compile()` and attached to the line's roll; rows that target are refused.
+- `walk::Visitor` gained a `value` callback; `walk::substitute_value` replaces "the result"
+  with the number rolled before the row resolves (X stays the spell's X).
+- "Create a number of … tokens equal to …" (`create_token`).
+- Tests: `dice.rs` (3), `create_number.rs` (2), both new.
+Handoff: `docs/sessions/2026-10-07-dice-and-token-counts.md`.
+
+Codex (2026-10-07, captured delayed targets — COMPLETE): simple delayed
+Destroy/MoveZone/Tap/Untap capture original targets through Let and a saved binding;
+future actions do not target or affect a returned permanent's new identity. Three
+regressions pass. Engine/Oracle: 1229 passed, 38 ignored; workspace
+all-feature Clippy and formatting pass. Audit: 16,454 / 34,913 playable (47.1%).
+Handoff: `docs/sessions/2026-10-07-captured-delayed-targets.md`.
+
+Codex (2026-10-07, targeted hand-to-library placement — COMPLETE): targeted
+players/opponents choose fixed-count cards from their own hands for top/bottom
+placement, with owner ordering. Two regressions cover privacy, order, and empty
+hands. Engine/Oracle: 1223 passed, 38 ignored; workspace all-feature
+Clippy and formatting pass. Audit: 16,432 / 34,913 playable (47.1%), +4.
+Handoff: `docs/sessions/2026-10-07-targeted-hand-library.md`.
+
+Codex (2026-10-07, reveal casting costs — COMPLETE): accepts fixed-count
+reveal-from-hand additional costs and reveal-or-mana choices. Cards are revealed
+with CostPayment events during casting and remain in hand. Four regressions cover
+payment alternatives, affordability, private hand boundaries, timing, and printed
+Thunderherd Migration / Goldmeadow Stalwart. Engine/Oracle: 1,221 passed, 38 ignored;
+workspace all-feature Clippy and formatting pass. Audit: 16,428 / 34,913 (47.1%).
+Handoff: `docs/sessions/2026-10-07-reveal-casting-costs.md`.
+
+Claude (2026-10-07, card coverage round 32 — COMPLETE): 16,388 → 16,420 / 34,913
+(47.0%); 17 faces mine, 16 Codex's; zero lost against HEAD.
+- "If ~ would be put into a graveyard from anywhere, reveal ~ and shuffle it into its
+  owner's library instead": `state.shuffled_instead_of_graveyard` (like the exile one);
+  `apply` follows the redirected move with `Shuffled`.
+- `Restriction::Protection { spares_source }` — "This effect doesn't remove this Aura".
+- `Effect::ExileSelfWithCounters` — "Exile ~ with three time counters on it" (suspend).
+- Tests: `shuffle_instead.rs` (2), `aura_protection.rs` (2), `rift.rs` (1), all new.
+Handoff: `docs/sessions/2026-10-07-shuffle-aura-protection-rift.md`.
+
+Codex (2026-10-07, hand-to-library placement — COMPLETE): chooses fixed/any
+number of hand cards for top/bottom placement using existing selection and ordering.
+Supports draw-that-many-plus-N and optional placement followed by conditional draw;
+empty hands cannot enable the conditional draw. Four gameplay regressions pass.
+Engine/Oracle: 1217 passed, 38 ignored; workspace all-feature Clippy and
+formatting pass. Live audit: 16,420 / 34,913 playable (47.0%).
+Handoff: `docs/sessions/2026-10-07-hand-library-placement.md`.
+
+Codex (2026-10-07, targeted-player counts — COMPLETE): resolving “for each”
+counts now allocate a player/opponent target scoped to the controlled-object
+filter; supports draws, life gain, and creature bonuses. Three regressions cover
+current-state counting, separate target slots, and illegal player targets.
+Engine/Oracle: 1,208 passed, 38 ignored; workspace all-feature Clippy and formatting
+pass. Live audit: 16,393 / 34,913 playable (47.0%), +5 over starting snapshot.
+Handoff: `docs/sessions/2026-10-07-targeted-player-counts.md`.
+
+Claude (2026-10-07, card coverage round 31 — COMPLETE): coin flips and clash.
+16,341 → 16,388 / 34,913 (46.9%); 37 faces from this round, 10 Codex's; zero lost
+against HEAD. `Effect::FlipCoin` (the state's seeded RNG, so a replayed resolution flips
+the same way) and `Effect::Clash` (each reveals, keeps on top or puts on the bottom; win
+on higher mana value); `Event::CoinFlipped` / `Event::Clashed` in the log. **For Codex
+(UI):** a "keep the revealed card on top of your library?" yes/no for each clashing player
+(with 3+ players, a "clash with which opponent" choice). Tests: `flips_and_clashes.rs`.
+Handoff: `docs/sessions/2026-10-07-flips-and-clashes.md`.
+
+Codex (2026-10-07, return-land alternative costs — COMPLETE): added
+AdditionalCost::ReturnToHand, chosen through the existing payment path. Compiler
+accepts return-one/two/three Island and pay-mana + return-basic-land alternatives.
+Returns happen during payment, to the owner; a returned land can pay the mana.
+Four regressions pass, including countering after payment and normal casting.
+Engine/IR/Oracle: 1202 passed, 38 ignored; workspace all-feature Clippy
+passes. Live audit: 16,351 / 34,913 playable (46.8%), +10 over prior snapshot.
+Handoff: `docs/sessions/2026-10-07-return-land-alternative-costs.md`.
+
+Codex (2026-10-07, untap resolution choices — COMPLETE): compiles non-targeted
+“untap up to N lands” through ChosenBy; Untap now asks during resolution. Four
+regressions cover selection counts, control restrictions, invalid picks, printed
+texts, and entry triggers. Engine/Oracle: 1,194 passed, 38 ignored; formatting
+and all-target Clippy pass. Live audit: 16,341 / 34,913 playable (46.8%).
+Handoff: `docs/sessions/2026-10-07-untap-resolution-choices.md`.
+
+Codex (2026-10-07, pipeline formatting and source-owner shuffle): applied
+`cargo fmt --all`; the exact CI formatting check and workspace all-feature
+Clippy pass. Release automation: six tests pass. Added source-owner shuffle
+wording with a regression for differing owner/controller (Cerulean Sphinx).
+Live audit: 16,311 / 34,913 playable as printed (46.7%). Full workspace all-feature tests pass outside the sandbox; sandbox socket
+restrictions caused the initial local networking failures.
+
 Codex (2026-10-07, life buyback/kicker — COMPLETE): accepts fixed PayLife costs;
 paid kicker parts join spell_extra_cost, reserving/paying life through the existing
 path. Affordability reserves life for combined costs and Phyrexian mana. Six
@@ -1676,3 +1855,23 @@ this round (16,251 with concurrent work), zero faces lost against HEAD.
 - `Effect::Sacrifice` of the source no longer asks a question.
 - Tests: `announced_mana.rs` (new, 4), `mana_followups.rs` (+2).
 Handoff: docs/sessions/2026-10-07-announced-mana-abilities.md.
+
+Claude (2026-10-07, card coverage, round 29 — COMPLETE): 16,251 → 16,302 / 34,913 from
+this round (16,311 with concurrent work), zero faces lost against HEAD.
+- **Exert** (CR 701.43): `AbilityKind::ExertAsAttacks`, asked right after attackers are
+  declared (`Suspended::Exerting`); `AdditionalCost::Exert` for "{T}, Exert …:" costs.
+- `Restriction::AssignsNoCombatDamage`; "you may have it deal … If you do, …" compiles.
+- `Effect::Choose` — "Choose a color/creature type. …" asked as it resolves.
+- **For Codex (UI/bot):** new questions — "exert as it attacks" (ChooseObjects, default
+  none) and "choose a color" / "choose a creature type" during resolution (ChooseModes).
+- Tests: `exert.rs` (3), `no_combat_damage.rs` (2), `choose_on_resolution.rs` (2), all new.
+Handoff: docs/sessions/2026-10-07-exert-and-resolution-choices.md.
+
+Claude (2026-10-07, card coverage, round 30 — COMPLETE): 16,311 → 16,341 / 34,913 (18 faces
+mine, 13 Codex's), zero faces lost against HEAD.
+- "if ~ is tapped, put a storage counter on it": "it" is the source after a self
+  intervening-if (storage lands, Mana Vault, Mana Bloom).
+- Kinship via `ObjectFilter::SharesCreatureTypeWith`. **For Codex (UI):** a "reveal the top
+  card of your library" yes/no at upkeep.
+- Tests: `kinship.rs` (new, 4), `announced_mana.rs` (+2).
+Handoff: docs/sessions/2026-10-07-kinship-and-self-it.md.

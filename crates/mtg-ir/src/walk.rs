@@ -20,6 +20,7 @@ use crate::{
 pub struct Visitor<'a> {
     pub filter: &'a mut dyn FnMut(&mut ObjectFilter),
     pub token: &'a mut dyn FnMut(&mut TokenSpec),
+    pub value: &'a mut dyn FnMut(&mut Value),
 }
 
 impl Visitor<'_> {
@@ -108,6 +109,7 @@ impl Visitor<'_> {
                 AdditionalCost::Discard { count, filter, .. }
                 | AdditionalCost::ExileFrom { count, filter, .. }
                 | AdditionalCost::Reveal { count, filter }
+                | AdditionalCost::ReturnToHand { count, filter }
                 | AdditionalCost::TapUntapped { filter, count } => {
                     self.value(count);
                     self.filter(filter);
@@ -301,13 +303,16 @@ impl Visitor<'_> {
                 | Restriction::AssignAsThoughUnblocked
                 | Restriction::PreventDamageRemoveCounter
                 | Restriction::AdditionalLandPlay
-                | Restriction::MayChooseNotToUntap => {}
+                | Restriction::MayChooseNotToUntap
+                | Restriction::PlayLandsFromGraveyard => {}
             },
             Modification::ChangeText { .. }
             | Modification::AddTypes(_)
             | Modification::RemoveTypes(_)
             | Modification::SetTypes(_)
             | Modification::AddSubtypes(_)
+            | Modification::SetCreatureTypes(_)
+            | Modification::BecomesChosen(_)
             | Modification::RemoveSupertype(_)
             | Modification::NoManaCost
             | Modification::AddColors(_)
@@ -504,6 +509,22 @@ impl Visitor<'_> {
                 self.selector(what)
             }
             Effect::Choose { then, .. } => self.effect(then),
+            Effect::ExileSelfWithCounters { .. } | Effect::MarkOnceEachTurn => {}
+            Effect::OnceEachTurn { body } => self.effect(body),
+            Effect::AsPlayer { who, body } => {
+                self.selector(who);
+                self.effect(body);
+            }
+            Effect::RollDie { outcomes, then, .. } => {
+                for (_, _, e) in outcomes {
+                    self.effect(e);
+                }
+                self.effect(then);
+            }
+            Effect::FlipCoin { win, lose } | Effect::Clash { win, lose } => {
+                self.effect(win);
+                self.effect(lose);
+            }
             Effect::Reflexive { effect, targets } => {
                 for t in targets {
                     self.filter(&mut t.filter);
@@ -620,7 +641,8 @@ impl Visitor<'_> {
         match f {
             ObjectFilter::ControlledBy(s)
             | ObjectFilter::OwnedBy(s)
-            | ObjectFilter::SharesColorWith(s) => self.selector(s),
+            | ObjectFilter::SharesColorWith(s)
+            | ObjectFilter::SharesCreatureTypeWith(s) => self.selector(s),
             ObjectFilter::PowerAtMost(v)
             | ObjectFilter::PowerAtLeast(v)
             | ObjectFilter::ManaValueAtMost(v)
@@ -643,6 +665,7 @@ impl Visitor<'_> {
             | ObjectFilter::Tapped(_)
             | ObjectFilter::AttackingOrBlocking
             | ObjectFilter::Attacking
+            | ObjectFilter::AttackingAlone
             | ObjectFilter::Blocking
             | ObjectFilter::AttachedToSelf
             | ObjectFilter::DealtDamageBySelfThisTurn
@@ -667,6 +690,7 @@ impl Visitor<'_> {
     }
 
     fn value(&mut self, v: &mut Value) {
+        (self.value)(v);
         match v {
             Value::Fixed(_)
             | Value::X
@@ -676,7 +700,8 @@ impl Visitor<'_> {
             | Value::CastX
             | Value::OpponentsAttacked
             | Value::ManaSpentOfColor(_)
-            | Value::SpellsCastBefore => {}
+            | Value::SpellsCastBefore
+            | Value::RollResult => {}
             Value::DiedThisTurn(f) => self.filter(f),
             Value::Half { value, .. } => self.value(value),
             Value::Count(s)
@@ -770,8 +795,24 @@ pub fn map_subtypes(a: &mut Ability, map: &mut dyn FnMut(mtg_core::Subtype) -> m
                 *s = (map.borrow_mut())(*s);
             }
         },
+        value: &mut |_| {},
     }
     .ability(a);
+}
+
+/// Replace every `from` value inside an effect with `to` ("the result" with the number
+/// rolled).
+pub fn substitute_value(e: &mut Effect, from: &Value, to: &Value) {
+    Visitor {
+        filter: &mut |_| {},
+        token: &mut |_| {},
+        value: &mut |v| {
+            if v == from {
+                *v = to.clone();
+            }
+        },
+    }
+    .effect(e);
 }
 
 /// Card ids from here up are token faces, so a table can grow without renumbering them.
@@ -818,6 +859,7 @@ pub fn register_tokens<'a>(
                     let (s, m) = &mut *g;
                     assign(t, s, m);
                 },
+                value: &mut |_| {},
             }
             .ability(a);
         }

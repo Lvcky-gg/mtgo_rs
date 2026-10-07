@@ -79,7 +79,8 @@ pub fn turn_based_action(step: Step) -> Option<TurnBasedAction> {
         Step::CombatDamage => Some(TurnBasedAction::CombatDamage {
             first_strike: false,
         }),
-        Step::EndCombat => Some(TurnBasedAction::EndCombat),
+        // Combat ends when this step ends, after its priority rounds (CR 511.3).
+        Step::EndCombat => None,
         Step::Cleanup => Some(TurnBasedAction::Cleanup),
         Step::PrecombatMain => Some(TurnBasedAction::AddLore),
         _ => None,

@@ -121,3 +121,36 @@ fn an_illegal_target_does_not_shuffle_any_library() {
             .any(|e| matches!(e.event, Event::Shuffled { .. }))
     );
 }
+
+#[test]
+fn source_owner_shuffles_a_creature_controlled_by_another_player() {
+    let mut t = Table::default();
+    let sphinx = t.card(
+        "{4}{U}{U}",
+        "Creature — Sphinx",
+        Some((5, 5)),
+        "Flying\n{U}: This creature's owner shuffles it into their library.",
+    );
+    let mut g = Game::new(t);
+    g.lands(1);
+    let source = g.put(sphinx, P1, Zone::Battlefield);
+    g.engine.state.objects.get_mut(&source).unwrap().controller = P0;
+    g.main();
+    let before = [g.count(Zone::Library, P0), g.count(Zone::Library, P1)];
+    let log_start = g.engine.log.len();
+    g.act(activate(source, 1), &[], &[]);
+    assert!(!g.engine.state.objects.contains_key(&source));
+    assert_eq!(g.count(Zone::Library, P0), before[0]);
+    assert_eq!(g.count(Zone::Library, P1), before[1] + 1);
+    let shufflers: Vec<_> = g.engine.log[log_start..]
+        .iter()
+        .filter_map(|e| {
+            if let Event::Shuffled { player } = &e.event {
+                Some(*player)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(shufflers, vec![P1]);
+}

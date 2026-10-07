@@ -295,10 +295,55 @@ pub enum Effect {
     GrantCastLater {
         what: Selector,
     },
+    /// "Exile ~ with three time counters on it": this object (a resolving spell, or a
+    /// permanent) to exile, arriving with the counters. With suspend, it is suspended
+    /// (CR 702.62b).
+    ExileSelfWithCounters {
+        kind: mtg_core::CounterKind,
+        amount: u32,
+    },
+    /// "… you may …. Do this only once each turn.": `body` happens only while its source
+    /// hasn't done it yet this turn; doing it is marked by `MarkOnceEachTurn` inside the
+    /// "yes" branch, so declining doesn't use it up.
+    OnceEachTurn {
+        body: Box<Effect>,
+    },
+    /// Record that the source did its "only once each turn" thing this turn.
+    MarkOnceEachTurn,
+    /// What another player does, as that player: "its controller may search their library
+    /// for a basic land card, …". Within `body`, "you" is each of `who` in turn (their
+    /// choices, their library); targets and bindings are the enclosing effect's.
+    AsPlayer {
+        who: crate::Selector,
+        body: Box<Effect>,
+    },
+    /// CR 706 — "Roll a d20." and its results table ("1—9 | …", "20 | …"): the row whose
+    /// range holds the number rolled, then `then`; in both, `Value::RollResult` is that
+    /// number.
+    RollDie {
+        sides: u32,
+        outcomes: Vec<(u32, u32, Effect)>,
+        then: Box<Effect>,
+    },
+    /// CR 705 — "Flip a coin. If you win the flip, … If you lose the flip, …".
+    FlipCoin {
+        win: Box<Effect>,
+        lose: Box<Effect>,
+    },
+    /// CR 701.23 — "Clash with an opponent. If you win, … Otherwise, …": each reveals the
+    /// top card of their library and puts it on the top or bottom; you win with the
+    /// higher mana value.
+    Clash {
+        win: Box<Effect>,
+        lose: Box<Effect>,
+    },
     /// "Choose a color. …", "Choose a creature type. …": asked as it resolves; within
     /// `then`, "the chosen color/type" (`HasChosenColor`, `HasChosenSubtype`) is the answer.
     Choose {
         choice: EntryChoice,
+        /// "Choose a creature type other than Wall": an option not offered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        except: Option<mtg_core::Subtype>,
         then: Box<Effect>,
     },
     /// A reflexive trigger (CR 603.12): "you may pay {2}. When you do, …" — a triggered
@@ -560,6 +605,11 @@ pub enum Modification {
     AddTypes(Vec<CardType>),
     /// Layer 4 — "becomes a 2/2 Bear creature": subtypes added.
     AddSubtypes(Vec<mtg_core::Subtype>),
+    /// Layer 4 — "becomes a Goblin": these creature types replace all its others.
+    SetCreatureTypes(Vec<mtg_core::Subtype>),
+    /// "Becomes the chosen color/creature type": `SetColors` / `SetCreatureTypes` with the
+    /// source's choice (an enclosing `Effect::Choose`), fixed as the effect begins.
+    BecomesChosen(EntryChoice),
     /// Layer 4 — "except it isn't legendary".
     RemoveSupertype(mtg_core::Supertype),
     /// Layer 1 — a copy "with no mana cost" (embalm, eternalize).
@@ -625,6 +675,8 @@ pub enum Restriction {
         spells: ObjectFilter,
         lands: bool,
     },
+    /// "You may play lands from your graveyard." (Crucible of Worlds)
+    PlayLandsFromGraveyard,
     /// "Skip your draw step."
     SkipDrawStep,
     /// CR 702.171b — saddled (a Mount, until end of turn).
@@ -658,6 +710,10 @@ pub enum Restriction {
         from: ObjectFilter,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         chosen_color: bool,
+        /// "This effect doesn't remove this Aura": the protection doesn't make the Aura
+        /// granting it fall off (CR 702.16c would otherwise).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spares_source: bool,
     },
     /// "You may cast creature spells as though they had flash" (CR 702.8d): spells
     /// matching the filter that the source's controller casts. On a spell itself

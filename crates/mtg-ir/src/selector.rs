@@ -109,6 +109,8 @@ pub enum ObjectFilter {
     Tapped(bool),
     AttackingOrBlocking,
     Attacking,
+    /// The only creature currently attacking; used when matching an attack event.
+    AttackingAlone,
     Blocking,
     /// The object this ability's source is attached to: "enchanted creature",
     /// "equipped creature", "fortified land".
@@ -130,6 +132,8 @@ pub enum ObjectFilter {
     /// Shares at least one color with one of these objects (conspire: "that share a color
     /// with it").
     SharesColorWith(Box<Selector>),
+    /// Shares a creature type with any of these (changelings share every one): kinship.
+    SharesCreatureTypeWith(Box<Selector>),
     ManaValueAtMost(Value),
     HasCounter(CounterKind),
     /// One or more counters of any kind: "with a counter on it".

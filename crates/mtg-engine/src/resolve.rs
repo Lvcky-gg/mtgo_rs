@@ -191,8 +191,14 @@ pub fn resolve(
     result
 }
 
-fn controlled_permanents(state: &GameState, cards: &dyn PrintedCards, player: PlayerId) -> Vec<ObjectId> {
-    state.battlefield().into_iter()
+fn controlled_permanents(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    player: PlayerId,
+) -> Vec<ObjectId> {
+    state
+        .battlefield()
+        .into_iter()
         .filter(|id| crate::layers::controller(state, *id) == Some(player))
         .filter(|id| crate::layers::compute(state, cards, *id).is_some_and(|ch| ch.is_permanent()))
         .collect()
@@ -208,20 +214,32 @@ pub(crate) fn refresh_city_blessings(
     if state.battlefield().len() < 10 {
         return;
     }
-    let players: Vec<_> = state.players.values().filter(|p| !p.city_blessing).map(|p| p.id).collect();
+    let players: Vec<_> = state
+        .players
+        .values()
+        .filter(|p| !p.city_blessing)
+        .map(|p| p.id)
+        .collect();
     for player in players {
         let permanents = controlled_permanents(state, cards, player);
-        if permanents.len() >= 10 && permanents.iter().any(|id| {
-            crate::layers::compute(state, cards, *id).is_some_and(|ch| {
-                ch.granted_keywords.contains(&Keyword::Ascend)
-                    || state.objects.get(id).is_some_and(|o| {
-                        cards.face(o.card, o.face).is_some_and(|face| {
-                            face.abilities.iter().any(|a| ch.abilities.contains(&a.id)
-                                && matches!(a.kind, mtg_ir::AbilityKind::Keyword(Keyword::Ascend)))
+        if permanents.len() >= 10
+            && permanents.iter().any(|id| {
+                crate::layers::compute(state, cards, *id).is_some_and(|ch| {
+                    ch.granted_keywords.contains(&Keyword::Ascend)
+                        || state.objects.get(id).is_some_and(|o| {
+                            cards.face(o.card, o.face).is_some_and(|face| {
+                                face.abilities.iter().any(|a| {
+                                    ch.abilities.contains(&a.id)
+                                        && matches!(
+                                            a.kind,
+                                            mtg_ir::AbilityKind::Keyword(Keyword::Ascend)
+                                        )
+                                })
+                            })
                         })
-                    })
+                })
             })
-        }) {
+        {
             apply::apply(state, cause, Event::CityBlessingGranted { player }, log);
         }
     }
@@ -240,8 +258,16 @@ fn resolve_inner(
         Effect::Nothing => Ok(()),
         Effect::Ascend => {
             if !state.player(rc.controller).city_blessing
-                && controlled_permanents(state, cards, rc.controller).len() >= 10 {
-                apply::apply(state, cause, Event::CityBlessingGranted { player: rc.controller }, log);
+                && controlled_permanents(state, cards, rc.controller).len() >= 10
+            {
+                apply::apply(
+                    state,
+                    cause,
+                    Event::CityBlessingGranted {
+                        player: rc.controller,
+                    },
+                    log,
+                );
             }
             Ok(())
         }
@@ -527,7 +553,7 @@ fn resolve_inner(
         }
 
         Effect::Untap { what } => {
-            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            let ids = objects_asking(state, cards, rc, what)?;
             for id in ids {
                 if state.objects.get(&id).is_some_and(|o| o.tapped) {
                     apply::apply(
@@ -887,6 +913,7 @@ fn resolve_inner(
                 mtg_ir::effect::Restriction::Protection {
                     from,
                     chosen_color: chosen @ true,
+                    ..
                 },
             ) = &mut modification
             {
@@ -915,6 +942,24 @@ fn resolve_inner(
                 };
                 *from = mtg_ir::ObjectFilter::HasColor(COLORS[i.min(4)]);
                 *chosen = false;
+            }
+            // "Becomes the chosen color/type": the source's choice, fixed now.
+            if let mtg_ir::effect::Modification::BecomesChosen(choice) = &modification {
+                let source = state.objects.get(&rc.source);
+                modification = match choice {
+                    mtg_ir::effect::EntryChoice::Color => {
+                        match source.and_then(|o| o.chosen_color) {
+                            Some(c) => mtg_ir::effect::Modification::SetColors(vec![c]),
+                            None => return Ok(()),
+                        }
+                    }
+                    mtg_ir::effect::EntryChoice::CreatureType => {
+                        match source.and_then(|o| o.chosen_subtype) {
+                            Some(s) => mtg_ir::effect::Modification::SetCreatureTypes(vec![s]),
+                            None => return Ok(()),
+                        }
+                    }
+                };
             }
             if *duration != Duration::WhileSourcePresent {
                 use mtg_ir::effect::Modification as M;
@@ -1002,14 +1047,40 @@ fn resolve_inner(
             if player.life < life || (player.energy as i32) < energy {
                 return Ok(());
             }
-            let affordable = crate::mana::can_pay(state, cards, rc.controller, &cost.mana, rc.x);
+            // "You may pay {X}": X is chosen now, up to what can be paid, and is X in what
+            // paying it does — fixed into that effect, so a "when you do" trigger keeps it.
+            let variable = cost.mana.symbols.contains(&mtg_core::ManaSymbol::Variable);
+            let mut x = if variable { 0 } else { rc.x };
+            let affordable = crate::mana::can_pay(state, cards, rc.controller, &cost.mana, x);
             if !affordable {
                 return Ok(());
             }
             if !ask_confirm(rc, rc.controller, "pay the cost?")? {
                 return Ok(());
             }
-            if let Some(plan) = crate::mana::plan(state, cards, rc.controller, &cost.mana, rc.x) {
+            let mut then = then.clone();
+            if variable {
+                let mut max = 0;
+                while max < 100
+                    && crate::mana::can_pay(state, cards, rc.controller, &cost.mana, max + 1)
+                {
+                    max += 1;
+                }
+                x = match rc.need(
+                    rc.controller,
+                    ChoiceKind::ChooseX { min: 0, max },
+                    "choose a value for X",
+                )? {
+                    Answer::Number(n) => n.min(max),
+                    _ => 0,
+                };
+                mtg_ir::walk::substitute_value(
+                    &mut then,
+                    &mtg_ir::Value::X,
+                    &mtg_ir::Value::Fixed(x as i32),
+                );
+            }
+            if let Some(plan) = crate::mana::plan(state, cards, rc.controller, &cost.mana, x) {
                 pay_plan(state, cards, log, rc.controller, &plan);
                 if life > 0 {
                     apply::apply(
@@ -1033,7 +1104,7 @@ fn resolve_inner(
                         log,
                     );
                 }
-                resolve(state, cards, log, then, rc)
+                resolve(state, cards, log, &then, rc)
             } else {
                 Ok(())
             }
@@ -1199,9 +1270,14 @@ fn resolve_inner(
                 if top.len() < 2 {
                     continue;
                 }
-                for (i, id) in ask_order(rc, rc.controller, top, "order for the top, first is topmost")?
-                    .into_iter()
-                    .enumerate()
+                for (i, id) in ask_order(
+                    rc,
+                    rc.controller,
+                    top,
+                    "order for the top, first is topmost",
+                )?
+                .into_iter()
+                .enumerate()
                 {
                     move_to_at(state, log, id, Zone::Library, Some(i as u32), cause);
                 }
@@ -1254,7 +1330,14 @@ fn resolve_inner(
                         .collect::<Vec<_>>())
                 })?;
                 let max = 1.min(candidates.len() as u32);
-                chosen.extend(ask_objects(rc, p, candidates, 0, max, "take the other quality")?);
+                chosen.extend(ask_objects(
+                    rc,
+                    p,
+                    candidates,
+                    0,
+                    max,
+                    "take the other quality",
+                )?);
             }
             if *reveal {
                 for id in &chosen {
@@ -1653,8 +1736,172 @@ fn resolve_inner(
             }
             Ok(())
         }
-        Effect::Choose { choice, then } => {
-            let options = entry_options(cards, *choice);
+        Effect::ExileSelfWithCounters { kind, amount } => {
+            if let Some(object) = move_to_at(state, log, rc.source, Zone::Exile, None, cause)
+                && *amount > 0
+            {
+                apply::apply(
+                    state,
+                    cause,
+                    Event::CountersChanged {
+                        object,
+                        kind: *kind,
+                        delta: *amount as i32,
+                    },
+                    log,
+                );
+            }
+            Ok(())
+        }
+        Effect::OnceEachTurn { body } => {
+            if state.done_once_this_turn.contains(&rc.source) {
+                return Ok(());
+            }
+            resolve(state, cards, log, body, rc)
+        }
+        Effect::MarkOnceEachTurn => {
+            state.done_once_this_turn.insert(rc.source);
+            Ok(())
+        }
+        Effect::AsPlayer { who, body } => {
+            let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+            let me = rc.controller;
+            for p in players {
+                rc.controller = p;
+                let done = resolve(state, cards, log, body, rc);
+                rc.controller = me;
+                done?;
+            }
+            Ok(())
+        }
+        // Like a coin flip, rolled with the state's seeded generator.
+        Effect::RollDie {
+            sides,
+            outcomes,
+            then,
+        } => {
+            let result = (state.rng.next_u64() % u64::from((*sides).max(1))) as u32 + 1;
+            let player = rc.controller;
+            apply::apply(
+                state,
+                cause,
+                Event::DieRolled {
+                    player,
+                    sides: *sides,
+                    result,
+                },
+                log,
+            );
+            let rolled = mtg_ir::Value::Fixed(result as i32);
+            let mut row = outcomes
+                .iter()
+                .find(|(lo, hi, _)| (*lo..=*hi).contains(&result))
+                .map_or(Effect::Nothing, |(_, _, e)| e.clone());
+            let mut after = (**then).clone();
+            mtg_ir::walk::substitute_value(&mut row, &mtg_ir::Value::RollResult, &rolled);
+            mtg_ir::walk::substitute_value(&mut after, &mtg_ir::Value::RollResult, &rolled);
+            resolve(state, cards, log, &row, rc)?;
+            resolve(state, cards, log, &after, rc)
+        }
+        // The game's own seeded generator decides, so a resolution run again from its
+        // snapshot (to ask a question) flips the same way.
+        Effect::FlipCoin { win, lose } => {
+            let won = state.rng.next_u64() & 1 == 1;
+            let player = rc.controller;
+            apply::apply(state, cause, Event::CoinFlipped { player, won }, log);
+            resolve(state, cards, log, if won { win } else { lose }, rc)
+        }
+        Effect::Clash { win, lose } => {
+            let me = rc.controller;
+            let opponents = with_ctx(state, cards, rc, |ctx| {
+                eval::players(ctx, &Selector::Opponents)
+            })?;
+            let opponent = match opponents.as_slice() {
+                [] => None,
+                [only] => Some(*only),
+                many => {
+                    let labels = many.iter().map(|p| format!("player {}", p.0 + 1).into());
+                    match rc.need(
+                        me,
+                        ChoiceKind::ChooseModes {
+                            available: labels.collect(),
+                            count: 1,
+                            min: None,
+                        },
+                        "clash with which opponent",
+                    )? {
+                        Answer::Modes(m) => many.get(m.first().copied().unwrap_or(0) as usize),
+                        _ => many.first(),
+                    }
+                    .copied()
+                }
+            };
+            let clashing: Vec<PlayerId> = std::iter::once(me).chain(opponent).collect();
+            let revealed: Vec<(PlayerId, Option<ObjectId>)> = clashing
+                .iter()
+                .map(|p| {
+                    let top = state
+                        .objects_in(ZoneRef::of(Zone::Library, *p))
+                        .first()
+                        .copied();
+                    (*p, top)
+                })
+                .collect();
+            for (_, top) in &revealed {
+                if let Some(object) = top {
+                    apply::apply(state, cause, Event::Revealed { object: *object }, log);
+                }
+            }
+            let mana_value = |state: &GameState, id: ObjectId| {
+                crate::layers::compute(state, cards, id).map(|c| c.mana_cost.mana_value())
+            };
+            // CR 701.23b: a player wins with a card of higher mana value than every other
+            // card revealed.
+            let values: Vec<Option<u32>> = revealed
+                .iter()
+                .map(|(_, top)| top.and_then(|id| mana_value(state, id)))
+                .collect();
+            let wins: Vec<bool> = (0..values.len())
+                .map(|i| {
+                    values[i].is_some_and(|m| {
+                        values
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .all(|(_, other)| other.is_none_or(|o| m > o))
+                    })
+                })
+                .collect();
+            let won = wins[0];
+            // Each clashing player puts their card on the top or the bottom.
+            for (p, top) in &revealed {
+                let Some(id) = top else {
+                    continue;
+                };
+                if !ask_confirm(rc, *p, "keep the revealed card on top of your library?")? {
+                    move_to_at(state, log, *id, Zone::Library, Some(u32::MAX), cause);
+                }
+            }
+            for ((p, _), won) in revealed.iter().zip(&wins) {
+                apply::apply(
+                    state,
+                    cause,
+                    Event::Clashed {
+                        player: *p,
+                        won: *won,
+                    },
+                    log,
+                );
+            }
+            resolve(state, cards, log, if won { win } else { lose }, rc)
+        }
+        Effect::Choose {
+            choice,
+            except,
+            then,
+        } => {
+            let mut options = entry_options(cards, *choice);
+            options.retain(|(_, _, s)| except.is_none() || *s != *except);
             let what = match choice {
                 mtg_ir::effect::EntryChoice::Color => "choose a color",
                 mtg_ir::effect::EntryChoice::CreatureType => "choose a creature type",
@@ -1671,8 +1918,7 @@ fn resolve_inner(
                 Answer::Modes(m) => m.first().copied().unwrap_or(0) as usize,
                 _ => 0,
             };
-            let Some((_, color, subtype)) = options.get(picked).or_else(|| options.first())
-            else {
+            let Some((_, color, subtype)) = options.get(picked).or_else(|| options.first()) else {
                 return resolve(state, cards, log, then, rc);
             };
             // Kept on the resolving object, where "the chosen color" is read; a choice the
@@ -2945,7 +3191,10 @@ pub(crate) fn layer_of(m: &mtg_ir::effect::Modification) -> u8 {
         | M::RemoveTypes(_)
         | M::SetTypes(_)
         | M::AddSubtypes(_)
+        | M::SetCreatureTypes(_)
         | M::RemoveSupertype(_) => layer::TYPE,
+        M::BecomesChosen(mtg_ir::effect::EntryChoice::CreatureType) => layer::TYPE,
+        M::BecomesChosen(mtg_ir::effect::EntryChoice::Color) => layer::COLOR,
         M::NoManaCost => layer::COPY,
         M::AddColors(_) | M::SetColors(_) => layer::COLOR,
         M::GrantAbility(_) | M::LoseAllAbilities | M::LoseKeyword(_) => layer::ABILITY,

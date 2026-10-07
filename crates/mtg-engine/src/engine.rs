@@ -208,10 +208,12 @@ struct Announced {
     /// Objects chosen to pay cost parts: sacrificed or discarded (moved), or tapped.
     paid_with: Vec<ObjectId>,
     tapped_for: Vec<ObjectId>,
-    /// Unblocked attackers returned to hand to pay for ninjutsu.
+    /// Permanents returned to their owners' hands to pay costs, including ninjutsu.
     returned: Vec<ObjectId>,
     /// Cards exiled from the hand to pay ("exile a blue card from your hand").
     exiled: Vec<ObjectId>,
+    /// Cards revealed from hand to pay an additional casting cost.
+    revealed: Vec<ObjectId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -448,6 +450,9 @@ impl Engine {
                     Event::StepEnded { turn, active, step },
                     &mut self.log,
                 );
+                if step == Step::EndCombat {
+                    self.perform_turn_based_action(cards, turn::TurnBasedAction::EndCombat);
+                }
                 if step == Step::Cleanup && self.cleanup_priority {
                     // A cleanup that granted priority is followed by another cleanup,
                     // not the next turn (CR 514.3a). StepEnded still empties mana.
@@ -532,7 +537,10 @@ impl Engine {
                     | (Some(Awaiting::Cost), Answer::Objects(_))
                     | (Some(Awaiting::Kicker), Answer::Bool(_) | Answer::Number(_))
                     | (Some(Awaiting::X), Answer::Number(_))
-                    | (Some(Awaiting::Modes | Awaiting::CostChoice), Answer::Modes(_))
+                    | (
+                        Some(Awaiting::Modes | Awaiting::CostChoice),
+                        Answer::Modes(_)
+                    )
             );
             if !shaped {
                 self.pending = Some(choice);
@@ -551,7 +559,9 @@ impl Engine {
                 a.cost_choice = Some(option);
                 let (object, controller) = (a.object, a.controller);
                 if let Some(o) = self.state.objects.get_mut(&object) {
-                    o.cast_context.get_or_insert_with(Default::default).cost_choice = Some(option);
+                    o.cast_context
+                        .get_or_insert_with(Default::default)
+                        .cost_choice = Some(option);
                 }
                 // Its chosen parts ("sacrifice a creature") are paid with the rest.
                 let parts = self.chosen_cost_parts(cards, object, controller, true);
@@ -1115,6 +1125,32 @@ impl Engine {
             })
             .collect();
         self.state.exiled_instead_of_graveyard.extend(found);
+        let shuffled: Vec<mtg_core::CardId> = self
+            .state
+            .objects
+            .values()
+            .map(|o| o.card)
+            .filter(|card| {
+                cards.face(*card, 0).is_some_and(|f| {
+                    f.abilities.iter().any(|a| {
+                        matches!(
+                            &a.kind,
+                            mtg_ir::AbilityKind::ReplacementEffect(mtg_ir::effect::Replacement {
+                                matches: mtg_ir::EventPattern::ZoneChange {
+                                    who: mtg_ir::ObjectFilter::IsSelf,
+                                    from: None,
+                                    to: Some(Zone::Graveyard),
+                                },
+                                kind: mtg_ir::effect::ReplacementKind::RedirectZoneChange {
+                                    to: Zone::Library
+                                },
+                            })
+                        )
+                    })
+                })
+            })
+            .collect();
+        self.state.shuffled_instead_of_graveyard.extend(shuffled);
     }
 
     /// Return every card exiled "until" a permanent that has now left the battlefield.
@@ -1171,7 +1207,12 @@ impl Engine {
     }
 
     fn settle(&mut self, cards: &dyn PrintedCards) -> Progress {
-        resolve::refresh_city_blessings(&mut self.state, cards, &mut self.log, Cause::StateBasedAction);
+        resolve::refresh_city_blessings(
+            &mut self.state,
+            cards,
+            &mut self.log,
+            Cause::StateBasedAction,
+        );
         self.refresh_no_life_gain(cards);
         self.refresh_exile_if_dies(cards);
         // 0. Notice what just happened (CR 603.2). Scanning here rather than inside
@@ -1677,6 +1718,9 @@ impl Engine {
         let mut stack_obj = src;
         stack_obj.id = object;
         stack_obj.zone = ZoneRef::shared(Zone::Stack);
+        // The player who activated it controls it (CR 602.2a) — not always the source's
+        // controller ("any player may activate this ability").
+        stack_obj.controller = controller;
         // An ability is not a token even when its source is one.
         stack_obj.is_token = false;
         stack_obj.cast_context = Some(crate::state::CastContext {
@@ -2402,6 +2446,37 @@ impl Engine {
             .copied()
             .filter(|_| !from_top.is_empty());
         let castable_from: Vec<ObjectId> = castable_from.into_iter().chain(top).collect();
+        // "You may play lands from your graveyard": its lands, if some such effect of this
+        // player's allows it.
+        let lands_from_graveyard = crate::layers::effects(&self.state, cards)
+            .iter()
+            .filter(|e| crate::layers::controller(&self.state, e.source) == Some(who))
+            .any(|e| {
+                matches!(
+                    e.modification,
+                    mtg_ir::effect::Modification::Restriction(
+                        mtg_ir::effect::Restriction::PlayLandsFromGraveyard
+                    )
+                )
+            });
+        let is_land_card = |id: &ObjectId| {
+            self.state.objects.get(id).is_some_and(|o| {
+                cards
+                    .face(o.card, 0)
+                    .is_some_and(|f| f.card_types.contains(&mtg_core::CardType::Land))
+            })
+        };
+        let castable_from: Vec<ObjectId> = if lands_from_graveyard {
+            let mut all = castable_from;
+            for id in self.state.objects_in(ZoneRef::of(Zone::Graveyard, who)) {
+                if is_land_card(&id) && !all.contains(&id) {
+                    all.push(id);
+                }
+            }
+            all
+        } else {
+            castable_from
+        };
         let turn = self.state.turn;
         let may_play = |o: &crate::state::GameObject| {
             o.may_play
@@ -2466,7 +2541,12 @@ impl Engine {
                     object.cast_context.get_or_insert_with(Default::default);
                     &selected
                 };
+                let land_from_graveyard = obj.zone.zone == Zone::Graveyard
+                    && lands_from_graveyard
+                    && face == 0
+                    && is_land_card(&id);
                 if obj.zone.zone == Zone::Graveyard
+                    && !land_from_graveyard
                     && cards.face(obj.card, face).is_none_or(|f| {
                         crate::cost::graveyard_cast(cards, obj.card, face).is_none()
                             || !crate::cost::additional_payable(
@@ -2488,6 +2568,7 @@ impl Engine {
                 // A land is played, not cast, and only one per turn (CR 305.2).
                 if ch.has_type(mtg_core::CardType::Land) {
                     if (obj.zone.zone == Zone::Hand
+                        || land_from_graveyard
                         || (obj.zone.zone == Zone::Library && from_top.iter().any(|(_, l)| *l))
                         || (obj.zone.zone == Zone::Exile
                             && (obj.adventure_player == Some(who)
@@ -2831,11 +2912,11 @@ impl Engine {
             }
         }
 
-        // Activated abilities of permanents this player controls.
+        // Activated abilities of permanents this player controls, and those any player may
+        // activate (CR 602.1b).
         for id in self.state.battlefield() {
-            if crate::layers::controller(&self.state, id) != Some(who)
-                || crate::combat::abilities_blocked(&self.state, cards, id)
-            {
+            let mine = crate::layers::controller(&self.state, id) == Some(who);
+            if crate::combat::abilities_blocked(&self.state, cards, id) {
                 continue;
             }
             // Printed and granted alike (see `crate::abilities`).
@@ -2851,6 +2932,9 @@ impl Engine {
                 else {
                     continue;
                 };
+                if !mine && !timing.any_player() {
+                    continue;
+                }
 
                 if *is_loyalty_ability
                     && (!sorcery_time || self.state.loyalty_activated_this_turn.contains(&id))
@@ -3264,7 +3348,9 @@ impl Engine {
         if let [only] = cost_options.as_slice() {
             cost_choice = Some(*only);
             if let Some(o) = self.state.objects.get_mut(&object) {
-                o.cast_context.get_or_insert_with(Default::default).cost_choice = Some(*only);
+                o.cast_context
+                    .get_or_insert_with(Default::default)
+                    .cost_choice = Some(*only);
             }
             cost_options.clear();
         }
@@ -3424,14 +3510,7 @@ impl Engine {
         }
         crate::cost::total_cost(&trial, cards, a.object, a.controller)
             .and_then(|c| {
-                crate::mana::plan_spell(
-                    &trial,
-                    cards,
-                    a.controller,
-                    &c,
-                    a.x.unwrap_or(0),
-                    a.object,
-                )
+                crate::mana::plan_spell(&trial, cards, a.controller, &c, a.x.unwrap_or(0), a.object)
             })
             .is_some()
     }
@@ -3762,7 +3841,10 @@ impl Engine {
             // creatures"): by default, no more targets.
             let continues_run = spec.up_to && a.slot > 0 && a.specs[a.slot - 1] == spec;
             // Strive: a further target the cost can't pay for is not offered.
-            if continues_run && a.pay_cost && !Self::strive_affordable(&self.state, cards, &a, &legal[..1]) {
+            if continues_run
+                && a.pay_cost
+                && !Self::strive_affordable(&self.state, cards, &a, &legal[..1])
+            {
                 a.skip_slot();
                 continue;
             }
@@ -3777,7 +3859,11 @@ impl Engine {
                 legal
                     .iter()
                     .copied()
-                    .take(if continues_run { 0 } else { need.max(1) as usize })
+                    .take(if continues_run {
+                        0
+                    } else {
+                        need.max(1) as usize
+                    })
                     .collect(),
             ]);
             let choice = self.new_choice(
@@ -3838,8 +3924,16 @@ impl Engine {
                 "tap to pay the cost"
             } else if matches!(part, mtg_ir::AdditionalCost::Discard { .. }) {
                 "discard to pay the cost"
+            } else if matches!(part, mtg_ir::AdditionalCost::Reveal { .. }) {
+                "reveal from your hand to pay the cost"
             } else if matches!(part, mtg_ir::AdditionalCost::ExileFrom { .. }) {
                 "exile from your graveyard to pay the cost"
+            } else if matches!(
+                part,
+                mtg_ir::AdditionalCost::ReturnToHand { .. }
+                    | mtg_ir::AdditionalCost::ReturnUnblockedAttacker
+            ) {
+                "return to hand to pay the cost"
             } else {
                 "sacrifice to pay the cost"
             };
@@ -3885,6 +3979,8 @@ impl Engine {
                         mtg_ir::AdditionalCost::TapCreaturesWithPower { .. }
                             | mtg_ir::AdditionalCost::TapUntapped { .. }
                             | mtg_ir::AdditionalCost::ReturnUnblockedAttacker
+                            | mtg_ir::AdditionalCost::ReturnToHand { .. }
+                            | mtg_ir::AdditionalCost::Reveal { .. }
                             | mtg_ir::AdditionalCost::ExileFrom {
                                 zone: Zone::Hand,
                                 ..
@@ -3908,11 +4004,24 @@ impl Engine {
                 })
                 .flat_map(|(_, c)| c.iter().copied())
                 .collect(),
+            revealed: a
+                .cost_parts
+                .iter()
+                .zip(&a.cost_chosen)
+                .filter(|(p, _)| matches!(p, mtg_ir::AdditionalCost::Reveal { .. }))
+                .flat_map(|(_, c)| c.iter().copied())
+                .collect(),
             returned: a
                 .cost_parts
                 .iter()
                 .zip(&a.cost_chosen)
-                .filter(|(p, _)| matches!(p, mtg_ir::AdditionalCost::ReturnUnblockedAttacker))
+                .filter(|(p, _)| {
+                    matches!(
+                        p,
+                        mtg_ir::AdditionalCost::ReturnUnblockedAttacker
+                            | mtg_ir::AdditionalCost::ReturnToHand { .. }
+                    )
+                })
                 .flat_map(|(_, c)| c.iter().copied())
                 .collect(),
             tapped_for: a
@@ -4105,7 +4214,10 @@ impl Engine {
                 .bindings
                 .insert(
                     mtg_ir::selector::Binding::TAPPED,
-                    done.tapped_for.iter().map(|id| Target::Object(*id)).collect(),
+                    done.tapped_for
+                        .iter()
+                        .map(|id| Target::Object(*id))
+                        .collect(),
                 );
         }
 
@@ -4219,6 +4331,14 @@ impl Engine {
                     to: ZoneRef::of(Zone::Hand, owner),
                     index: None,
                 },
+                &mut self.log,
+            );
+        }
+        for id in &done.revealed {
+            apply::apply(
+                &mut self.state,
+                Cause::CostPayment(object),
+                Event::Revealed { object: *id },
                 &mut self.log,
             );
         }
@@ -4461,7 +4581,8 @@ impl Engine {
                         duration: mtg_ir::effect::Duration::ThroughNextUntapStep,
                     };
                     let mut rc = ResolveCtx::new(source, who);
-                    let _ = resolve::resolve(&mut self.state, cards, &mut self.log, &exert, &mut rc);
+                    let _ =
+                        resolve::resolve(&mut self.state, cards, &mut self.log, &exert, &mut rc);
                 }
                 A::RemoveCounters {
                     what: Selector::SelfSource,
@@ -5342,6 +5463,24 @@ impl Engine {
     /// CR 502.3: untap — first asking, if the active player controls tapped permanents they
     /// may choose not to untap, which of those stay tapped.
     fn begin_untap(&mut self, cards: &dyn PrintedCards) -> Option<Choice> {
+        // These effects expire as their controller's next turn begins, before
+        // untap restrictions and optional untapping are evaluated.
+        let expired = self
+            .state
+            .continuous
+            .iter()
+            .filter(|effect| {
+                effect.duration == mtg_ir::effect::Duration::UntilYourNextTurn
+                    && effect.controller == Some(self.state.active_player)
+            })
+            .map(|effect| Event::ContinuousEffectEnded { effect: effect.id })
+            .collect();
+        apply::apply_simultaneous(
+            &mut self.state,
+            Cause::TurnStructure,
+            expired,
+            &mut self.log,
+        );
         let who = self.state.active_player;
         let optional: Vec<ObjectId> = self
             .state
@@ -5513,8 +5652,7 @@ impl Engine {
             .map(|(a, _)| *a)
             .filter(|a| self.exert_effect(cards, *a).is_some())
             .collect();
-        self.suspended =
-            (!candidates.is_empty()).then_some(Suspended::Exerting { candidates });
+        self.suspended = (!candidates.is_empty()).then_some(Suspended::Exerting { candidates });
         true
     }
 
@@ -5996,6 +6134,7 @@ impl Engine {
                 self.state.owed_combat = false;
                 self.state.activated_this_turn.clear();
                 self.state.loyalty_activated_this_turn.clear();
+                self.state.done_once_this_turn.clear();
                 self.state.last_known.clear();
             }
 

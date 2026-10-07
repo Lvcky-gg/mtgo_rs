@@ -25,7 +25,10 @@ pub enum Value {
     /// How many opponents of the controller are being attacked this combat (melee).
     OpponentsAttacked,
     /// "half their life, rounded up" (CR 107.1a): half of a value, rounded up or down.
-    Half { value: Box<Value>, up: bool },
+    Half {
+        value: Box<Value>,
+        up: bool,
+    },
     /// How many permanents matching this died this turn ("for each creature that died
     /// this turn"), as each last existed.
     DiedThisTurn(Box<crate::ObjectFilter>),
@@ -60,6 +63,9 @@ pub enum Value {
     CardTypesAmong(Box<Selector>),
     /// CR 702.40a — how many spells were cast before the source spell this turn (storm).
     SpellsCastBefore,
+    /// "The result" of the die rolled by the enclosing `Effect::RollDie` (CR 706); replaced
+    /// by the number rolled before its effects resolve.
+    RollResult,
     /// CR 700.8 — the number of creatures in a party among these: up to one each of
     /// Cleric, Rogue, Warrior and Wizard.
     PartySize(Box<Selector>),

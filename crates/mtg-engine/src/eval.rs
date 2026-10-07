@@ -572,6 +572,8 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             }
             n
         }
+        // Replaced by the number rolled before anything reads it (`Effect::RollDie`).
+        Value::RollResult => 0,
         Value::SpellsCastBefore => ctx
             .state
             .objects
@@ -793,7 +795,8 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             .objects
             .get(&id)
             .is_some_and(|o| o.attached_to == Some(ctx.source)),
-        ObjectFilter::Named(name) => ctx.cards
+        ObjectFilter::Named(name) => ctx
+            .cards
             .face(obj.card, obj.face)
             .is_some_and(|face| face.name.to_lowercase().replace('−', "-") == *name),
         ObjectFilter::NamedLikeSource => {
@@ -814,6 +817,9 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
         }
 
         ObjectFilter::Attacking => ctx.state.combat.is_attacking(id),
+        ObjectFilter::AttackingAlone => {
+            ctx.state.combat.attackers.len() == 1 && ctx.state.combat.is_attacking(id)
+        }
         ObjectFilter::Blocking => ctx.state.combat.is_blocking(id),
         ObjectFilter::BlockingSource => ctx
             .state
@@ -850,6 +856,31 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
                 shares |= !mine
                     .intersect(ctx.characteristics(other)?.colors)
                     .is_colorless();
+            }
+            shares
+        }
+
+        ObjectFilter::SharesCreatureTypeWith(sel) => {
+            let is_type = |s: mtg_core::Subtype| {
+                ctx.cards
+                    .subtype_name(s)
+                    .is_some_and(mtg_core::is_creature_type)
+            };
+            let mine = ctx.characteristics(id)?;
+            let mut shares = false;
+            for other in objects(ctx, sel)? {
+                let theirs = ctx.characteristics(other)?;
+                // A changeling is every creature type: it shares one with anything that
+                // has a creature type, including another changeling.
+                let any = |c: &mtg_core::Characteristics| {
+                    c.every_creature_type || c.subtypes.iter().any(|s| is_type(*s))
+                };
+                shares |= (mine.every_creature_type && any(&theirs))
+                    || (theirs.every_creature_type && any(&mine))
+                    || mine
+                        .subtypes
+                        .iter()
+                        .any(|s| is_type(*s) && theirs.subtypes.contains(s));
             }
             shares
         }
@@ -1003,24 +1034,27 @@ pub fn protected_from(
         let mtg_ir::effect::Modification::Restriction(mtg_ir::effect::Restriction::Protection {
             from,
             chosen_color: false,
+            spares_source,
         }) = &e.modification
         else {
             return false;
         };
-        crate::layers::applies(state, cards, &e, protected) && {
-            let ctx = Ctx {
-                state,
-                cards,
-                chars: &chars,
-                source: protected,
-                controller: obj.controller,
-                targets: &[],
-                target_legal: &[],
-                x: 0,
-                bindings: crate::empty_bindings(),
-            };
-            matches(&ctx, from, source).unwrap_or(false)
-        }
+        !(*spares_source && e.source == source)
+            && crate::layers::applies(state, cards, &e, protected)
+            && {
+                let ctx = Ctx {
+                    state,
+                    cards,
+                    chars: &chars,
+                    source: protected,
+                    controller: obj.controller,
+                    targets: &[],
+                    target_legal: &[],
+                    x: 0,
+                    bindings: crate::empty_bindings(),
+                };
+                matches(&ctx, from, source).unwrap_or(false)
+            }
     });
     if granted {
         return true;

@@ -9,6 +9,7 @@
   "finish-args": [
     "--share=ipc",
     "--share=network",
+    "--talk-name=org.freedesktop.Flatpak",
     "--socket=wayland",
     "--socket=fallback-x11",
     "--socket=pulseaudio",
@@ -20,7 +21,8 @@
       "buildsystem": "simple",
       "build-options": {
         "append-path": "/usr/lib/sdk/rust-stable/bin",
-        "env": {"CARGO_NET_OFFLINE": "true"}
+        "env": {"CARGO_NET_OFFLINE": "true",
+          "MTGO_RS_RELEASE_PLATFORM": "linux-x64-flatpak"}
       },
       "build-commands": [
         "cargo build --offline --frozen --release -p mtg-app --bin mtg-gui",

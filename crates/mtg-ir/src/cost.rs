@@ -96,6 +96,11 @@ pub enum AdditionalCost {
     /// Ninjutsu (CR 702.49a): "return an unblocked attacking creature you control to its
     /// owner's hand". What it was attacking is remembered for the ability's effect.
     ReturnUnblockedAttacker,
+    /// Return chosen permanents you control to their owners' hands during payment.
+    ReturnToHand {
+        filter: ObjectFilter,
+        count: Value,
+    },
     /// "Exert this creature" (CR 701.43): it doesn't untap during its controller's next
     /// untap step.
     Exert,

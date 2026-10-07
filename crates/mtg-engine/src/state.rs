@@ -57,6 +57,9 @@ pub struct GameState {
     /// Cards with "if ~ would be put into a graveyard from anywhere, exile it instead",
     /// so the replacement can be applied where events are, which has no card data.
     pub exiled_instead_of_graveyard: BTreeSet<CardId>,
+    /// Cards with "if ~ would be put into a graveyard from anywhere, reveal ~ and shuffle it
+    /// into its owner's library instead" (the Eldrazi titans' kin).
+    pub shuffled_instead_of_graveyard: BTreeSet<CardId>,
     /// CR 726 — day (`Some(true)`), night, or neither yet.
     pub day: Option<bool>,
     /// Players who attacked with a creature this turn (raid).
@@ -146,6 +149,8 @@ pub struct GameState {
     /// CR 606.3: once per permanent per turn, shared by all its loyalty abilities
     /// and all players who control it during that turn.
     pub loyalty_activated_this_turn: std::collections::BTreeSet<ObjectId>,
+    /// Sources that did their "do this only once each turn" thing this turn.
+    pub done_once_this_turn: std::collections::BTreeSet<ObjectId>,
 
     /// How far through the log trigger detection has scanned.
     ///
@@ -662,6 +667,7 @@ impl GameState {
             owed_combat: false,
             day: None,
             exiled_instead_of_graveyard: BTreeSet::new(),
+            shuffled_instead_of_graveyard: BTreeSet::new(),
             linked_exile: Vec::new(),
             damage_shields: Vec::new(),
             next_shield: 0,
@@ -671,6 +677,7 @@ impl GameState {
             triggered_this_turn: BTreeMap::new(),
             activated_this_turn: BTreeMap::new(),
             loyalty_activated_this_turn: Default::default(),
+            done_once_this_turn: Default::default(),
             delayed: Vec::new(),
             next_delayed: 0,
             commander: CommanderState::default(),

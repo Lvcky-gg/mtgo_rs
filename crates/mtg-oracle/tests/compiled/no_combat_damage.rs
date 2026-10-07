@@ -9,7 +9,12 @@ const TEXT: &str = "Whenever this creature becomes blocked, you may have it deal
                     to its power to target creature. If you do, this creature assigns no combat \
                     damage this turn.";
 
-fn setup() -> (Game, mtg_core::ObjectId, mtg_core::ObjectId, mtg_core::ObjectId) {
+fn setup() -> (
+    Game,
+    mtg_core::ObjectId,
+    mtg_core::ObjectId,
+    mtg_core::ObjectId,
+) {
     let mut table = Table::default();
     let rider = table.card("{2}{R}", "Creature — Bear", Some((3, 3)), TEXT);
     let wall = table.card("{1}{W}", "Creature — Wall", Some((0, 4)), "");
@@ -31,10 +36,12 @@ fn dealing_the_trigger_damage_replaces_the_combat_damage() {
         &[Target::Object(bear)],
         &[Answer::Bool(true)],
     );
-    assert!(!game.engine.state.objects.contains_key(&bear), "3 damage to the bear");
+    assert!(
+        !game.engine.state.objects.contains_key(&bear),
+        "3 damage to the bear"
+    );
     assert_eq!(
-        game.engine.state.objects[&wall].damage,
-        0,
+        game.engine.state.objects[&wall].damage, 0,
         "the rider assigned no combat damage"
     );
 }
