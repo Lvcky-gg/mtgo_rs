@@ -1,0 +1,79 @@
+{
+  "format_version": 1,
+  "build": "unassessed-foundation",
+  "thresholds": {
+    "property_cases": 10000,
+    "differential_cases": 1000,
+    "fuzz_actions": 10000,
+    "min_production_mutants": 20,
+    "mutation_kill_rate": 0.95
+  },
+  "primitives": [
+    {
+      "primitive": "sba.zero_toughness",
+      "evidence": []
+    },
+    {
+      "primitive": "targeting",
+      "evidence": []
+    },
+    {
+      "primitive": "damage",
+      "evidence": []
+    },
+    {
+      "primitive": "casting",
+      "evidence": []
+    },
+    {
+      "primitive": "zone_transition",
+      "evidence": []
+    },
+    {
+      "primitive": "priority",
+      "evidence": []
+    },
+    {
+      "primitive": "hidden_information",
+      "evidence": []
+    },
+    {
+      "primitive": "commander.cast_from_command",
+      "evidence": []
+    },
+    {
+      "primitive": "commander.tax",
+      "evidence": []
+    },
+    {
+      "primitive": "commander.return_choice",
+      "evidence": []
+    }
+  ],
+  "cards": {
+    "fixture.damage_spell": [
+      "targeting",
+      "damage",
+      "casting",
+      "zone_transition",
+      "priority"
+    ],
+    "fixture.zero_toughness_creature": [
+      "sba.zero_toughness",
+      "zone_transition",
+      "priority"
+    ],
+    "fixture.commander": [
+      "commander.cast_from_command",
+      "commander.tax",
+      "casting",
+      "zone_transition",
+      "priority"
+    ],
+    "fixture.commander_return": [
+      "commander.return_choice",
+      "zone_transition",
+      "priority"
+    ]
+  }
+}

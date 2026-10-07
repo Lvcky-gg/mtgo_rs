@@ -5,6 +5,7 @@
 //! the first half; these hold the second, one scenario per shape the compiler emits.
 
 mod abilities_extended;
+mod activation_limits;
 mod adventure;
 mod announced_mana;
 mod announced_mana_view;
@@ -53,6 +54,7 @@ mod mana_followups;
 mod multiface;
 mod multikicker;
 mod named_search;
+mod new_triggers;
 mod no_combat_damage;
 mod once_each_turn;
 mod optional_target_prompts;
@@ -63,6 +65,7 @@ mod prevention;
 mod protection_qualities;
 mod reorder_library;
 mod reveal_hand;
+mod reveal_random;
 mod rift;
 mod search;
 mod search_alternatives;
@@ -77,6 +80,7 @@ mod triggers;
 mod two_quality_dig;
 mod untap_choices;
 mod untap_triggers;
+mod value_phrases;
 mod variable_scry;
 mod written_out;
 

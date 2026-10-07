@@ -1,0 +1,331 @@
+{
+  "format_version": 1,
+  "rules_version": "mtgo-supported-rules-v1",
+  "engine_version": "0.1.0",
+  "card_db_hash": "a587ab6269feea87ffb1bf85b64680f4120ae18267006ef3b9ec780eb4cf46a0",
+  "seed": 42,
+  "metadata": {
+    "issue": null,
+    "description": "Synthetic scripted casting: one free gain-three spell; independently expected life 20+3=23",
+    "rules": [
+      "601",
+      "608",
+      "119.3"
+    ],
+    "first_affected": null,
+    "fixed_in": null
+  },
+  "cards": [
+    {
+      "name": "Synthetic 2/2",
+      "mana_cost": {
+        "symbols": []
+      },
+      "card_types": [
+        "Creature"
+      ],
+      "subtypes": [],
+      "supertypes": [],
+      "power": 2,
+      "toughness": 2,
+      "loyalty": null,
+      "abilities": []
+    },
+    {
+      "name": "Synthetic gain three",
+      "mana_cost": {
+        "symbols": []
+      },
+      "card_types": [
+        "Instant"
+      ],
+      "subtypes": [],
+      "supertypes": [],
+      "power": null,
+      "toughness": null,
+      "loyalty": null,
+      "abilities": [
+        {
+          "id": 0,
+          "kind": {
+            "SpellEffect": {
+              "GainLife": {
+                "who": "You",
+                "amount": {
+                  "Fixed": 3
+                }
+              }
+            }
+          },
+          "targets": []
+        }
+      ]
+    }
+  ],
+  "subtypes": [],
+  "initial_state": {
+    "players": [
+      {
+        "id": 0,
+        "life": 20,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "id": 1,
+        "life": 20,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    ],
+    "active_player": 0,
+    "turn": 2,
+    "step": "PrecombatMain",
+    "objects": [
+      {
+        "card": 1,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Hand",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 0
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      },
+      {
+        "card": 0,
+        "owner": 1,
+        "controller": null,
+        "zone": {
+          "zone": "Library",
+          "player": 1
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      }
+    ],
+    "commanders": {}
+  },
+  "actions": [
+    {
+      "who": 0,
+      "answer": {
+        "Action": {
+          "Cast": {
+            "object": 1
+          }
+        }
+      }
+    },
+    {
+      "who": 0,
+      "answer": "Pass"
+    },
+    {
+      "who": 1,
+      "answer": "Pass"
+    }
+  ],
+  "expected": {}
+}

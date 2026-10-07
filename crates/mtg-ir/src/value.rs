@@ -66,6 +66,19 @@ pub enum Value {
     /// "The result" of the die rolled by the enclosing `Effect::RollDie` (CR 706); replaced
     /// by the number rolled before its effects resolve.
     RollResult,
+    /// CR 700.5 — the controller's devotion to these colors: the mana symbols among the
+    /// mana costs of permanents they control that are any of them.
+    Devotion(Vec<mtg_core::Color>),
+    /// How much life these players gained this turn (one total for several).
+    LifeGainedThisTurn(Box<Selector>),
+    /// CR 103.4 — the controller's starting life total.
+    StartingLife,
+    /// How many colors there are among the objects a selector picks out.
+    ColorsAmong(Box<Selector>),
+    /// How many different powers there are among these (coven).
+    DistinctPowers(Box<Selector>),
+    /// CR 702.179 — the controller's speed (0 until they have any).
+    Speed,
     /// CR 700.8 — the number of creatures in a party among these: up to one each of
     /// Cleric, Rogue, Warrior and Wizard.
     PartySize(Box<Selector>),

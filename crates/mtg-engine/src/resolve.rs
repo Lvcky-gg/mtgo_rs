@@ -1476,6 +1476,67 @@ fn resolve_inner(
             Ok(())
         }
 
+        Effect::ExileLinked { what } => {
+            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            let mut moved = Vec::new();
+            for id in ids {
+                if let Some(new_id) = move_to_at(state, log, id, Zone::Exile, None, cause) {
+                    state.exiled_with.push((rc.source, new_id));
+                    moved.push(Target::Object(new_id));
+                }
+            }
+            rc.bindings.insert(Binding::It, moved);
+            Ok(())
+        }
+        Effect::ReturnExiledWith { to, tapped } => {
+            // A leaves-the-battlefield trigger's source is the card where it went; the exile
+            // was remembered under the permanent it was. Follow the moves back.
+            let mut identities = vec![rc.source];
+            while let Some(earlier) = log.iter().rev().find_map(|e| match e.event {
+                Event::ZoneChange {
+                    object, new_object, ..
+                } if new_object == *identities.last()? => Some(object),
+                _ => None,
+            }) {
+                if identities.contains(&earlier) {
+                    break;
+                }
+                identities.push(earlier);
+            }
+            let mine: Vec<ObjectId> = state
+                .exiled_with
+                .iter()
+                .filter(|(source, _)| identities.contains(source))
+                .map(|(_, card)| *card)
+                .collect();
+            state
+                .exiled_with
+                .retain(|(source, _)| !identities.contains(source));
+            for card in mine {
+                // Only if it's still the exiled card (CR 400.7).
+                if !state
+                    .objects
+                    .get(&card)
+                    .is_some_and(|o| o.zone.zone == Zone::Exile)
+                {
+                    continue;
+                }
+                if let Some(new_id) = move_to_at(state, log, card, *to, None, cause)
+                    && *tapped
+                {
+                    apply::apply(
+                        state,
+                        cause,
+                        Event::TapChanged {
+                            object: new_id,
+                            tapped: true,
+                        },
+                        log,
+                    );
+                }
+            }
+            Ok(())
+        }
         Effect::ExileUntilSourceLeaves { what } => {
             // The source is the permanent, however the effect got here (CR 610.3c).
             let here = state
@@ -1750,6 +1811,36 @@ fn resolve_inner(
                     },
                     log,
                 );
+            }
+            Ok(())
+        }
+        Effect::SearchLibraryAndGraveyard { filter } => {
+            let me = rc.controller;
+            let mut candidates = Vec::new();
+            for zone in [Zone::Library, Zone::Graveyard] {
+                for id in state.objects_in(ZoneRef::of(zone, me)) {
+                    if with_ctx(state, cards, rc, |ctx| eval::matches(ctx, filter, id))? {
+                        candidates.push(id);
+                    }
+                }
+            }
+            let chosen = if candidates.is_empty() {
+                Vec::new()
+            } else {
+                ask_objects(rc, me, candidates, 0, 1, "search for")?
+            };
+            let from_graveyard = chosen.first().is_some_and(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.zone.zone == Zone::Graveyard)
+            });
+            for id in chosen {
+                apply::apply(state, cause, Event::Revealed { object: id }, log);
+                move_to(state, log, id, Zone::Hand, cause);
+            }
+            if !from_graveyard {
+                apply::apply(state, cause, Event::Shuffled { player: me }, log);
             }
             Ok(())
         }

@@ -181,6 +181,7 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
         } else if let Some(r) = rest
             .strip_prefix(" from a graveyard")
             .or_else(|| rest.strip_prefix(" in a graveyard"))
+            .or_else(|| rest.strip_prefix(" in all graveyards"))
             .filter(|_| zone == Zone::Graveyard)
         {
             rest = r;
@@ -460,6 +461,7 @@ fn card_zone<'s>(
         || rest.starts_with(" in your graveyard")
         || rest.starts_with(" from a graveyard")
         || rest.starts_with(" in a graveyard")
+        || rest.starts_with(" in all graveyards")
         || rest.starts_with(" from an opponent's graveyard")
         || rest.starts_with(" in an opponent's graveyard")
     {
@@ -910,7 +912,14 @@ fn mass<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, bool, &'s str)> {
     if n.zone != Zone::Battlefield {
         return None;
     }
-    let filter = if other {
+    let filter = if other && cx.made_tokens {
+        // "Create X Soldiers. … destroy all other creatures": other than those, too.
+        ObjectFilter::And(vec![
+            n.filter,
+            not(ObjectFilter::IsSelf),
+            not(ObjectFilter::InBinding(mtg_ir::selector::Binding::It)),
+        ])
+    } else if other {
         ObjectFilter::And(vec![n.filter, not(ObjectFilter::IsSelf)])
     } else {
         n.filter
@@ -1071,6 +1080,60 @@ pub fn recipient<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, &'s str)> {
             });
             cx.it = Some(sel.clone());
             return Some((sel, r));
+        }
+    }
+    // "each creature and each planeswalker [your opponents control]", "each creature,
+    // planeswalker, and battle".
+    for (prefix, types) in [
+        (
+            "each creature and each planeswalker",
+            &[CardType::Creature, CardType::Planeswalker][..],
+        ),
+        (
+            "each creature and planeswalker",
+            &[CardType::Creature, CardType::Planeswalker][..],
+        ),
+        (
+            "each creature, planeswalker, and battle",
+            &[CardType::Creature, CardType::Planeswalker, CardType::Battle][..],
+        ),
+    ] {
+        if let Some(r) = s.strip_prefix(prefix) {
+            let kinds = ObjectFilter::Or(types.iter().map(|t| ObjectFilter::HasType(*t)).collect());
+            let (filter, r) = if let Some(r) = r.strip_prefix(" your opponents control") {
+                (
+                    ObjectFilter::And(vec![
+                        kinds,
+                        ObjectFilter::ControlledBy(Box::new(Selector::Opponents)),
+                    ]),
+                    r,
+                )
+            } else if let Some(r) = r.strip_prefix(" you don't control") {
+                (
+                    ObjectFilter::And(vec![
+                        kinds,
+                        not(ObjectFilter::ControlledBy(Box::new(Selector::You))),
+                    ]),
+                    r,
+                )
+            } else if let Some(r) = r.strip_prefix(" you control") {
+                (
+                    ObjectFilter::And(vec![
+                        kinds,
+                        ObjectFilter::ControlledBy(Box::new(Selector::You)),
+                    ]),
+                    r,
+                )
+            } else {
+                (kinds, r)
+            };
+            return Some((
+                Selector::All {
+                    zone: Zone::Battlefield,
+                    filter,
+                },
+                r,
+            ));
         }
     }
     if let Some(r) = s.strip_prefix("each creature and each player") {

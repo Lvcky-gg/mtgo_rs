@@ -88,7 +88,14 @@ pub enum Progress {
 /// multi-step sub-flow (ordering blockers for three separate attackers) is one
 /// state, not three.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 enum Suspended {
+    /// Owner choices are collected before any part of this SBA batch is applied.
+    CommanderReturns {
+        object: ObjectId,
+        remaining: VecDeque<ObjectId>,
+        actions: Vec<Sba>,
+    },
     /// CR 502.3 — the active player chooses which "may choose not to untap" permanents
     /// stay tapped.
     Untapping,
@@ -125,6 +132,7 @@ enum Suspended {
 /// should not happen, because `legal_actions` only offers a spell whose targets can be
 /// chosen, but rewinding is the correct failure rather than leaving a half-announced
 /// spell on the stack.
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 struct Announcing {
     /// The stack object being announced.
     object: ObjectId,
@@ -141,6 +149,10 @@ struct Announcing {
     /// Whether this is an ability rather than a spell, which changes what happens on
     /// completion (no cost is paid for a triggered ability).
     pay_cost: bool,
+    #[cfg_attr(
+        feature = "verification",
+        serde(serialize_with = "serialize_diagnostic_state")
+    )]
     snapshot: Box<GameState>,
     log_len: usize,
     /// CR 601.2b — a modal spell's modes are chosen first: the labels and how many.
@@ -247,11 +259,16 @@ fn obj_card(state: &GameState, id: ObjectId) -> mtg_core::CardId {
 /// answers, so the Nth choice on a re-run is necessarily the same Nth choice. It costs
 /// one replay per choice and effects have only a handful. It also makes resolution
 /// restartable in general, which is exactly what taking a choice back requires.
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 struct Resolving {
     /// The stack object being resolved. If the top of the stack is not this, the
     /// in-flight resolution is stale and is discarded.
     object: ObjectId,
     /// State as it was before the resolution began.
+    #[cfg_attr(
+        feature = "verification",
+        serde(serialize_with = "serialize_diagnostic_state")
+    )]
     snapshot: Box<GameState>,
     /// Log length before the resolution began, for truncation on rollback.
     log_len: usize,
@@ -260,6 +277,7 @@ struct Resolving {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 enum Phase {
     BeginStep,
     /// A spell or ability is being announced and needs its targets.
@@ -324,8 +342,13 @@ pub struct Engine {
 /// Only taken at priority with nothing in flight — no announcement, resolution,
 /// suspended turn-based action or trigger queue — so these fields are the whole of
 /// the engine's state at that moment and restoring them is a complete rewind.
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 struct Checkpoint {
     who: PlayerId,
+    #[cfg_attr(
+        feature = "verification",
+        serde(serialize_with = "serialize_diagnostic_state")
+    )]
     state: GameState,
     log_len: usize,
     phase: Phase,
@@ -789,6 +812,23 @@ impl Engine {
         }
 
         match (&choice.kind, answer) {
+            (ChoiceKind::Confirm, Answer::Bool(accept))
+                if matches!(self.suspended, Some(Suspended::CommanderReturns { .. })) =>
+            {
+                let Some(Suspended::CommanderReturns {
+                    object,
+                    remaining,
+                    mut actions,
+                }) = self.suspended.take()
+                else {
+                    unreachable!()
+                };
+                if accept {
+                    actions.push(Sba::ReturnCommander { object });
+                }
+                self.choose_commander_returns(cards, remaining, actions);
+                Ok(())
+            }
             (ChoiceKind::Priority { legal }, Answer::Pass) => {
                 let _ = legal;
                 self.record_pass(choice.who);
@@ -1207,6 +1247,12 @@ impl Engine {
     }
 
     fn settle(&mut self, cards: &dyn PrintedCards) -> Progress {
+        let objects = &self.state.objects;
+        self.state.commander.return_considered.retain(|id| {
+            objects
+                .get(id)
+                .is_some_and(|o| matches!(o.zone.zone, Zone::Graveyard | Zone::Exile))
+        });
         resolve::refresh_city_blessings(
             &mut self.state,
             cards,
@@ -1253,6 +1299,41 @@ impl Engine {
             !matches!(a, sba::Sba::PutIntoGraveyard { object, rule: "704.5s" } if queued.contains(object))
         });
         if !check.actions.is_empty() {
+            let mut returns: Vec<_> = check
+                .actions
+                .iter()
+                .filter_map(|a| match a {
+                    Sba::ReturnCommander { object } => Some(*object),
+                    _ => None,
+                })
+                .collect();
+            if !returns.is_empty() {
+                let active = self
+                    .state
+                    .turn_order
+                    .iter()
+                    .position(|p| *p == self.state.active_player)
+                    .unwrap_or(0);
+                returns.sort_by_key(|id| {
+                    let owner = self.state.objects[id].owner;
+                    let seat = self
+                        .state
+                        .turn_order
+                        .iter()
+                        .position(|p| *p == owner)
+                        .unwrap_or(0);
+                    (seat + self.state.turn_order.len() - active) % self.state.turn_order.len()
+                });
+                check
+                    .actions
+                    .retain(|a| !matches!(a, Sba::ReturnCommander { .. }));
+                if let Some(choice) =
+                    self.choose_commander_returns(cards, returns.into(), check.actions)
+                {
+                    return Progress::NeedsChoice(choice);
+                }
+                return Progress::Continue;
+            }
             if self.state.step == Step::Cleanup {
                 self.cleanup_priority = true;
             }
@@ -1611,6 +1692,42 @@ impl Engine {
         }
     }
 
+    fn choose_commander_returns(
+        &mut self,
+        cards: &dyn PrintedCards,
+        mut remaining: VecDeque<ObjectId>,
+        actions: Vec<Sba>,
+    ) -> Option<Choice> {
+        if let Some(object) = remaining.pop_front() {
+            let commander = &self.state.objects[&object];
+            let owner = commander.owner;
+            let name = cards
+                .face(commander.card, commander.face)
+                .map_or("your commander", |face| face.name.as_ref());
+            let question = format!("return {name} to the command zone");
+            self.state.commander.return_considered.insert(object);
+            self.suspended = Some(Suspended::CommanderReturns {
+                object,
+                remaining,
+                actions,
+            });
+            return Some(self.new_choice(
+                owner,
+                ChoiceKind::Confirm,
+                question.into(),
+                Some(Answer::Bool(true)),
+            ));
+        }
+        if !actions.is_empty() {
+            if self.state.step == Step::Cleanup {
+                self.cleanup_priority = true;
+            }
+            self.perform_sbas(cards, actions);
+            self.cache.invalidate();
+        }
+        None
+    }
+
     fn perform_sbas(&mut self, cards: &dyn PrintedCards, actions: Vec<Sba>) {
         let mut events = Vec::new();
         for a in actions {
@@ -1657,13 +1774,13 @@ impl Engine {
                 }
                 Sba::ReturnCommander { object } => {
                     if let Some(o) = self.state.objects.get(&object) {
-                        let (from, owner) = (o.zone, o.owner);
+                        let from = o.zone;
                         let new_object = self.state.new_object_id();
                         events.push(Event::ZoneChange {
                             object,
                             new_object,
                             from,
-                            to: ZoneRef::of(Zone::Command, owner),
+                            to: ZoneRef::shared(Zone::Command),
                             index: None,
                         });
                     }
@@ -1900,6 +2017,7 @@ impl Engine {
         } else {
             who
         };
+        self.state.priority = Some(who);
 
         let legal = self.legal_actions(cards, who);
         let c = self.new_choice(
@@ -2400,13 +2518,12 @@ impl Engine {
             .into_iter()
             .chain(
                 self.state
-                    .objects_in(ZoneRef::of(Zone::Command, who))
+                    .objects_in(ZoneRef::shared(Zone::Command))
                     .into_iter()
                     .filter(|id| {
-                        self.state
-                            .objects
-                            .get(id)
-                            .is_some_and(|o| self.state.commander.is_commander(o.owner, o.card))
+                        self.state.objects.get(id).is_some_and(|o| {
+                            o.owner == who && self.state.commander.is_commander(o.owner, o.card)
+                        })
                     }),
             )
             .collect::<Vec<_>>();
@@ -2976,6 +3093,11 @@ impl Engine {
                         .get(&(id, ability.id))
                         .is_some_and(|done| *done >= n)
                 }) {
+                    continue;
+                }
+                if *timing == mtg_ir::ability::ActivationTiming::Exhaust
+                    && self.state.activated_ever.contains(&(id, ability.id))
+                {
                     continue;
                 }
 
@@ -4572,6 +4694,46 @@ impl Engine {
                         &mut self.log,
                     );
                 }
+                A::Mill {
+                    count: mtg_ir::Value::Fixed(n),
+                } => {
+                    let top: Vec<ObjectId> = self
+                        .state
+                        .objects_in(ZoneRef::of(Zone::Library, who))
+                        .into_iter()
+                        .take((*n).max(0) as usize)
+                        .collect();
+                    for id in top {
+                        let new_object = self.state.new_object_id();
+                        apply::apply(
+                            &mut self.state,
+                            cause,
+                            Event::ZoneChange {
+                                object: id,
+                                new_object,
+                                from: ZoneRef::of(Zone::Library, who),
+                                to: ZoneRef::of(Zone::Graveyard, who),
+                                index: None,
+                            },
+                            &mut self.log,
+                        );
+                    }
+                }
+                A::PutCounters {
+                    kind,
+                    amount: mtg_ir::Value::Fixed(n),
+                } => {
+                    apply::apply(
+                        &mut self.state,
+                        cause,
+                        Event::CountersChanged {
+                            object: source,
+                            kind: *kind,
+                            delta: *n,
+                        },
+                        &mut self.log,
+                    );
+                }
                 A::Exert => {
                     let exert = mtg_ir::Effect::Continuous {
                         what: Selector::SelfSource,
@@ -4641,22 +4803,20 @@ impl Engine {
             }
         }
 
-        // "Exile this card from your graveyard".
-        if cost.additional.iter().any(|c| {
-            matches!(
-                c,
-                A::ExileFrom {
-                    zone: Zone::Graveyard,
-                    filter: mtg_ir::ObjectFilter::IsSelf,
-                    ..
-                }
-            )
+        // "Exile this card from your graveyard", "exile this artifact".
+        if let Some(zone) = cost.additional.iter().find_map(|c| match c {
+            A::ExileFrom {
+                zone: zone @ (Zone::Graveyard | Zone::Battlefield),
+                filter: mtg_ir::ObjectFilter::IsSelf,
+                ..
+            } => Some(*zone),
+            _ => None,
         }) && let Some(from) = self
             .state
             .objects
             .get(&source)
             .map(|o| o.zone)
-            .filter(|z| z.zone == Zone::Graveyard)
+            .filter(|z| z.zone == zone)
         {
             let new_object = self.state.new_object_id();
             apply::apply(
@@ -5389,6 +5549,7 @@ impl Engine {
             // These two are waiting purely on the player; nothing to advance until
             // the answer arrives, and `advance` re-emits the outstanding choice.
             Suspended::Attackers
+            | Suspended::CommanderReturns { .. }
             | Suspended::Blockers
             | Suspended::Discarding
             | Suspended::Untapping => None,
@@ -6127,6 +6288,7 @@ impl Engine {
                 self.state.damaged_this_turn.clear();
                 self.state.lost_life_this_turn.clear();
                 self.state.gained_life_this_turn.clear();
+                self.state.life_gained_amount.clear();
                 self.state.damaged_by_this_turn.clear();
                 self.state.attacked_this_turn.clear();
                 self.state.attacked_creatures.clear();
@@ -6488,6 +6650,9 @@ impl Engine {
                 loop {
                     next = match self.state.extra_turns.pop() {
                         Some(p) => {
+                            if self.state.player(p).has_lost {
+                                continue;
+                            }
                             self.state.rotation_from.get_or_insert(current);
                             p
                         }
@@ -7039,5 +7204,76 @@ fn choice_candidates(kind: &ChoiceKind) -> &[ObjectId] {
     match kind {
         ChoiceKind::ChooseObjects { from, .. } => from,
         _ => &[],
+    }
+}
+
+#[cfg(feature = "verification")]
+fn serialize_diagnostic_state<S: serde::Serializer>(
+    state: &GameState,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&crate::state::DiagnosticState(state), serializer)
+}
+
+#[cfg(feature = "verification")]
+impl Engine {
+    /// Full-information, offline diagnostic only; never a network message.
+    pub fn verification_snapshot(&self) -> Result<serde_json::Value, String> {
+        use serde::ser::SerializeStruct;
+        struct Snapshot<'a>(&'a Engine);
+        impl serde::Serialize for Snapshot<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let e = self.0;
+                let mut out = serializer.serialize_struct("EngineDiagnostic", 20)?;
+                out.serialize_field("state", &crate::state::DiagnosticState(&e.state))?;
+                out.serialize_field("event_history", &e.log)?;
+                out.serialize_field("undo", &e.undo)?;
+                out.serialize_field(
+                    "resolution_view",
+                    &e.resolution_view.as_ref().map(|(_, view)| view),
+                )?;
+                out.serialize_field(
+                    "resolution_view_matches_pending",
+                    &e.resolution_view
+                        .as_ref()
+                        .is_some_and(|(id, _)| e.pending.as_ref().is_some_and(|p| p.id == *id)),
+                )?;
+                let routing = [
+                    e.announcement_choice,
+                    e.resolution_choice,
+                    e.draw_choice,
+                    e.pregame_choice,
+                ];
+                let routes: Vec<_> = routing
+                    .iter()
+                    .map(|id| {
+                        (
+                            id.is_some(),
+                            id.is_some_and(|id| e.pending.as_ref().is_some_and(|p| p.id == id)),
+                        )
+                    })
+                    .collect();
+                out.serialize_field("choice_routes", &routes)?;
+                out.serialize_field(
+                    "entering_choice_object",
+                    &e.entering_choice.map(|(_, object)| object),
+                )?;
+
+                out.serialize_field("phase", &e.phase)?;
+                out.serialize_field("pending", &e.pending)?;
+                out.serialize_field("to_order", &e.to_order)?;
+                out.serialize_field("to_place", &e.to_place)?;
+                out.serialize_field("tba_done", &e.tba_done)?;
+                out.serialize_field("cleanup_priority", &e.cleanup_priority)?;
+                out.serialize_field("suspended", &e.suspended)?;
+                out.serialize_field("announcing", &e.announcing)?;
+                out.serialize_field("resolving", &e.resolving)?;
+                out.serialize_field("keep_tapped", &e.keep_tapped)?;
+                out.serialize_field("redirects_noted", &e.redirects_noted)?;
+                out.end()
+            }
+        }
+        serde::Serialize::serialize(&Snapshot(self), crate::verification::DiagnosticSerializer)
+            .map_err(|e| e.to_string())
     }
 }

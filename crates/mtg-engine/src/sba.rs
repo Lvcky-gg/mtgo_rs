@@ -27,6 +27,7 @@ use crate::{
 
 /// One state-based action that currently applies.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub enum Sba {
     PlayerLoses {
         player: PlayerId,
@@ -50,11 +51,8 @@ pub enum Sba {
     CeaseToExist { object: ObjectId },
     /// Remove matching +1/+1 and -1/-1 counters as a state-based action.
     CancelCounters { object: ObjectId, amount: i32 },
-    /// CR 903.9a — a commander in a graveyard or exile goes to the command zone.
-    ///
-    /// The rule lets the owner choose; it is taken without asking, because keeping a
-    /// commander in the graveyard is almost never wanted and a prompt after every death
-    /// would be exactly the interruption the client is built to avoid.
+    /// CR 903.9a — the owner may return a newly arrived graveyard/exile commander.
+    /// The engine gathers choices before applying the simultaneous SBA batch.
     ReturnCommander { object: ObjectId },
 }
 
@@ -127,6 +125,8 @@ pub fn check(state: &GameState, cards: &dyn PrintedCards) -> Check {
             let where_ = obj.zone.zone;
             if matches!(where_, Zone::Graveyard | Zone::Exile)
                 && state.commander.is_commander(obj.owner, obj.card)
+                && !state.commander.return_considered.contains(id)
+                && !state.player(obj.owner).has_lost
             {
                 out.actions.push(Sba::ReturnCommander { object: *id });
             }

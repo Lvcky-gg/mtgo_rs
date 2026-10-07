@@ -101,6 +101,15 @@ pub enum AdditionalCost {
         filter: ObjectFilter,
         count: Value,
     },
+    /// "Mill a card", "mill two cards" (CR 701.13b: only with that many in the library).
+    Mill {
+        count: Value,
+    },
+    /// "Put a -1/-1 counter on this creature": counters on the source.
+    PutCounters {
+        kind: CounterKind,
+        amount: Value,
+    },
     /// "Exert this creature" (CR 701.43): it doesn't untap during its controller's next
     /// untap step.
     Exert,

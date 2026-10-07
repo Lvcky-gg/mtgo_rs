@@ -9,5 +9,11 @@ mtg-core = { workspace = true }
 mtg-ir = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 
+serde_json = { version = "1", optional = true }
+
 [lints]
 workspace = true
+
+[features]
+# Host-only diagnostic serialization; GameState deliberately remains non-Serialize.
+verification = ["dep:serde_json"]

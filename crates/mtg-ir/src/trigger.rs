@@ -202,6 +202,13 @@ pub enum EventPattern {
     },
     /// A reflexive trigger's own moment (see `Effect::Reflexive`).
     Reflexive,
+    /// "Whenever a creature attacks you [or a planeswalker you control]": an attacker
+    /// matching `who` attacking one of `player`, or a planeswalker they control.
+    AttacksPlayer {
+        who: ObjectFilter,
+        player: Selector,
+        or_planeswalkers: bool,
+    },
     /// Dethrone (CR 702.105a): attacks the player with the most life or tied for most.
     AttacksMostLife {
         who: ObjectFilter,

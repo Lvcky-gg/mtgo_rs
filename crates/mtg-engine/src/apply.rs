@@ -340,6 +340,7 @@ fn perform(state: &mut GameState, event: &Event) {
             }
             if *delta > 0 {
                 state.gained_life_this_turn.insert(*player);
+                *state.life_gained_amount.entry(*player).or_insert(0) += *delta;
             }
         }
 
@@ -388,6 +389,12 @@ fn perform(state: &mut GameState, event: &Event) {
         Event::TapChanged { object, tapped } => {
             if let Some(o) = state.objects.get_mut(object) {
                 o.tapped = *tapped;
+            }
+            // "For as long as ~ remains tapped" ends as it untaps.
+            if !*tapped {
+                state.continuous.retain(|e| {
+                    e.source != *object || e.duration != mtg_ir::effect::Duration::WhileSourceTapped
+                });
             }
         }
         Event::EnteredTapped { object } => {
@@ -508,6 +515,7 @@ fn perform(state: &mut GameState, event: &Event) {
                 .activated_this_turn
                 .entry((*source, *ability))
                 .or_insert(0) += 1;
+            state.activated_ever.insert((*source, *ability));
             if *loyalty {
                 state.loyalty_activated_this_turn.insert(*source);
             }
@@ -740,7 +748,7 @@ fn perform(state: &mut GameState, event: &Event) {
             card,
         } => {
             state.monarch = Some(*player);
-            let to = ZoneRef::of(Zone::Command, *player);
+            let to = ZoneRef::shared(Zone::Command);
             match state.objects.get_mut(emblem) {
                 // The designation moves: its object goes with it.
                 Some(o) => {
@@ -978,6 +986,7 @@ fn zone_change(
                     e.duration,
                     mtg_ir::effect::Duration::WhileSourcePresent
                         | mtg_ir::effect::Duration::UntilSourceLeaves
+                        | mtg_ir::effect::Duration::WhileSourceTapped
                 )
         });
     }

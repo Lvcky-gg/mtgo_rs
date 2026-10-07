@@ -1,0 +1,1815 @@
+{
+  "format_version": 1,
+  "rules_version": "mtgo-supported-rules-v1",
+  "engine_version": "0.1.0",
+  "card_db_hash": "dda4bc2b9937ee9a4003f3ed2948202eb873443df0c7e9882a2045c7be9fd91d",
+  "seed": 42,
+  "metadata": {
+    "issue": "local_shared_command_zone_casting",
+    "description": "Confirmed engine representation bug: shared Command objects were uncastable because legal-action lookup used player-private Command instances. Independent golden tests failed before the engine normalized casting and return destinations to shared Command.",
+    "rules": [
+      "400.1",
+      "903.8"
+    ],
+    "first_affected": null,
+    "fixed_in": "working-tree shared command-zone consistency fix"
+  },
+  "cards": [
+    {
+      "name": "Synthetic 2/2",
+      "mana_cost": {
+        "symbols": []
+      },
+      "card_types": [
+        "Creature"
+      ],
+      "subtypes": [],
+      "supertypes": [],
+      "power": 2,
+      "toughness": 2,
+      "loyalty": null,
+      "abilities": []
+    },
+    {
+      "name": "Synthetic legendary commander",
+      "mana_cost": {
+        "symbols": []
+      },
+      "card_types": [
+        "Creature"
+      ],
+      "subtypes": [],
+      "supertypes": [
+        "Legendary"
+      ],
+      "power": 2,
+      "toughness": 2,
+      "loyalty": null,
+      "abilities": []
+    }
+  ],
+  "subtypes": [],
+  "initial_state": {
+    "players": [
+      {
+        "id": 0,
+        "life": 40,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "id": 1,
+        "life": 40,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "id": 2,
+        "life": 40,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "id": 3,
+        "life": 40,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    ],
+    "active_player": 0,
+    "turn": 2,
+    "step": "PrecombatMain",
+    "objects": [
+      {
+        "card": 1,
+        "owner": 0,
+        "controller": null,
+        "zone": {
+          "zone": "Command",
+          "player": null
+        },
+        "tapped": false,
+        "damage": 0,
+        "counters": {}
+      }
+    ],
+    "commanders": {
+      "0": 1
+    }
+  },
+  "actions": [
+    {
+      "who": 0,
+      "answer": {
+        "Action": {
+          "Cast": {
+            "object": 1
+          }
+        }
+      },
+      "expected_choice": {
+        "Priority": {
+          "legal": {
+            "who": 0,
+            "actions": [
+              "Pass",
+              "Concede",
+              {
+                "Cast": {
+                  "object": 1
+                }
+              }
+            ],
+            "mana_abilities": [],
+            "targets": []
+          }
+        }
+      },
+      "expected_state": {
+        "format_version": 1,
+        "state": {
+          "announcing": null,
+          "choice_routes": [
+            [
+              false,
+              false
+            ],
+            [
+              false,
+              false
+            ],
+            [
+              false,
+              false
+            ],
+            [
+              false,
+              false
+            ]
+          ],
+          "cleanup_priority": false,
+          "entering_choice_object": null,
+          "event_history": [
+            {
+              "at": {
+                "$Timestamp": 2
+              },
+              "cause": "TurnStructure",
+              "event": {
+                "StepBegan": {
+                  "active": 0,
+                  "step": "PrecombatMain",
+                  "turn": 2
+                }
+              }
+            },
+            {
+              "at": {
+                "$Timestamp": 3
+              },
+              "cause": {
+                "PlayerAction": 0
+              },
+              "event": {
+                "ZoneChange": {
+                  "from": {
+                    "player": null,
+                    "zone": "Command"
+                  },
+                  "index": 0,
+                  "new_object": {
+                    "$ObjectId": 2
+                  },
+                  "object": {
+                    "$ObjectId": 1
+                  },
+                  "to": {
+                    "player": null,
+                    "zone": "Stack"
+                  }
+                }
+              }
+            },
+            {
+              "at": {
+                "$Timestamp": 5
+              },
+              "cause": {
+                "PlayerAction": 0
+              },
+              "event": {
+                "FaceSelected": {
+                  "face": 0,
+                  "object": {
+                    "$ObjectId": 2
+                  }
+                }
+              }
+            },
+            {
+              "at": {
+                "$Timestamp": 6
+              },
+              "cause": {
+                "PlayerAction": 0
+              },
+              "event": {
+                "SpentToCast": {
+                  "mana": [],
+                  "object": {
+                    "$ObjectId": 2
+                  }
+                }
+              }
+            },
+            {
+              "at": {
+                "$Timestamp": 7
+              },
+              "cause": {
+                "PlayerAction": 0
+              },
+              "event": {
+                "SpellCast": {
+                  "controller": 0,
+                  "object": {
+                    "$ObjectId": 2
+                  }
+                }
+              }
+            }
+          ],
+          "keep_tapped": [],
+          "pending": {
+            "default": "Pass",
+            "kind": {
+              "Priority": {
+                "legal": {
+                  "actions": [
+                    "Pass",
+                    "Concede"
+                  ],
+                  "mana_abilities": [],
+                  "targets": [],
+                  "who": 0
+                }
+              }
+            },
+            "undo": true,
+            "who": 0
+          },
+          "phase": "Priority",
+          "redirects_noted": true,
+          "resolution_view": null,
+          "resolution_view_matches_pending": false,
+          "resolving": null,
+          "state": {
+            "activated_ever": [],
+            "activated_this_turn": {
+              "$map": []
+            },
+            "active_player": 0,
+            "allocation_cursor": {
+              "$ObjectId": 2
+            },
+            "attacked_creatures": [],
+            "attacked_this_turn": [],
+            "combat": {
+              "attackers": {
+                "$map": []
+              },
+              "blocks": {
+                "$map": []
+              },
+              "defending_player": null,
+              "first_strike_participants": null,
+              "was_blocked": []
+            },
+            "commander": {
+              "casts": {
+                "$map": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "commanders": {
+                "$map": [
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              "damage": {
+                "$map": []
+              },
+              "return_considered": [],
+              "tax_due": {
+                "$map": [
+                  [
+                    {
+                      "$ObjectId": 2
+                    },
+                    0
+                  ]
+                ]
+              }
+            },
+            "consecutive_passes": 0,
+            "continuous": [],
+            "damage_shields": [],
+            "damage_unpreventable": false,
+            "damaged_by_this_turn": [],
+            "damaged_this_turn": [],
+            "day": null,
+            "delayed": [],
+            "died_this_turn": [],
+            "done_once_this_turn": [],
+            "draws_this_turn": {
+              "$map": []
+            },
+            "exile_if_dies_now": [],
+            "exiled_instead_of_graveyard": [],
+            "exiled_with": [],
+            "extra_combats": 0,
+            "extra_turns": [],
+            "gained_life_this_turn": [],
+            "generation": {
+              "$Timestamp": 7
+            },
+            "last_known": {
+              "$map": []
+            },
+            "life_gain_boost": {
+              "$map": []
+            },
+            "life_gained_amount": {
+              "$map": []
+            },
+            "linked_exile": [],
+            "looked_at": [],
+            "lost_life_this_turn": [],
+            "loyalty_activated_this_turn": [],
+            "monarch": null,
+            "monarch_emblem": null,
+            "next_delayed": 0,
+            "next_shield": 0,
+            "no_life_gain": [],
+            "objects": {
+              "$map": [
+                [
+                  {
+                    "$ObjectId": 2
+                  },
+                  {
+                    "adventure_player": null,
+                    "attached_player": null,
+                    "attached_to": null,
+                    "card": 1,
+                    "cast_context": {
+                      "ability": null,
+                      "alt_cost": null,
+                      "bindings": {
+                        "$map": []
+                      },
+                      "cast_from": "Command",
+                      "cast_index": 0,
+                      "cost_choice": null,
+                      "cost_override": null,
+                      "effect": null,
+                      "emerge_reduction": 0,
+                      "empty_slots": [],
+                      "exile_on_leave": false,
+                      "flashed": false,
+                      "gains_haste": false,
+                      "granted": null,
+                      "kicked": false,
+                      "kicks": 0,
+                      "mana_choice": null,
+                      "mana_spent": [],
+                      "modes": [],
+                      "source": null,
+                      "targets": [],
+                      "x": 0
+                    },
+                    "cast_for": null,
+                    "cast_from": null,
+                    "cast_later": null,
+                    "cast_x": 0,
+                    "chosen_color": null,
+                    "chosen_subtype": null,
+                    "class_level": 0,
+                    "controller": 0,
+                    "controls_host": false,
+                    "counters": {
+                      "$map": []
+                    },
+                    "damage": 0,
+                    "dealt_deathtouch_damage": false,
+                    "entered_turn": null,
+                    "exile_if_dies": null,
+                    "exile_if_leaves": false,
+                    "face": 0,
+                    "face_down": false,
+                    "id": {
+                      "$ObjectId": 2
+                    },
+                    "is_spell_copy": false,
+                    "is_token": false,
+                    "kicked": false,
+                    "kicks": 0,
+                    "mana_spent": [],
+                    "may_play": null,
+                    "monstrous": false,
+                    "original": null,
+                    "owner": 0,
+                    "phased_out": false,
+                    "regeneration_shields": 0,
+                    "renowned": false,
+                    "summoning_sick": false,
+                    "tapped": false,
+                    "timestamp": {
+                      "$Timestamp": 4
+                    },
+                    "was_attached_to": null,
+                    "zone": {
+                      "player": null,
+                      "zone": "Stack"
+                    }
+                  }
+                ]
+              ]
+            },
+            "owed_combat": false,
+            "pending_triggers": {
+              "pending": []
+            },
+            "players": {
+              "$map": [
+                [
+                  0,
+                  {
+                    "attempted_draw_from_empty": false,
+                    "city_blessing": false,
+                    "energy": 0,
+                    "has_lost": false,
+                    "id": 0,
+                    "lands_played": 0,
+                    "life": 40,
+                    "mana": {
+                      "amounts": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                      ]
+                    },
+                    "passed": false,
+                    "poison": 0,
+                    "speed": null,
+                    "speed_raised_turn": 0,
+                    "starting_life": 40
+                  }
+                ],
+                [
+                  1,
+                  {
+                    "attempted_draw_from_empty": false,
+                    "city_blessing": false,
+                    "energy": 0,
+                    "has_lost": false,
+                    "id": 1,
+                    "lands_played": 0,
+                    "life": 40,
+                    "mana": {
+                      "amounts": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                      ]
+                    },
+                    "passed": false,
+                    "poison": 0,
+                    "speed": null,
+                    "speed_raised_turn": 0,
+                    "starting_life": 40
+                  }
+                ],
+                [
+                  2,
+                  {
+                    "attempted_draw_from_empty": false,
+                    "city_blessing": false,
+                    "energy": 0,
+                    "has_lost": false,
+                    "id": 2,
+                    "lands_played": 0,
+                    "life": 40,
+                    "mana": {
+                      "amounts": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                      ]
+                    },
+                    "passed": false,
+                    "poison": 0,
+                    "speed": null,
+                    "speed_raised_turn": 0,
+                    "starting_life": 40
+                  }
+                ],
+                [
+                  3,
+                  {
+                    "attempted_draw_from_empty": false,
+                    "city_blessing": false,
+                    "energy": 0,
+                    "has_lost": false,
+                    "id": 3,
+                    "lands_played": 0,
+                    "life": 40,
+                    "mana": {
+                      "amounts": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                      ]
+                    },
+                    "passed": false,
+                    "poison": 0,
+                    "speed": null,
+                    "speed_raised_turn": 0,
+                    "starting_life": 40
+                  }
+                ]
+              ]
+            },
+            "pregame": null,
+            "prevent_combat_damage": false,
+            "prevent_damage_to": [],
+            "priority": 0,
+            "revealed_cards": [],
+            "rng": 16296164475658289523,
+            "rotation_from": null,
+            "scanned_upto": 5,
+            "sees_top": [],
+            "shuffled_instead_of_graveyard": [],
+            "skipped_turns": [],
+            "spells_by_player": {
+              "$map": [
+                [
+                  0,
+                  1
+                ]
+              ]
+            },
+            "spells_by_player_last_turn": {
+              "$map": []
+            },
+            "spells_cast_this_turn": 1,
+            "step": "PrecombatMain",
+            "top_revealed": [],
+            "triggered_this_turn": {
+              "$map": []
+            },
+            "turn": 2,
+            "turn_order": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "upkeeps": {
+              "$map": []
+            },
+            "zone_order": {
+              "$map": [
+                [
+                  {
+                    "player": null,
+                    "zone": "Stack"
+                  },
+                  [
+                    {
+                      "$ObjectId": 2
+                    }
+                  ]
+                ]
+              ]
+            }
+          },
+          "suspended": null,
+          "tba_done": true,
+          "to_order": [],
+          "to_place": [],
+          "undo": [
+            {
+              "cleanup_priority": false,
+              "log_len": 1,
+              "phase": "Priority",
+              "question": {
+                "default": "Pass",
+                "kind": {
+                  "Priority": {
+                    "legal": {
+                      "actions": [
+                        "Pass",
+                        "Concede",
+                        {
+                          "Cast": {
+                            "object": {
+                              "$ObjectId": 1
+                            }
+                          }
+                        }
+                      ],
+                      "mana_abilities": [],
+                      "targets": [],
+                      "who": 0
+                    }
+                  }
+                },
+                "undo": false,
+                "who": 0
+              },
+              "state": {
+                "activated_ever": [],
+                "activated_this_turn": {
+                  "$map": []
+                },
+                "active_player": 0,
+                "allocation_cursor": {
+                  "$ObjectId": 1
+                },
+                "attacked_creatures": [],
+                "attacked_this_turn": [],
+                "combat": {
+                  "attackers": {
+                    "$map": []
+                  },
+                  "blocks": {
+                    "$map": []
+                  },
+                  "defending_player": null,
+                  "first_strike_participants": null,
+                  "was_blocked": []
+                },
+                "commander": {
+                  "casts": {
+                    "$map": []
+                  },
+                  "commanders": {
+                    "$map": [
+                      [
+                        0,
+                        1
+                      ]
+                    ]
+                  },
+                  "damage": {
+                    "$map": []
+                  },
+                  "return_considered": [],
+                  "tax_due": {
+                    "$map": []
+                  }
+                },
+                "consecutive_passes": 0,
+                "continuous": [],
+                "damage_shields": [],
+                "damage_unpreventable": false,
+                "damaged_by_this_turn": [],
+                "damaged_this_turn": [],
+                "day": null,
+                "delayed": [],
+                "died_this_turn": [],
+                "done_once_this_turn": [],
+                "draws_this_turn": {
+                  "$map": []
+                },
+                "exile_if_dies_now": [],
+                "exiled_instead_of_graveyard": [],
+                "exiled_with": [],
+                "extra_combats": 0,
+                "extra_turns": [],
+                "gained_life_this_turn": [],
+                "generation": {
+                  "$Timestamp": 2
+                },
+                "last_known": {
+                  "$map": []
+                },
+                "life_gain_boost": {
+                  "$map": []
+                },
+                "life_gained_amount": {
+                  "$map": []
+                },
+                "linked_exile": [],
+                "looked_at": [],
+                "lost_life_this_turn": [],
+                "loyalty_activated_this_turn": [],
+                "monarch": null,
+                "monarch_emblem": null,
+                "next_delayed": 0,
+                "next_shield": 0,
+                "no_life_gain": [],
+                "objects": {
+                  "$map": [
+                    [
+                      {
+                        "$ObjectId": 1
+                      },
+                      {
+                        "adventure_player": null,
+                        "attached_player": null,
+                        "attached_to": null,
+                        "card": 1,
+                        "cast_context": null,
+                        "cast_for": null,
+                        "cast_from": null,
+                        "cast_later": null,
+                        "cast_x": 0,
+                        "chosen_color": null,
+                        "chosen_subtype": null,
+                        "class_level": 0,
+                        "controller": 0,
+                        "controls_host": false,
+                        "counters": {
+                          "$map": []
+                        },
+                        "damage": 0,
+                        "dealt_deathtouch_damage": false,
+                        "entered_turn": null,
+                        "exile_if_dies": null,
+                        "exile_if_leaves": false,
+                        "face": 0,
+                        "face_down": false,
+                        "id": {
+                          "$ObjectId": 1
+                        },
+                        "is_spell_copy": false,
+                        "is_token": false,
+                        "kicked": false,
+                        "kicks": 0,
+                        "mana_spent": [],
+                        "may_play": null,
+                        "monstrous": false,
+                        "original": null,
+                        "owner": 0,
+                        "phased_out": false,
+                        "regeneration_shields": 0,
+                        "renowned": false,
+                        "summoning_sick": false,
+                        "tapped": false,
+                        "timestamp": {
+                          "$Timestamp": 1
+                        },
+                        "was_attached_to": null,
+                        "zone": {
+                          "player": null,
+                          "zone": "Command"
+                        }
+                      }
+                    ]
+                  ]
+                },
+                "owed_combat": false,
+                "pending_triggers": {
+                  "pending": []
+                },
+                "players": {
+                  "$map": [
+                    [
+                      0,
+                      {
+                        "attempted_draw_from_empty": false,
+                        "city_blessing": false,
+                        "energy": 0,
+                        "has_lost": false,
+                        "id": 0,
+                        "lands_played": 0,
+                        "life": 40,
+                        "mana": {
+                          "amounts": [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                          ]
+                        },
+                        "passed": false,
+                        "poison": 0,
+                        "speed": null,
+                        "speed_raised_turn": 0,
+                        "starting_life": 40
+                      }
+                    ],
+                    [
+                      1,
+                      {
+                        "attempted_draw_from_empty": false,
+                        "city_blessing": false,
+                        "energy": 0,
+                        "has_lost": false,
+                        "id": 1,
+                        "lands_played": 0,
+                        "life": 40,
+                        "mana": {
+                          "amounts": [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                          ]
+                        },
+                        "passed": false,
+                        "poison": 0,
+                        "speed": null,
+                        "speed_raised_turn": 0,
+                        "starting_life": 40
+                      }
+                    ],
+                    [
+                      2,
+                      {
+                        "attempted_draw_from_empty": false,
+                        "city_blessing": false,
+                        "energy": 0,
+                        "has_lost": false,
+                        "id": 2,
+                        "lands_played": 0,
+                        "life": 40,
+                        "mana": {
+                          "amounts": [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                          ]
+                        },
+                        "passed": false,
+                        "poison": 0,
+                        "speed": null,
+                        "speed_raised_turn": 0,
+                        "starting_life": 40
+                      }
+                    ],
+                    [
+                      3,
+                      {
+                        "attempted_draw_from_empty": false,
+                        "city_blessing": false,
+                        "energy": 0,
+                        "has_lost": false,
+                        "id": 3,
+                        "lands_played": 0,
+                        "life": 40,
+                        "mana": {
+                          "amounts": [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                          ]
+                        },
+                        "passed": false,
+                        "poison": 0,
+                        "speed": null,
+                        "speed_raised_turn": 0,
+                        "starting_life": 40
+                      }
+                    ]
+                  ]
+                },
+                "pregame": null,
+                "prevent_combat_damage": false,
+                "prevent_damage_to": [],
+                "priority": 0,
+                "revealed_cards": [],
+                "rng": 16296164475658289523,
+                "rotation_from": null,
+                "scanned_upto": 1,
+                "sees_top": [],
+                "shuffled_instead_of_graveyard": [],
+                "skipped_turns": [],
+                "spells_by_player": {
+                  "$map": []
+                },
+                "spells_by_player_last_turn": {
+                  "$map": []
+                },
+                "spells_cast_this_turn": 0,
+                "step": "PrecombatMain",
+                "top_revealed": [],
+                "triggered_this_turn": {
+                  "$map": []
+                },
+                "turn": 2,
+                "turn_order": [
+                  0,
+                  1,
+                  2,
+                  3
+                ],
+                "upkeeps": {
+                  "$map": []
+                },
+                "zone_order": {
+                  "$map": []
+                }
+              },
+              "tba_done": true,
+              "who": 0
+            }
+          ]
+        }
+      },
+      "expected_digest": "01e8ac40d48e748629fc45e898fb487a9760e009d80ce49a75ab2427ad3ecbd1"
+    }
+  ],
+  "expected": {
+    "life": {},
+    "final_digest": "01e8ac40d48e748629fc45e898fb487a9760e009d80ce49a75ab2427ad3ecbd1",
+    "final_state": {
+      "format_version": 1,
+      "state": {
+        "announcing": null,
+        "choice_routes": [
+          [
+            false,
+            false
+          ],
+          [
+            false,
+            false
+          ],
+          [
+            false,
+            false
+          ],
+          [
+            false,
+            false
+          ]
+        ],
+        "cleanup_priority": false,
+        "entering_choice_object": null,
+        "event_history": [
+          {
+            "at": {
+              "$Timestamp": 2
+            },
+            "cause": "TurnStructure",
+            "event": {
+              "StepBegan": {
+                "active": 0,
+                "step": "PrecombatMain",
+                "turn": 2
+              }
+            }
+          },
+          {
+            "at": {
+              "$Timestamp": 3
+            },
+            "cause": {
+              "PlayerAction": 0
+            },
+            "event": {
+              "ZoneChange": {
+                "from": {
+                  "player": null,
+                  "zone": "Command"
+                },
+                "index": 0,
+                "new_object": {
+                  "$ObjectId": 2
+                },
+                "object": {
+                  "$ObjectId": 1
+                },
+                "to": {
+                  "player": null,
+                  "zone": "Stack"
+                }
+              }
+            }
+          },
+          {
+            "at": {
+              "$Timestamp": 5
+            },
+            "cause": {
+              "PlayerAction": 0
+            },
+            "event": {
+              "FaceSelected": {
+                "face": 0,
+                "object": {
+                  "$ObjectId": 2
+                }
+              }
+            }
+          },
+          {
+            "at": {
+              "$Timestamp": 6
+            },
+            "cause": {
+              "PlayerAction": 0
+            },
+            "event": {
+              "SpentToCast": {
+                "mana": [],
+                "object": {
+                  "$ObjectId": 2
+                }
+              }
+            }
+          },
+          {
+            "at": {
+              "$Timestamp": 7
+            },
+            "cause": {
+              "PlayerAction": 0
+            },
+            "event": {
+              "SpellCast": {
+                "controller": 0,
+                "object": {
+                  "$ObjectId": 2
+                }
+              }
+            }
+          }
+        ],
+        "keep_tapped": [],
+        "pending": {
+          "default": "Pass",
+          "kind": {
+            "Priority": {
+              "legal": {
+                "actions": [
+                  "Pass",
+                  "Concede"
+                ],
+                "mana_abilities": [],
+                "targets": [],
+                "who": 0
+              }
+            }
+          },
+          "undo": true,
+          "who": 0
+        },
+        "phase": "Priority",
+        "redirects_noted": true,
+        "resolution_view": null,
+        "resolution_view_matches_pending": false,
+        "resolving": null,
+        "state": {
+          "activated_ever": [],
+          "activated_this_turn": {
+            "$map": []
+          },
+          "active_player": 0,
+          "allocation_cursor": {
+            "$ObjectId": 2
+          },
+          "attacked_creatures": [],
+          "attacked_this_turn": [],
+          "combat": {
+            "attackers": {
+              "$map": []
+            },
+            "blocks": {
+              "$map": []
+            },
+            "defending_player": null,
+            "first_strike_participants": null,
+            "was_blocked": []
+          },
+          "commander": {
+            "casts": {
+              "$map": [
+                [
+                  0,
+                  1
+                ]
+              ]
+            },
+            "commanders": {
+              "$map": [
+                [
+                  0,
+                  1
+                ]
+              ]
+            },
+            "damage": {
+              "$map": []
+            },
+            "return_considered": [],
+            "tax_due": {
+              "$map": [
+                [
+                  {
+                    "$ObjectId": 2
+                  },
+                  0
+                ]
+              ]
+            }
+          },
+          "consecutive_passes": 0,
+          "continuous": [],
+          "damage_shields": [],
+          "damage_unpreventable": false,
+          "damaged_by_this_turn": [],
+          "damaged_this_turn": [],
+          "day": null,
+          "delayed": [],
+          "died_this_turn": [],
+          "done_once_this_turn": [],
+          "draws_this_turn": {
+            "$map": []
+          },
+          "exile_if_dies_now": [],
+          "exiled_instead_of_graveyard": [],
+          "exiled_with": [],
+          "extra_combats": 0,
+          "extra_turns": [],
+          "gained_life_this_turn": [],
+          "generation": {
+            "$Timestamp": 7
+          },
+          "last_known": {
+            "$map": []
+          },
+          "life_gain_boost": {
+            "$map": []
+          },
+          "life_gained_amount": {
+            "$map": []
+          },
+          "linked_exile": [],
+          "looked_at": [],
+          "lost_life_this_turn": [],
+          "loyalty_activated_this_turn": [],
+          "monarch": null,
+          "monarch_emblem": null,
+          "next_delayed": 0,
+          "next_shield": 0,
+          "no_life_gain": [],
+          "objects": {
+            "$map": [
+              [
+                {
+                  "$ObjectId": 2
+                },
+                {
+                  "adventure_player": null,
+                  "attached_player": null,
+                  "attached_to": null,
+                  "card": 1,
+                  "cast_context": {
+                    "ability": null,
+                    "alt_cost": null,
+                    "bindings": {
+                      "$map": []
+                    },
+                    "cast_from": "Command",
+                    "cast_index": 0,
+                    "cost_choice": null,
+                    "cost_override": null,
+                    "effect": null,
+                    "emerge_reduction": 0,
+                    "empty_slots": [],
+                    "exile_on_leave": false,
+                    "flashed": false,
+                    "gains_haste": false,
+                    "granted": null,
+                    "kicked": false,
+                    "kicks": 0,
+                    "mana_choice": null,
+                    "mana_spent": [],
+                    "modes": [],
+                    "source": null,
+                    "targets": [],
+                    "x": 0
+                  },
+                  "cast_for": null,
+                  "cast_from": null,
+                  "cast_later": null,
+                  "cast_x": 0,
+                  "chosen_color": null,
+                  "chosen_subtype": null,
+                  "class_level": 0,
+                  "controller": 0,
+                  "controls_host": false,
+                  "counters": {
+                    "$map": []
+                  },
+                  "damage": 0,
+                  "dealt_deathtouch_damage": false,
+                  "entered_turn": null,
+                  "exile_if_dies": null,
+                  "exile_if_leaves": false,
+                  "face": 0,
+                  "face_down": false,
+                  "id": {
+                    "$ObjectId": 2
+                  },
+                  "is_spell_copy": false,
+                  "is_token": false,
+                  "kicked": false,
+                  "kicks": 0,
+                  "mana_spent": [],
+                  "may_play": null,
+                  "monstrous": false,
+                  "original": null,
+                  "owner": 0,
+                  "phased_out": false,
+                  "regeneration_shields": 0,
+                  "renowned": false,
+                  "summoning_sick": false,
+                  "tapped": false,
+                  "timestamp": {
+                    "$Timestamp": 4
+                  },
+                  "was_attached_to": null,
+                  "zone": {
+                    "player": null,
+                    "zone": "Stack"
+                  }
+                }
+              ]
+            ]
+          },
+          "owed_combat": false,
+          "pending_triggers": {
+            "pending": []
+          },
+          "players": {
+            "$map": [
+              [
+                0,
+                {
+                  "attempted_draw_from_empty": false,
+                  "city_blessing": false,
+                  "energy": 0,
+                  "has_lost": false,
+                  "id": 0,
+                  "lands_played": 0,
+                  "life": 40,
+                  "mana": {
+                    "amounts": [
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0
+                    ]
+                  },
+                  "passed": false,
+                  "poison": 0,
+                  "speed": null,
+                  "speed_raised_turn": 0,
+                  "starting_life": 40
+                }
+              ],
+              [
+                1,
+                {
+                  "attempted_draw_from_empty": false,
+                  "city_blessing": false,
+                  "energy": 0,
+                  "has_lost": false,
+                  "id": 1,
+                  "lands_played": 0,
+                  "life": 40,
+                  "mana": {
+                    "amounts": [
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0
+                    ]
+                  },
+                  "passed": false,
+                  "poison": 0,
+                  "speed": null,
+                  "speed_raised_turn": 0,
+                  "starting_life": 40
+                }
+              ],
+              [
+                2,
+                {
+                  "attempted_draw_from_empty": false,
+                  "city_blessing": false,
+                  "energy": 0,
+                  "has_lost": false,
+                  "id": 2,
+                  "lands_played": 0,
+                  "life": 40,
+                  "mana": {
+                    "amounts": [
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0
+                    ]
+                  },
+                  "passed": false,
+                  "poison": 0,
+                  "speed": null,
+                  "speed_raised_turn": 0,
+                  "starting_life": 40
+                }
+              ],
+              [
+                3,
+                {
+                  "attempted_draw_from_empty": false,
+                  "city_blessing": false,
+                  "energy": 0,
+                  "has_lost": false,
+                  "id": 3,
+                  "lands_played": 0,
+                  "life": 40,
+                  "mana": {
+                    "amounts": [
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0
+                    ]
+                  },
+                  "passed": false,
+                  "poison": 0,
+                  "speed": null,
+                  "speed_raised_turn": 0,
+                  "starting_life": 40
+                }
+              ]
+            ]
+          },
+          "pregame": null,
+          "prevent_combat_damage": false,
+          "prevent_damage_to": [],
+          "priority": 0,
+          "revealed_cards": [],
+          "rng": 16296164475658289523,
+          "rotation_from": null,
+          "scanned_upto": 5,
+          "sees_top": [],
+          "shuffled_instead_of_graveyard": [],
+          "skipped_turns": [],
+          "spells_by_player": {
+            "$map": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "spells_by_player_last_turn": {
+            "$map": []
+          },
+          "spells_cast_this_turn": 1,
+          "step": "PrecombatMain",
+          "top_revealed": [],
+          "triggered_this_turn": {
+            "$map": []
+          },
+          "turn": 2,
+          "turn_order": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "upkeeps": {
+            "$map": []
+          },
+          "zone_order": {
+            "$map": [
+              [
+                {
+                  "player": null,
+                  "zone": "Stack"
+                },
+                [
+                  {
+                    "$ObjectId": 2
+                  }
+                ]
+              ]
+            ]
+          }
+        },
+        "suspended": null,
+        "tba_done": true,
+        "to_order": [],
+        "to_place": [],
+        "undo": [
+          {
+            "cleanup_priority": false,
+            "log_len": 1,
+            "phase": "Priority",
+            "question": {
+              "default": "Pass",
+              "kind": {
+                "Priority": {
+                  "legal": {
+                    "actions": [
+                      "Pass",
+                      "Concede",
+                      {
+                        "Cast": {
+                          "object": {
+                            "$ObjectId": 1
+                          }
+                        }
+                      }
+                    ],
+                    "mana_abilities": [],
+                    "targets": [],
+                    "who": 0
+                  }
+                }
+              },
+              "undo": false,
+              "who": 0
+            },
+            "state": {
+              "activated_ever": [],
+              "activated_this_turn": {
+                "$map": []
+              },
+              "active_player": 0,
+              "allocation_cursor": {
+                "$ObjectId": 1
+              },
+              "attacked_creatures": [],
+              "attacked_this_turn": [],
+              "combat": {
+                "attackers": {
+                  "$map": []
+                },
+                "blocks": {
+                  "$map": []
+                },
+                "defending_player": null,
+                "first_strike_participants": null,
+                "was_blocked": []
+              },
+              "commander": {
+                "casts": {
+                  "$map": []
+                },
+                "commanders": {
+                  "$map": [
+                    [
+                      0,
+                      1
+                    ]
+                  ]
+                },
+                "damage": {
+                  "$map": []
+                },
+                "return_considered": [],
+                "tax_due": {
+                  "$map": []
+                }
+              },
+              "consecutive_passes": 0,
+              "continuous": [],
+              "damage_shields": [],
+              "damage_unpreventable": false,
+              "damaged_by_this_turn": [],
+              "damaged_this_turn": [],
+              "day": null,
+              "delayed": [],
+              "died_this_turn": [],
+              "done_once_this_turn": [],
+              "draws_this_turn": {
+                "$map": []
+              },
+              "exile_if_dies_now": [],
+              "exiled_instead_of_graveyard": [],
+              "exiled_with": [],
+              "extra_combats": 0,
+              "extra_turns": [],
+              "gained_life_this_turn": [],
+              "generation": {
+                "$Timestamp": 2
+              },
+              "last_known": {
+                "$map": []
+              },
+              "life_gain_boost": {
+                "$map": []
+              },
+              "life_gained_amount": {
+                "$map": []
+              },
+              "linked_exile": [],
+              "looked_at": [],
+              "lost_life_this_turn": [],
+              "loyalty_activated_this_turn": [],
+              "monarch": null,
+              "monarch_emblem": null,
+              "next_delayed": 0,
+              "next_shield": 0,
+              "no_life_gain": [],
+              "objects": {
+                "$map": [
+                  [
+                    {
+                      "$ObjectId": 1
+                    },
+                    {
+                      "adventure_player": null,
+                      "attached_player": null,
+                      "attached_to": null,
+                      "card": 1,
+                      "cast_context": null,
+                      "cast_for": null,
+                      "cast_from": null,
+                      "cast_later": null,
+                      "cast_x": 0,
+                      "chosen_color": null,
+                      "chosen_subtype": null,
+                      "class_level": 0,
+                      "controller": 0,
+                      "controls_host": false,
+                      "counters": {
+                        "$map": []
+                      },
+                      "damage": 0,
+                      "dealt_deathtouch_damage": false,
+                      "entered_turn": null,
+                      "exile_if_dies": null,
+                      "exile_if_leaves": false,
+                      "face": 0,
+                      "face_down": false,
+                      "id": {
+                        "$ObjectId": 1
+                      },
+                      "is_spell_copy": false,
+                      "is_token": false,
+                      "kicked": false,
+                      "kicks": 0,
+                      "mana_spent": [],
+                      "may_play": null,
+                      "monstrous": false,
+                      "original": null,
+                      "owner": 0,
+                      "phased_out": false,
+                      "regeneration_shields": 0,
+                      "renowned": false,
+                      "summoning_sick": false,
+                      "tapped": false,
+                      "timestamp": {
+                        "$Timestamp": 1
+                      },
+                      "was_attached_to": null,
+                      "zone": {
+                        "player": null,
+                        "zone": "Command"
+                      }
+                    }
+                  ]
+                ]
+              },
+              "owed_combat": false,
+              "pending_triggers": {
+                "pending": []
+              },
+              "players": {
+                "$map": [
+                  [
+                    0,
+                    {
+                      "attempted_draw_from_empty": false,
+                      "city_blessing": false,
+                      "energy": 0,
+                      "has_lost": false,
+                      "id": 0,
+                      "lands_played": 0,
+                      "life": 40,
+                      "mana": {
+                        "amounts": [
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0
+                        ]
+                      },
+                      "passed": false,
+                      "poison": 0,
+                      "speed": null,
+                      "speed_raised_turn": 0,
+                      "starting_life": 40
+                    }
+                  ],
+                  [
+                    1,
+                    {
+                      "attempted_draw_from_empty": false,
+                      "city_blessing": false,
+                      "energy": 0,
+                      "has_lost": false,
+                      "id": 1,
+                      "lands_played": 0,
+                      "life": 40,
+                      "mana": {
+                        "amounts": [
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0
+                        ]
+                      },
+                      "passed": false,
+                      "poison": 0,
+                      "speed": null,
+                      "speed_raised_turn": 0,
+                      "starting_life": 40
+                    }
+                  ],
+                  [
+                    2,
+                    {
+                      "attempted_draw_from_empty": false,
+                      "city_blessing": false,
+                      "energy": 0,
+                      "has_lost": false,
+                      "id": 2,
+                      "lands_played": 0,
+                      "life": 40,
+                      "mana": {
+                        "amounts": [
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0
+                        ]
+                      },
+                      "passed": false,
+                      "poison": 0,
+                      "speed": null,
+                      "speed_raised_turn": 0,
+                      "starting_life": 40
+                    }
+                  ],
+                  [
+                    3,
+                    {
+                      "attempted_draw_from_empty": false,
+                      "city_blessing": false,
+                      "energy": 0,
+                      "has_lost": false,
+                      "id": 3,
+                      "lands_played": 0,
+                      "life": 40,
+                      "mana": {
+                        "amounts": [
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0
+                        ]
+                      },
+                      "passed": false,
+                      "poison": 0,
+                      "speed": null,
+                      "speed_raised_turn": 0,
+                      "starting_life": 40
+                    }
+                  ]
+                ]
+              },
+              "pregame": null,
+              "prevent_combat_damage": false,
+              "prevent_damage_to": [],
+              "priority": 0,
+              "revealed_cards": [],
+              "rng": 16296164475658289523,
+              "rotation_from": null,
+              "scanned_upto": 1,
+              "sees_top": [],
+              "shuffled_instead_of_graveyard": [],
+              "skipped_turns": [],
+              "spells_by_player": {
+                "$map": []
+              },
+              "spells_by_player_last_turn": {
+                "$map": []
+              },
+              "spells_cast_this_turn": 0,
+              "step": "PrecombatMain",
+              "top_revealed": [],
+              "triggered_this_turn": {
+                "$map": []
+              },
+              "turn": 2,
+              "turn_order": [
+                0,
+                1,
+                2,
+                3
+              ],
+              "upkeeps": {
+                "$map": []
+              },
+              "zone_order": {
+                "$map": []
+              }
+            },
+            "tba_done": true,
+            "who": 0
+          }
+        ]
+      }
+    }
+  }
+}

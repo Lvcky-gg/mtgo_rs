@@ -166,6 +166,12 @@ pub enum ObjectFilter {
     /// Distinct from "an object on the stack": an activated or triggered ability is on
     /// the stack too and is not a spell, so "target spell" must not offer one.
     IsSpell,
+    /// A spell cast from this zone ("a spell from your graveyard").
+    CastFromZone(mtg_core::Zone),
+    /// A kicked spell (CR 702.33d).
+    Kicked,
+    /// "With {X} in its mana cost".
+    HasXInCost,
     /// A spell or ability with a target this matches: "spell that targets a creature".
     TargetsObject(Box<ObjectFilter>),
     /// An ability on the stack, the complement of [`ObjectFilter::IsSpell`].

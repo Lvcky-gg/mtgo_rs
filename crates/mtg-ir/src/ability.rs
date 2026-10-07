@@ -372,6 +372,8 @@ pub enum ActivationTiming {
     AnyPlayer,
     /// "Any player may activate this ability but only as a sorcery."
     AnyPlayerSorcery,
+    /// CR 702.177 — exhaust: each such ability of an object may be activated only once.
+    Exhaust,
 }
 
 impl ActivationTiming {

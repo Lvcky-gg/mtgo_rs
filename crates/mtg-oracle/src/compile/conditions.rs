@@ -55,6 +55,11 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
         ("it's tapped", ObjectFilter::Tapped(true)),
         ("~ is tapped", ObjectFilter::Tapped(true)),
         ("~ entered this turn", ObjectFilter::EnteredThisTurn),
+        (
+            "~ is an enchantment",
+            ObjectFilter::HasType(CardType::Enchantment),
+        ),
+        ("~ is on the battlefield", ObjectFilter::Any),
     ] {
         if let Some(r) = s.strip_prefix(prefix) {
             return Some((me(f), r));
@@ -203,8 +208,10 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
             r,
         ));
     }
-    if let Some(r) = s.strip_prefix("you control ") {
-        return controls(r, Selector::You, cx);
+    if let Some(r) = s.strip_prefix("you control ")
+        && let Some(found) = controls(r, Selector::You, cx)
+    {
+        return Some(found);
     }
     // "its surge cost was paid", "this spell's spectacle cost was paid".
     for lead in ["its ", "~'s ", "this spell's "] {
@@ -294,40 +301,109 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
                 r,
             ));
         }
-        let (n, r) = words::number(r)?;
-        // "you have seven or more cards in hand", "one or fewer cards in hand".
-        if let Some(r) = r.strip_prefix(" or more cards in hand") {
-            return Some((
-                Condition::CountAtLeast {
-                    what: hand(),
-                    at_least: Value::Fixed(n),
+        if let Some((n, r)) = words::number(r) {
+            // "you have seven or more cards in hand", "one or fewer cards in hand".
+            if let Some(r) = r.strip_prefix(" or more cards in hand") {
+                return Some((
+                    Condition::CountAtLeast {
+                        what: hand(),
+                        at_least: Value::Fixed(n),
+                    },
+                    r,
+                ));
+            }
+            if let Some(r) = r.strip_prefix(" or fewer cards in hand") {
+                return Some((
+                    Condition::CountAtMost {
+                        what: hand(),
+                        at_most: Value::Fixed(n),
+                    },
+                    r,
+                ));
+            }
+            let life = Value::LifeTotal(Box::new(Selector::You));
+            if let Some(r) = r.strip_prefix(" or more life") {
+                return Some((at_least(life, n), r));
+            }
+            if let Some(r) = r.strip_prefix(" or less life") {
+                return Some((
+                    Condition::ValueAtLeast {
+                        lhs: Value::Fixed(n),
+                        rhs: life,
+                    },
+                    r,
+                ));
+            }
+        }
+    }
+    // "this spell was cast from a graveyard" (flashback and friends).
+    if let Some(r) = s
+        .strip_prefix("this spell was cast from a graveyard")
+        .or_else(|| s.strip_prefix("~ was cast from a graveyard"))
+    {
+        return Some((Condition::WasCast(Some(Zone::Graveyard)), r));
+    }
+    // Coven: "you control three or more creatures with different powers".
+    if let Some(r) = s.strip_prefix("you control ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more creatures with different powers")
+    {
+        let creatures = Selector::All {
+            zone: Zone::Battlefield,
+            filter: ObjectFilter::And(vec![
+                ObjectFilter::HasType(CardType::Creature),
+                ObjectFilter::ControlledBy(Box::new(Selector::You)),
+            ]),
+        };
+        return Some((at_least(Value::DistinctPowers(Box::new(creatures)), n), r));
+    }
+    // "you gained 3 or more life this turn".
+    if let Some(r) = s.strip_prefix("you gained ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more life this turn")
+    {
+        return Some((
+            at_least(Value::LifeGainedThisTurn(Box::new(Selector::You)), n),
+            r,
+        ));
+    }
+    // "you have a full party" (CR 700.8): one each of Cleric, Rogue, Warrior and Wizard.
+    if let Some(r) = s.strip_prefix("you have a full party") {
+        let creatures = Selector::All {
+            zone: Zone::Battlefield,
+            filter: ObjectFilter::And(vec![
+                ObjectFilter::HasType(CardType::Creature),
+                ObjectFilter::ControlledBy(Box::new(Selector::You)),
+            ]),
+        };
+        return Some((at_least(Value::PartySize(Box::new(creatures)), 4), r));
+    }
+    // "if X is 5 or more", while X means something.
+    if cx.x
+        && let Some(r) = s.strip_prefix("x is ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more")
+    {
+        return Some((at_least(Value::X, n), r));
+    }
+    // "there are two or more instant and/or sorcery cards in your graveyard".
+    if let Some(r) = s.strip_prefix("there are ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more ")
+        && let Some((noun, r)) = nouns::noun(r, cx)
+        && noun.zone == Zone::Graveyard
+        && noun.plural
+    {
+        return Some((
+            Condition::CountAtLeast {
+                what: Selector::All {
+                    zone: Zone::Graveyard,
+                    filter: noun.filter,
                 },
-                r,
-            ));
-        }
-        if let Some(r) = r.strip_prefix(" or fewer cards in hand") {
-            return Some((
-                Condition::CountAtMost {
-                    what: hand(),
-                    at_most: Value::Fixed(n),
-                },
-                r,
-            ));
-        }
-        let life = Value::LifeTotal(Box::new(Selector::You));
-        if let Some(r) = r.strip_prefix(" or more life") {
-            return Some((at_least(life, n), r));
-        }
-        if let Some(r) = r.strip_prefix(" or less life") {
-            return Some((
-                Condition::ValueAtLeast {
-                    lhs: Value::Fixed(n),
-                    rhs: life,
-                },
-                r,
-            ));
-        }
-        return None;
+                at_least: Value::Fixed(n),
+            },
+            r,
+        ));
     }
     // "there are seven or more cards in your graveyard".
     if let Some(r) = s.strip_prefix("there are ")
@@ -644,6 +720,11 @@ pub fn counted<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, &'s str)> {
             filter = ObjectFilter::And(vec![filter, ObjectFilter::BlockingSource]);
             r
         }
+        _ => r,
+    };
+    // "creature cards in all graveyards": every graveyard, not just yours.
+    let r = match r.strip_prefix(" in all graveyards") {
+        Some(r) if noun.zone == Zone::Graveyard => r,
         _ => r,
     };
     // "for each creature on the battlefield": the default zone, said out loud.

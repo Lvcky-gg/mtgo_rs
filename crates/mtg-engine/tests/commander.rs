@@ -72,7 +72,7 @@ fn where_is_commander(engine: &Engine) -> Vec<Zone> {
 #[test]
 fn a_commander_can_be_cast_from_the_command_zone() {
     let mut state = board();
-    let commander = state.place(LEGEND, P0, ZoneRef::of(Zone::Command, P0));
+    let commander = state.place(LEGEND, P0, ZoneRef::shared(Zone::Command));
     let mut engine = Engine::new(state);
     let cards = TestCards::default();
 
@@ -94,7 +94,7 @@ fn a_commander_can_be_cast_from_the_command_zone() {
 #[test]
 fn the_second_cast_costs_two_more() {
     let mut state = board();
-    state.place(LEGEND, P0, ZoneRef::of(Zone::Command, P0));
+    state.place(LEGEND, P0, ZoneRef::shared(Zone::Command));
     state.commander.casts.insert(P0, 1);
     let mut engine = Engine::new(state.clone());
     let cards = TestCards::default();

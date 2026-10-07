@@ -302,6 +302,23 @@ pub enum Effect {
         kind: mtg_core::CounterKind,
         amount: u32,
     },
+    /// The old Oblivion Ring's "When ~ enters, exile target …": exiled and remembered as
+    /// exiled with this source, for its separate leaves-the-battlefield ability.
+    ExileLinked {
+        what: crate::Selector,
+    },
+    /// "When ~ leaves the battlefield, return the exiled card to the battlefield under its
+    /// owner's control": the cards `ExileLinked` remembers for this source.
+    ReturnExiledWith {
+        to: mtg_core::Zone,
+        tapped: bool,
+    },
+    /// "You may search your library and/or graveyard for a card named …, reveal it, and put
+    /// it into your hand. If you search your library this way, shuffle.": one optional
+    /// card from either zone; the library is shuffled unless it came from the graveyard.
+    SearchLibraryAndGraveyard {
+        filter: crate::ObjectFilter,
+    },
     /// "Target opponent reveals a card at random from their hand": the card is chosen at
     /// random and bound as "it" ("that card's mana value") for what follows.
     RevealRandom {
@@ -664,6 +681,8 @@ pub enum Restriction {
     /// "Assigns no combat damage this turn" (CR 510.1a: it assigns none).
     AssignsNoCombatDamage,
     CantBlock,
+    /// "Target creature can't block ~ this turn": it can't block the effect's source.
+    CantBlockSource,
     CantBeBlockedExceptBy(ObjectFilter),
     /// "Can block only creatures with flying": what this creature may block.
     CanBlockOnly(ObjectFilter),
@@ -806,6 +825,8 @@ pub enum Duration {
     /// Through the affected permanent's controller's next untap step: "doesn't untap
     /// during its controller's next untap step".
     ThroughNextUntapStep,
+    /// "For as long as ~ remains tapped": ends when the source untaps or leaves.
+    WhileSourceTapped,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

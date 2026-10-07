@@ -1,0 +1,93 @@
+name: Verification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 1-6'
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Verification campaign tier
+        type: choice
+        options: [pr, nightly, weekly]
+        default: pr
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: verification-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule || github.event.inputs.tier || 'pr' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install workspace build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake ninja-build pkg-config
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+      - name: Select bounded campaign tier
+        id: tier
+        env:
+          REQUESTED_TIER: ${{ inputs.tier }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [ -n "$REQUESTED_TIER" ]; then
+            tier="$REQUESTED_TIER"
+          elif [ "$SCHEDULE" = '0 3 * * 0' ]; then
+            tier=weekly
+          elif [ -n "$SCHEDULE" ]; then
+            tier=nightly
+          else
+            tier=pr
+          fi
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+      - name: Golden, property, differential, replay, regression and semantic campaign
+        env:
+          CAMPAIGN_TIER: ${{ steps.tier.outputs.tier }}
+        run: python3 scripts/verification_campaign.py --tier "$CAMPAIGN_TIER" --output verification-artifacts
+      - name: Install nightly structural fuzz tooling
+        if: steps.tier.outputs.tier != 'pr'
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --locked
+      - name: Bounded structural fuzz campaign
+        if: steps.tier.outputs.tier != 'pr'
+        env:
+          CAMPAIGN_TIER: ${{ steps.tier.outputs.tier }}
+        run: |
+          seconds=600
+          if [ "$CAMPAIGN_TIER" = weekly ]; then
+            seconds=3600
+          fi
+          set -o pipefail
+          mkdir -p verification-artifacts/structural
+          cargo +nightly fuzz run structural fuzz/corpus/structural -- -max_total_time="$seconds" -max_len=65536 -timeout=5 -rss_limit_mb=2048 -artifact_prefix=verification-artifacts/structural/ 2>&1 | tee verification-artifacts/structural.log
+      - name: Reject known blocking violations
+        run: python3 scripts/verification_gate.py --campaign verification-artifacts/report.json --output verification-artifacts/gate.json
+      - name: Archive measured evidence and reproducible failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            verification-artifacts/
+            crates/mtg-verify/proptest-regressions/
+            crates/mtg-verify/tests/*.proptest-regressions
+            fuzz/artifacts/
+          if-no-files-found: warn

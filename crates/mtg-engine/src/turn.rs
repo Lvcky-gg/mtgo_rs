@@ -107,7 +107,7 @@ pub fn next_step(step: Step, needs_first_strike_step: bool) -> Option<Step> {
 // The first-strike question lives in `crate::combat`, next to the other combat
 // keyword checks, rather than being answered in two places.
 
-/// The next player in turn order.
+/// The next player still in the game, in turn order (CR 800.4).
 pub fn next_player(state: &GameState, after: PlayerId) -> PlayerId {
     let n = state.turn_order.len();
     let i = state
@@ -115,7 +115,12 @@ pub fn next_player(state: &GameState, after: PlayerId) -> PlayerId {
         .iter()
         .position(|p| *p == after)
         .unwrap_or(0);
-    state.turn_order[(i + 1) % n]
+    // Lost players remain in the seating history, but receive neither priority
+    // nor subsequent ordinary turns. Bound the scan for terminal states.
+    (1..=n)
+        .map(|offset| state.turn_order[(i + offset) % n])
+        .find(|p| state.players.get(p).is_some_and(|player| !player.has_lost))
+        .unwrap_or(after)
 }
 
 /// Players still in the game, in turn order.

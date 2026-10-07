@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "scope": "Supported engine behavior; unsupported card text must remain explicitly rejected",
+  "known_issues": {
+    "state_corruption": {"assessment": "unassessed", "reviewed_by": null, "evidence": null, "open": []},
+    "network_divergence": {"assessment": "unassessed", "reviewed_by": null, "evidence": null, "open": []},
+    "silent_unsupported_rules": {"assessment": "unassessed", "reviewed_by": null, "evidence": null, "open": []}
+  },
+  "confidence_promotion": "Independent review and measured evidence required; no automatic VERIFIED promotion"
+}

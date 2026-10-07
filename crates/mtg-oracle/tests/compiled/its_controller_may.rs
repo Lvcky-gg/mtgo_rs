@@ -168,3 +168,38 @@ fn each_player_searches_their_own_library_when_it_dies() {
         );
     }
 }
+
+#[test]
+fn target_opponent_exiles_a_creature_of_their_own() {
+    let mut table = Table::default();
+    let edict = table.card(
+        "{1}{W}",
+        "Sorcery",
+        None,
+        "Target opponent exiles a creature they control.",
+    );
+    let bear = table.bear();
+    let mut game = Game::new(table);
+    game.lands(2);
+    let edict = game.put(edict, P0, Zone::Hand);
+    let mine = game.put(bear, P0, Zone::Battlefield);
+    let theirs = game.put(bear, P1, Zone::Battlefield);
+    game.main();
+    game.act(
+        Action::Cast { object: edict },
+        &[Target::Player(P1)],
+        &[Answer::Objects(vec![theirs])],
+    );
+    assert!(
+        !game.engine.state.objects.contains_key(&theirs),
+        "P1's exiled"
+    );
+    assert!(game.engine.state.objects.contains_key(&mine), "not mine");
+    assert_eq!(
+        game.engine
+            .state
+            .objects_in(ZoneRef::shared(Zone::Exile))
+            .len(),
+        1
+    );
+}

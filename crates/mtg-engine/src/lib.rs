@@ -60,3 +60,6 @@ pub(crate) fn empty_bindings()
     > = OnceLock::new();
     EMPTY.get_or_init(Default::default)
 }
+
+#[cfg(feature = "verification")]
+mod verification;

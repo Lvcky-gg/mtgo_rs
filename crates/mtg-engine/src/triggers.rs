@@ -70,6 +70,7 @@ use crate::state::GameState;
 
 /// An ability that has triggered and is waiting to be put on the stack.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct PendingTrigger {
     /// The object whose ability triggered. May already have left the battlefield,
     /// in which case its characteristics come from last-known information.
@@ -106,6 +107,7 @@ pub struct PendingTrigger {
 
 /// Triggers that have fired and not yet been placed on the stack.
 #[derive(Clone, Default, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct TriggerQueue {
     pub pending: Vec<PendingTrigger>,
 }

@@ -417,7 +417,7 @@ pub fn new_game(
         if format == Format::Commander
             && let Some(id) = deck.commander.as_ref().and_then(|k| cards.id(k))
         {
-            state.place(id, seat, ZoneRef::of(Zone::Command, seat));
+            state.place(id, seat, ZoneRef::shared(Zone::Command));
             state.commander.commanders.insert(seat, id);
         }
 
@@ -640,7 +640,14 @@ mod tests {
         );
         assert_eq!(state.player(SEATS[0]).life, 40);
         for seat in SEATS {
-            assert_eq!(state.objects_in(ZoneRef::of(Zone::Command, seat)).len(), 1);
+            assert_eq!(
+                state
+                    .objects_in(ZoneRef::shared(Zone::Command))
+                    .into_iter()
+                    .filter(|id| state.objects[id].owner == seat)
+                    .count(),
+                1
+            );
             assert_eq!(
                 state.commander.commanders[&seat],
                 cards.id(&CardKey::Demo(2)).unwrap()

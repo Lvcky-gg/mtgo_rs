@@ -574,6 +574,51 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
         }
         // Replaced by the number rolled before anything reads it (`Effect::RollDie`).
         Value::RollResult => 0,
+        Value::LifeGainedThisTurn(who) => players(ctx, who)?
+            .iter()
+            .map(|p| ctx.state.life_gained_amount.get(p).copied().unwrap_or(0))
+            .sum(),
+        Value::StartingLife => ctx.state.player(ctx.controller).starting_life,
+        Value::DistinctPowers(sel) => {
+            let mut powers = std::collections::BTreeSet::new();
+            for id in objects(ctx, sel)? {
+                if let Some(p) = ctx.characteristics(id)?.power {
+                    powers.insert(p);
+                }
+            }
+            powers.len() as i32
+        }
+        Value::Speed => i32::from(ctx.state.player(ctx.controller).speed.unwrap_or(0)),
+        Value::ColorsAmong(sel) => {
+            let mut all = mtg_core::ColorSet::COLORLESS;
+            for id in objects(ctx, sel)? {
+                all = all.union(ctx.characteristics(id)?.colors);
+            }
+            all.count() as i32
+        }
+        Value::Devotion(colors) => {
+            use mtg_core::ManaSymbol as M;
+            let mut n = 0;
+            for id in ctx.state.battlefield() {
+                if crate::layers::controller(ctx.state, id) != Some(ctx.controller) {
+                    continue;
+                }
+                let Ok(ch) = ctx.characteristics(id) else {
+                    continue;
+                };
+                for s in &ch.mana_cost.symbols {
+                    let counts = match *s {
+                        M::Colored(c) | M::MonoHybrid(_, c) | M::Phyrexian(c) => {
+                            colors.contains(&c)
+                        }
+                        M::Hybrid(a, b) => colors.contains(&a) || colors.contains(&b),
+                        _ => false,
+                    };
+                    n += i32::from(counts);
+                }
+            }
+            n
+        }
         Value::SpellsCastBefore => ctx
             .state
             .objects
@@ -655,11 +700,16 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
                     })
             }) || ctx.state.last_known.get(id).is_some_and(|o| o.face_down)
         }),
+        // A permanent remembers where it was cast from; a spell still on the stack knows it
+        // from its cast context.
         Condition::WasCast(from) => ctx
             .state
             .objects
             .get(&ctx.source)
-            .and_then(|o| o.cast_from)
+            .and_then(|o| {
+                o.cast_from
+                    .or_else(|| o.cast_context.as_ref().and_then(|c| c.cast_from))
+            })
             .is_some_and(|z| from.is_none_or(|f| f == z)),
         Condition::ClassLevelAtLeast(n) => ctx
             .state
@@ -938,6 +988,17 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
                 && !protected_from(ctx.state, ctx.cards, id, ctx.source)
         }
 
+        ObjectFilter::CastFromZone(zone) => {
+            obj.cast_from
+                .or_else(|| obj.cast_context.as_ref().and_then(|c| c.cast_from))
+                == Some(*zone)
+        }
+        ObjectFilter::Kicked => obj.cast_context.as_ref().is_some_and(|c| c.kicked),
+        ObjectFilter::HasXInCost => ctx
+            .characteristics(id)?
+            .mana_cost
+            .symbols
+            .contains(&mtg_core::ManaSymbol::Variable),
         // CR 112.1 — a spell is a *card* on the stack. An ability on the stack is not
         // one, which is why this cannot just be "is in the stack zone".
         ObjectFilter::IsSpell => {

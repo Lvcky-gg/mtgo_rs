@@ -54,6 +54,9 @@ pub struct GameState {
     /// Cards exiled "until <source> leaves the battlefield" (CR 610.3), as (source, card
     /// in exile). Returned by the engine as soon as the source is gone.
     pub linked_exile: Vec<(ObjectId, ObjectId)>,
+    /// Cards exiled with a source by `Effect::ExileLinked`, as (source, card in exile),
+    /// returned only by that source's own `Effect::ReturnExiledWith`.
+    pub exiled_with: Vec<(ObjectId, ObjectId)>,
     /// Cards with "if ~ would be put into a graveyard from anywhere, exile it instead",
     /// so the replacement can be applied where events are, which has no card data.
     pub exiled_instead_of_graveyard: BTreeSet<CardId>,
@@ -77,6 +80,8 @@ pub struct GameState {
     pub lost_life_this_turn: BTreeSet<PlayerId>,
     /// Players who gained life this turn.
     pub gained_life_this_turn: BTreeSet<PlayerId>,
+    /// How much life each player gained this turn.
+    pub life_gained_amount: BTreeMap<PlayerId, i32>,
     /// (source, object) for each object dealt damage this turn, by what dealt it.
     pub damaged_by_this_turn: BTreeSet<(ObjectId, ObjectId)>,
     /// Spells cast this turn, by anyone (storm).
@@ -145,6 +150,8 @@ pub struct GameState {
     pub next_delayed: u32,
     /// Activations this turn, for "activate only once each turn".
     pub activated_this_turn: BTreeMap<(ObjectId, mtg_core::AbilityId), u32>,
+    /// Every ability ever activated, for exhaust ("activate only once").
+    pub activated_ever: std::collections::BTreeSet<(ObjectId, mtg_core::AbilityId)>,
 
     /// CR 606.3: once per permanent per turn, shared by all its loyalty abilities
     /// and all players who control it during that turn.
@@ -180,6 +187,7 @@ pub struct GameState {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct GameObject {
     pub id: ObjectId,
     /// Which printed card this is. Tokens and copies point at a synthesised entry.
@@ -353,6 +361,7 @@ impl GameState {
 
 /// The London mulligan in progress (CR 103.5): players decide in turn order.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct Pregame {
     /// Players in the order they decide: the starting player first.
     pub order: Vec<PlayerId>,
@@ -379,6 +388,7 @@ impl Pregame {
 /// A small deterministic generator (SplitMix64). Not cryptographic: the host runs the engine
 /// and is trusted with its state already; what matters is that a seed fixes every shuffle.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct Rng(u64);
 
 impl Rng {
@@ -413,7 +423,11 @@ impl Rng {
 /// every time it changes zones (CR 400.7), and the rules follow the card. A Commander deck is
 /// singleton, so owner and card name exactly one card.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct CommanderState {
+    /// CR 903.9a: graveyard/exile identities whose return opportunity was
+    /// already considered. A zone change creates a fresh eligible identity.
+    pub return_considered: BTreeSet<ObjectId>,
     /// Each player's commander.
     pub commanders: BTreeMap<PlayerId, CardId>,
     /// CR 903.8 — how many times each player has cast their commander from the command zone.
@@ -441,6 +455,7 @@ impl CommanderState {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct CastContext {
     /// One per target slot, in slot order.
     pub targets: Vec<mtg_core::Target>,
@@ -495,6 +510,7 @@ pub struct CastContext {
 /// Held on the state rather than derived, because "is attacking" is a fact
 /// established by a turn-based action, not a characteristic.
 #[derive(Clone, Default, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct Combat {
     /// The defending seat stays known if its attacked planeswalker leaves combat.
     pub defending_player: Option<PlayerId>,
@@ -530,6 +546,7 @@ impl Combat {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct PlayerState {
     pub id: PlayerId,
     pub life: i32,
@@ -550,6 +567,8 @@ pub struct PlayerState {
     /// next time state-based actions are checked. The attempt is the trigger, not
     /// the empty library, so it has to be recorded when it happens.
     pub attempted_draw_from_empty: bool,
+    /// CR 103.4 — the life total the game began with.
+    pub starting_life: i32,
 }
 
 impl PlayerState {
@@ -567,12 +586,14 @@ impl PlayerState {
             has_lost: false,
             passed: false,
             attempted_draw_from_empty: false,
+            starting_life,
         }
     }
 }
 
 /// A delayed triggered ability (CR 603.7), created by a resolving spell or ability.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct DelayedTrigger {
     pub id: u32,
     /// What created it: its card names the trigger, and it is "this" for the effect.
@@ -589,6 +610,7 @@ pub struct DelayedTrigger {
 
 /// A continuous effect currently applying.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct ContinuousEffect {
     pub id: ObjectId,
     /// The ability or resolved spell that created it.
@@ -610,6 +632,7 @@ pub struct ContinuousEffect {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub enum AffectedSet {
     /// Frozen at resolution — "target creature gets +1/+1 until end of turn"
     /// keeps affecting that creature even if it stops matching.
@@ -660,6 +683,7 @@ impl GameState {
             damaged_this_turn: BTreeSet::new(),
             lost_life_this_turn: BTreeSet::new(),
             gained_life_this_turn: BTreeSet::new(),
+            life_gained_amount: BTreeMap::new(),
             damaged_by_this_turn: BTreeSet::new(),
             attacked_this_turn: BTreeSet::new(),
             attacked_creatures: BTreeSet::new(),
@@ -669,6 +693,7 @@ impl GameState {
             exiled_instead_of_graveyard: BTreeSet::new(),
             shuffled_instead_of_graveyard: BTreeSet::new(),
             linked_exile: Vec::new(),
+            exiled_with: Vec::new(),
             damage_shields: Vec::new(),
             next_shield: 0,
             combat: Combat::default(),
@@ -676,6 +701,7 @@ impl GameState {
             last_known: BTreeMap::new(),
             triggered_this_turn: BTreeMap::new(),
             activated_this_turn: BTreeMap::new(),
+            activated_ever: Default::default(),
             loyalty_activated_this_turn: Default::default(),
             done_once_this_turn: Default::default(),
             delayed: Vec::new(),
@@ -732,5 +758,161 @@ impl GameState {
 
     pub fn player(&self, p: PlayerId) -> &PlayerState {
         &self.players[&p]
+    }
+}
+
+#[cfg(feature = "verification")]
+pub(crate) struct DiagnosticState<'a>(pub &'a GameState);
+#[cfg(feature = "verification")]
+impl serde::Serialize for DiagnosticState<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // Keep this pattern exhaustive: new state fields require an explicit
+        // diagnostic/canonicalization decision rather than silently disappearing.
+        let GameState {
+            objects: _,
+            zone_order: _,
+            players: _,
+            turn_order: _,
+            turn: _,
+            active_player: _,
+            step: _,
+            priority: _,
+            consecutive_passes: _,
+            continuous: _,
+            prevent_combat_damage: _,
+            damage_unpreventable: _,
+            prevent_damage_to: _,
+            upkeeps: _,
+            linked_exile: _,
+            exiled_with: _,
+            exiled_instead_of_graveyard: _,
+            shuffled_instead_of_graveyard: _,
+            day: _,
+            attacked_this_turn: _,
+            attacked_creatures: _,
+            extra_combats: _,
+            owed_combat: _,
+            damaged_this_turn: _,
+            lost_life_this_turn: _,
+            gained_life_this_turn: _,
+            life_gained_amount: _,
+            damaged_by_this_turn: _,
+            spells_cast_this_turn: _,
+            spells_by_player: _,
+            spells_by_player_last_turn: _,
+            draws_this_turn: _,
+            died_this_turn: _,
+            monarch: _,
+            extra_turns: _,
+            rotation_from: _,
+            skipped_turns: _,
+            no_life_gain: _,
+            life_gain_boost: _,
+            sees_top: _,
+            top_revealed: _,
+            revealed_cards: _,
+            looked_at: _,
+            exile_if_dies_now: _,
+            monarch_emblem: _,
+            damage_shields: _,
+            next_shield: _,
+            combat: _,
+            pending_triggers: _,
+            last_known: _,
+            triggered_this_turn: _,
+            delayed: _,
+            next_delayed: _,
+            activated_this_turn: _,
+            activated_ever: _,
+            loyalty_activated_this_turn: _,
+            done_once_this_turn: _,
+            scanned_upto: _,
+            commander: _,
+            pregame: _,
+            rng: _,
+            generation: _,
+            next_event: _,
+            next_object: _,
+        } = self.0;
+        let mut out = serializer.serialize_struct("GameStateDiagnostic", 63)?;
+        out.serialize_field("objects", &self.0.objects)?;
+        out.serialize_field("zone_order", &self.0.zone_order)?;
+        out.serialize_field("players", &self.0.players)?;
+        out.serialize_field("turn_order", &self.0.turn_order)?;
+        out.serialize_field("turn", &self.0.turn)?;
+        out.serialize_field("active_player", &self.0.active_player)?;
+        out.serialize_field("step", &self.0.step)?;
+        out.serialize_field("priority", &self.0.priority)?;
+        out.serialize_field("consecutive_passes", &self.0.consecutive_passes)?;
+        out.serialize_field("continuous", &self.0.continuous)?;
+        out.serialize_field("prevent_combat_damage", &self.0.prevent_combat_damage)?;
+        out.serialize_field("damage_unpreventable", &self.0.damage_unpreventable)?;
+        out.serialize_field("prevent_damage_to", &self.0.prevent_damage_to)?;
+        out.serialize_field("upkeeps", &self.0.upkeeps)?;
+        out.serialize_field("linked_exile", &self.0.linked_exile)?;
+        out.serialize_field("exiled_with", &self.0.exiled_with)?;
+        out.serialize_field(
+            "exiled_instead_of_graveyard",
+            &self.0.exiled_instead_of_graveyard,
+        )?;
+        out.serialize_field(
+            "shuffled_instead_of_graveyard",
+            &self.0.shuffled_instead_of_graveyard,
+        )?;
+        out.serialize_field("day", &self.0.day)?;
+        out.serialize_field("attacked_this_turn", &self.0.attacked_this_turn)?;
+        out.serialize_field("attacked_creatures", &self.0.attacked_creatures)?;
+        out.serialize_field("extra_combats", &self.0.extra_combats)?;
+        out.serialize_field("owed_combat", &self.0.owed_combat)?;
+        out.serialize_field("damaged_this_turn", &self.0.damaged_this_turn)?;
+        out.serialize_field("lost_life_this_turn", &self.0.lost_life_this_turn)?;
+        out.serialize_field("gained_life_this_turn", &self.0.gained_life_this_turn)?;
+        out.serialize_field("life_gained_amount", &self.0.life_gained_amount)?;
+        out.serialize_field("damaged_by_this_turn", &self.0.damaged_by_this_turn)?;
+        out.serialize_field("spells_cast_this_turn", &self.0.spells_cast_this_turn)?;
+        out.serialize_field("spells_by_player", &self.0.spells_by_player)?;
+        out.serialize_field(
+            "spells_by_player_last_turn",
+            &self.0.spells_by_player_last_turn,
+        )?;
+        out.serialize_field("draws_this_turn", &self.0.draws_this_turn)?;
+        out.serialize_field("died_this_turn", &self.0.died_this_turn)?;
+        out.serialize_field("monarch", &self.0.monarch)?;
+        out.serialize_field("extra_turns", &self.0.extra_turns)?;
+        out.serialize_field("rotation_from", &self.0.rotation_from)?;
+        out.serialize_field("skipped_turns", &self.0.skipped_turns)?;
+        out.serialize_field("no_life_gain", &self.0.no_life_gain)?;
+        out.serialize_field("life_gain_boost", &self.0.life_gain_boost)?;
+        out.serialize_field("sees_top", &self.0.sees_top)?;
+        out.serialize_field("top_revealed", &self.0.top_revealed)?;
+        out.serialize_field("revealed_cards", &self.0.revealed_cards)?;
+        out.serialize_field("looked_at", &self.0.looked_at)?;
+        out.serialize_field("exile_if_dies_now", &self.0.exile_if_dies_now)?;
+        out.serialize_field("monarch_emblem", &self.0.monarch_emblem)?;
+        out.serialize_field("damage_shields", &self.0.damage_shields)?;
+        out.serialize_field("next_shield", &self.0.next_shield)?;
+        out.serialize_field("combat", &self.0.combat)?;
+        out.serialize_field("pending_triggers", &self.0.pending_triggers)?;
+        out.serialize_field("last_known", &self.0.last_known)?;
+        out.serialize_field("triggered_this_turn", &self.0.triggered_this_turn)?;
+        out.serialize_field("delayed", &self.0.delayed)?;
+        out.serialize_field("next_delayed", &self.0.next_delayed)?;
+        out.serialize_field("activated_this_turn", &self.0.activated_this_turn)?;
+        out.serialize_field("activated_ever", &self.0.activated_ever)?;
+        out.serialize_field(
+            "loyalty_activated_this_turn",
+            &self.0.loyalty_activated_this_turn,
+        )?;
+        out.serialize_field("done_once_this_turn", &self.0.done_once_this_turn)?;
+        out.serialize_field("scanned_upto", &self.0.scanned_upto)?;
+        out.serialize_field("commander", &self.0.commander)?;
+        out.serialize_field("pregame", &self.0.pregame)?;
+        out.serialize_field("rng", &self.0.rng)?;
+        // This clock also timestamps new rules effects and upkeep history.
+        // Canonicalization preserves its relation to existing timestamps.
+        out.serialize_field("generation", &self.0.generation)?;
+        out.serialize_field("allocation_cursor", &ObjectId(self.0.next_object))?;
+        out.end()
     }
 }

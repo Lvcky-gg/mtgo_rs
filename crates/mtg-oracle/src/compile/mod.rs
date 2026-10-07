@@ -599,6 +599,31 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
             None,
         );
     }
+    // The old Oblivion Ring: "When ~ enters, exile …" and "When ~ leaves the battlefield,
+    // return the exiled card …" are linked; without an exile to link, it isn't understood.
+    let returns = out.abilities.iter().any(|a| match &a.kind {
+        AbilityKind::Triggered { effect, .. } => returns_exiled(effect),
+        _ => false,
+    });
+    if returns {
+        let mut linked = false;
+        for a in &mut out.abilities {
+            if let AbilityKind::Triggered { trigger, effect } = &mut a.kind
+                && matches!(
+                    trigger.on,
+                    EventPattern::Enters {
+                        who: ObjectFilter::IsSelf
+                    }
+                )
+            {
+                linked |= link_exile(effect);
+            }
+        }
+        if !linked {
+            out.unparsed
+                .push("returns exiled cards it never exiled".into());
+        }
+    }
     // Each results table goes to the next roll without one, in order.
     if !tables.is_empty() {
         let mut tables = tables.into_iter();
@@ -630,6 +655,43 @@ fn mark_once_each_turn(e: &mut Effect) -> bool {
         Effect::If {
             then, otherwise, ..
         } if **otherwise == Effect::Nothing => mark_once_each_turn(then),
+        _ => false,
+    }
+}
+
+fn returns_exiled(e: &Effect) -> bool {
+    match e {
+        Effect::ReturnExiledWith { .. } => true,
+        Effect::Sequence(items) => items.iter().any(returns_exiled),
+        Effect::May { then, .. } | Effect::MayPay { then, .. } => returns_exiled(then),
+        _ => false,
+    }
+}
+
+/// Turn an enters trigger's exile into one remembered with its source.
+fn link_exile(e: &mut Effect) -> bool {
+    match e {
+        Effect::MoveZone {
+            what,
+            to: Zone::Exile,
+            under_control_of: None,
+            face_down: false,
+            ..
+        } => {
+            *e = Effect::ExileLinked { what: what.clone() };
+            true
+        }
+        Effect::Sequence(items) => {
+            let mut any = false;
+            for i in items {
+                any |= link_exile(i);
+            }
+            any
+        }
+        Effect::May { then, .. } | Effect::MayPay { then, .. } => link_exile(then),
+        Effect::If {
+            then, otherwise, ..
+        } => link_exile(then) | link_exile(otherwise),
         _ => false,
     }
 }
@@ -1169,6 +1231,33 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     };
     let line = words::strip_ability_word(line);
 
+    // CR 702.177 — "Exhaust — {2}{R}: …": activated only once. CR 702.142 — "Boast —
+    // {1}{R}: …": only if this creature attacked this turn, and only once each turn.
+    for (lead, boast) in [("exhaust — ", false), ("boast — ", true)] {
+        if let Some(rest) = line.strip_prefix(lead)
+            && let Some(mut kind) = activated(rest, cx)
+            && let AbilityKind::Activated {
+                cost,
+                timing: timing @ ActivationTiming::Instant,
+                ..
+            } = &mut kind
+        {
+            if boast {
+                *timing = ActivationTiming::InstantOncePerTurn;
+                cost.timing
+                    .push(mtg_ir::trigger::Condition::Exists(Selector::All {
+                        zone: Zone::Battlefield,
+                        filter: ObjectFilter::And(vec![
+                            ObjectFilter::IsSelf,
+                            ObjectFilter::AttackedThisTurn,
+                        ]),
+                    }));
+            } else {
+                *timing = ActivationTiming::Exhaust;
+            }
+            return one(kind, cx);
+        }
+    }
     // "Whenever you gain life, you may put that many +1/+1 counters on each creature you
     // control. Do this only once each turn." — only doing it counts, not declining.
     if let Some(head) = line.strip_suffix(" do this only once each turn.")
@@ -2554,6 +2643,9 @@ pub(crate) struct Cx<'a> {
     pub while_: Option<mtg_ir::trigger::Condition>,
     /// "… for the first time each turn": the trigger's wording limits it to once a turn.
     pub once: bool,
+    /// Whether an earlier clause of this effect created tokens (bound as "it"), so "all
+    /// other creatures" means other than those too (Martial Coup).
+    pub made_tokens: bool,
 }
 
 impl<'a> Cx<'a> {
@@ -2574,6 +2666,7 @@ impl<'a> Cx<'a> {
             batch: false,
             while_: None,
             once: false,
+            made_tokens: false,
         }
     }
 
@@ -3411,9 +3504,47 @@ fn triggered(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
                 }),
             })
         });
-    let effect = match kinship {
-        Some(e) => e,
-        None => clauses::effect(body, cx)?,
+    // The old Oblivion Ring: "When ~ leaves the battlefield, return the exiled card to the
+    // battlefield under its owner's control." — paired with its enters trigger's exile by
+    // `compile`.
+    let returned = matches!(
+        on,
+        EventPattern::Leaves {
+            who: ObjectFilter::IsSelf
+        }
+    )
+    .then(|| {
+        [
+            (
+                "return the exiled card to the battlefield under its owner's control.",
+                Zone::Battlefield,
+                false,
+            ),
+            (
+                "return the exiled cards to the battlefield under their owners' control.",
+                Zone::Battlefield,
+                false,
+            ),
+            (
+                "return the exiled cards to the battlefield tapped under their owners' \
+                     control.",
+                Zone::Battlefield,
+                true,
+            ),
+            (
+                "return the exiled cards to their owner's graveyard.",
+                Zone::Graveyard,
+                false,
+            ),
+        ]
+        .into_iter()
+        .find(|(phrase, _, _)| body == *phrase)
+        .map(|(_, to, tapped)| Effect::ReturnExiledWith { to, tapped })
+    })
+    .flatten();
+    let effect = match (kinship, returned) {
+        (Some(e), _) | (None, Some(e)) => e,
+        (None, None) => clauses::effect(body, cx)?,
     };
     if let Some(c) = cx.while_.take() {
         intervening_if = Some(match intervening_if {
@@ -3611,6 +3742,67 @@ fn self_trigger(r: &str) -> Option<Condition<'_>> {
             EventPattern::BecomesBlocked { who: me.clone() },
             normal,
         ),
+        // "Your graveyard": only if you own it.
+        (
+            "is put into your graveyard from the battlefield",
+            EventPattern::Dies {
+                who: ObjectFilter::And(vec![
+                    me.clone(),
+                    ObjectFilter::OwnedBy(Box::new(Selector::You)),
+                ]),
+            },
+            leaves,
+        ),
+        (
+            "deals combat damage to a player or planeswalker",
+            EventPattern::AnyOf(vec![
+                EventPattern::DealsDamage {
+                    source: me.clone(),
+                    to: DamageRecipient::Player(Selector::EachPlayer),
+                    combat_only: true,
+                },
+                EventPattern::DealsDamage {
+                    source: me.clone(),
+                    to: DamageRecipient::Object(ObjectFilter::HasType(CardType::Planeswalker)),
+                    combat_only: true,
+                },
+            ]),
+            normal,
+        ),
+        (
+            "deals combat damage to a player or battle",
+            EventPattern::AnyOf(vec![
+                EventPattern::DealsDamage {
+                    source: me.clone(),
+                    to: DamageRecipient::Player(Selector::EachPlayer),
+                    combat_only: true,
+                },
+                EventPattern::DealsDamage {
+                    source: me.clone(),
+                    to: DamageRecipient::Object(ObjectFilter::HasType(CardType::Battle)),
+                    combat_only: true,
+                },
+            ]),
+            normal,
+        ),
+        (
+            "deals combat damage to a creature",
+            EventPattern::DealsDamage {
+                source: me.clone(),
+                to: DamageRecipient::Object(ObjectFilter::HasType(CardType::Creature)),
+                combat_only: true,
+            },
+            normal,
+        ),
+        (
+            "deals damage to a creature",
+            EventPattern::DealsDamage {
+                source: me.clone(),
+                to: DamageRecipient::Object(ObjectFilter::HasType(CardType::Creature)),
+                combat_only: false,
+            },
+            normal,
+        ),
         (
             "deals combat damage to a player",
             EventPattern::DealsDamage {
@@ -3660,6 +3852,185 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
     let leaves = TriggerTiming::LeavesBattlefield;
     let subject = Some(Selector::Bound(mtg_ir::selector::Binding::EventSubject));
 
+    // "Whenever enchanted player is attacked".
+    if let Some(rest) = line
+        .strip_prefix("whenever enchanted player is attacked")
+        .filter(|r| r.starts_with(','))
+    {
+        return Some((
+            EventPattern::AttacksPlayer {
+                who: ObjectFilter::HasType(CardType::Creature),
+                player: Selector::EnchantedPlayer,
+                or_planeswalkers: false,
+            },
+            normal,
+            subject,
+            rest,
+        ));
+    }
+    // "When enchanted creature becomes the target of a spell or ability".
+    if let Some(r) = line
+        .strip_prefix("whenever ")
+        .or_else(|| line.strip_prefix("when "))
+        && let Some(r) =
+            r.strip_prefix("enchanted creature becomes the target of a spell or ability")
+    {
+        let rest = turn_qualifier(r, cx);
+        if rest.starts_with(',') {
+            return Some((
+                EventPattern::BecomesTarget {
+                    who: ObjectFilter::AttachedToSelf,
+                    by: Selector::EachPlayer,
+                },
+                normal,
+                subject,
+                rest,
+            ));
+        }
+    }
+    // "Whenever a source deals damage to this creature": it is dealt damage.
+    if let Some(rest) = line
+        .strip_prefix("whenever a source deals damage to ~")
+        .filter(|r| r.starts_with(','))
+    {
+        return Some((
+            EventPattern::TakesDamage {
+                who: ObjectFilter::IsSelf,
+                combat_only: false,
+            },
+            normal,
+            Some(Selector::SelfSource),
+            rest,
+        ));
+    }
+    // "Whenever a creature deals combat damage to you".
+    if let Some(r) = line
+        .strip_prefix("whenever a ")
+        .or_else(|| line.strip_prefix("whenever an "))
+        && let Some((noun, r)) = nouns::noun(r, cx)
+        && noun.zone == Zone::Battlefield
+        && !noun.plural
+        && let Some(rest) = r.strip_prefix(" deals combat damage to you")
+        && rest.starts_with(',')
+    {
+        return Some((
+            EventPattern::DealsDamage {
+                source: noun.filter,
+                to: DamageRecipient::Player(Selector::You),
+                combat_only: true,
+            },
+            normal,
+            subject,
+            rest,
+        ));
+    }
+    // "Whenever a creature attacks you or a planeswalker you control", "whenever a creature
+    // an opponent controls attacks you".
+    if let Some(r) = line
+        .strip_prefix("whenever a ")
+        .or_else(|| line.strip_prefix("whenever an "))
+        && let Some((noun, r)) = nouns::noun(r, cx)
+        && noun.zone == Zone::Battlefield
+        && !noun.plural
+        && let Some(r) = r.strip_prefix(" attacks you")
+    {
+        let (or_planeswalkers, rest) = match r.strip_prefix(" or a planeswalker you control") {
+            Some(r) => (true, r),
+            None => (false, r),
+        };
+        if rest.starts_with(',') {
+            return Some((
+                EventPattern::AttacksPlayer {
+                    who: noun.filter,
+                    player: Selector::You,
+                    or_planeswalkers,
+                },
+                normal,
+                subject,
+                rest,
+            ));
+        }
+    }
+    // "Whenever one or more cards leave your graveyard", "… creature cards …": once for
+    // each batch of cards leaving it.
+    if let Some(r) = line.strip_prefix("whenever one or more ") {
+        let (quality, r) = match r.strip_prefix("cards") {
+            Some(r) => (None, r),
+            None => {
+                let (w, r) = words::first_word(r);
+                match (words::card_type(w), r.strip_prefix(" cards")) {
+                    (Some((t, _)), Some(r)) => (Some(ObjectFilter::HasType(t)), r),
+                    _ => (None, ""),
+                }
+            }
+        };
+        if let Some(rest) = r.strip_prefix(" leave your graveyard")
+            && rest.starts_with(',')
+        {
+            cx.batch = true;
+            let mine = ObjectFilter::OwnedBy(Box::new(Selector::You));
+            let who = match quality {
+                Some(q) => ObjectFilter::And(vec![mine, q]),
+                None => mine,
+            };
+            return Some((
+                EventPattern::ZoneChange {
+                    who,
+                    from: Some(Zone::Graveyard),
+                    to: None,
+                },
+                normal,
+                None,
+                rest,
+            ));
+        }
+    }
+    // "Whenever one or more +1/+1 counters are put on this creature", "whenever a +1/+1
+    // counter is put on a creature you control": one event per placement.
+    if let Some(r) = line
+        .strip_prefix("whenever ")
+        .or_else(|| line.strip_prefix("when "))
+        && let Some((plural, r)) = r
+            .strip_prefix("one or more ")
+            .map(|r| (true, r))
+            .or_else(|| r.strip_prefix("a ").map(|r| (false, r)))
+        && let Some((kind, r)) = words::counter(r)
+        && let Some(r) = if plural {
+            r.strip_prefix("s are put on ")
+        } else {
+            r.strip_prefix(" is put on ")
+        }
+    {
+        if let Some(rest) = r.strip_prefix('~') {
+            return Some((
+                EventPattern::CounterPlaced {
+                    on: ObjectFilter::IsSelf,
+                    kind,
+                },
+                normal,
+                Some(Selector::SelfSource),
+                rest,
+            ));
+        }
+        if let Some((noun, rest)) = r
+            .strip_prefix("a ")
+            .or_else(|| r.strip_prefix("an "))
+            .and_then(|r| nouns::noun(r, cx))
+            && noun.zone == Zone::Battlefield
+            && !noun.plural
+        {
+            return Some((
+                EventPattern::CounterPlaced {
+                    on: noun.filter,
+                    kind,
+                },
+                normal,
+                subject,
+                rest,
+            ));
+        }
+    }
+
     if let Some(r) = line
         .strip_prefix("at the beginning of ")
         .map(|r| r.strip_prefix("the ").unwrap_or(r))
@@ -3695,6 +4066,16 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
                 Selector::You,
             ),
             ("each combat", Step::BeginCombat, Selector::EachPlayer),
+            (
+                "combat on each opponent's turn",
+                Step::BeginCombat,
+                Selector::Opponents,
+            ),
+            (
+                "each player's first main phase",
+                Step::PrecombatMain,
+                Selector::EachPlayer,
+            ),
             ("your first main phase", Step::PrecombatMain, Selector::You),
             (
                 "your postcombat main phase",
@@ -3808,6 +4189,21 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
         if let Some(r) = r.strip_prefix(phrase) {
             return Some((pattern, normal, None, r));
         }
+    }
+    // "you scry or surveil": either.
+    if let Some(r) = r.strip_prefix("you scry or surveil")
+        && (r.is_empty() || r.starts_with(','))
+    {
+        let scried = |surveil| EventPattern::Scried {
+            whose: Selector::You,
+            surveil,
+        };
+        return Some((
+            EventPattern::AnyOf(vec![scried(false), scried(true)]),
+            normal,
+            None,
+            r,
+        ));
     }
     // "you scry", "you surveil".
     for (phrase, surveil) in [("you scry", false), ("you surveil", true)] {
@@ -3969,7 +4365,8 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
             let it = if it == it2 { it } else { None };
             return Some((EventPattern::AnyOf(vec![on, on2]), timing, it, rest));
         }
-        return Some((on, timing, it, r));
+        // "… for the first time each turn".
+        return Some((on, timing, it, turn_qualifier(r, cx)));
     }
 
     // "a player casts a white spell", "an opponent casts a spell".
@@ -4076,11 +4473,41 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
     }
     // "you cast your second spell each turn".
     for (prefix, n) in [
+        ("you cast your first spell each turn", 1),
         ("you cast your second spell each turn", 2),
         ("you cast your third spell each turn", 3),
     ] {
         if let Some(r) = r.strip_prefix(prefix) {
             return Some((EventPattern::NthSpellCast { n }, normal, subject, r));
+        }
+    }
+    // "you cast a kicked spell", "you cast a spell from your graveyard", "… from anywhere
+    // other than your hand", "… with {X} in its mana cost".
+    for (phrase, quality) in [
+        ("you cast a kicked spell", ObjectFilter::Kicked),
+        (
+            "you cast a spell from your graveyard",
+            ObjectFilter::CastFromZone(Zone::Graveyard),
+        ),
+        (
+            "you cast a spell from anywhere other than your hand",
+            ObjectFilter::Not(Box::new(ObjectFilter::CastFromZone(Zone::Hand))),
+        ),
+        (
+            "you cast a spell with {x} in its mana cost",
+            ObjectFilter::HasXInCost,
+        ),
+    ] {
+        if let Some(r) = r.strip_prefix(phrase) {
+            return Some((
+                EventPattern::Cast {
+                    who: ObjectFilter::And(vec![ObjectFilter::IsSpell, quality]),
+                    by: Selector::You,
+                },
+                normal,
+                subject,
+                r,
+            ));
         }
     }
     // "you cast a creature spell", "you gain life".
@@ -4098,6 +4525,20 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
             },
             normal,
             subject,
+            r,
+        ));
+    }
+    // "you discard one or more cards": once for each batch discarded together.
+    if let Some(r) = r.strip_prefix("you discard one or more cards")
+        && r.starts_with(',')
+    {
+        cx.batch = true;
+        return Some((
+            EventPattern::Discards {
+                whose: Selector::You,
+            },
+            normal,
+            None,
             r,
         ));
     }
@@ -4348,6 +4789,10 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
         (" becomes untapped", normal),
         (" is dealt damage", normal),
         (" is dealt combat damage", normal),
+        (" deals combat damage to a player or planeswalker", normal),
+        (" deals combat damage to a player or battle", normal),
+        (" deals combat damage to a creature", normal),
+        (" deals damage to a creature", normal),
         (" deals combat damage to a player", normal),
         (" deals combat damage to an opponent", normal),
         (" deals damage to an opponent", normal),
@@ -4388,6 +4833,34 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
                 to: DamageRecipient::Player(Selector::EachPlayer),
                 combat_only: true,
             },
+            // "… to a player or planeswalker": either kind of recipient.
+            " deals combat damage to a player or planeswalker"
+            | " deals combat damage to a player or battle" => {
+                let kind = if phrase.ends_with("planeswalker") {
+                    CardType::Planeswalker
+                } else {
+                    CardType::Battle
+                };
+                EventPattern::AnyOf(vec![
+                    EventPattern::DealsDamage {
+                        source: who.clone(),
+                        to: DamageRecipient::Player(Selector::EachPlayer),
+                        combat_only: true,
+                    },
+                    EventPattern::DealsDamage {
+                        source: who,
+                        to: DamageRecipient::Object(ObjectFilter::HasType(kind)),
+                        combat_only: true,
+                    },
+                ])
+            }
+            " deals combat damage to a creature" | " deals damage to a creature" => {
+                EventPattern::DealsDamage {
+                    source: who,
+                    to: DamageRecipient::Object(ObjectFilter::HasType(CardType::Creature)),
+                    combat_only: phrase.contains("combat"),
+                }
+            }
             " deals combat damage to an opponent" | " deals damage to an opponent" => {
                 EventPattern::DealsDamage {
                     source: who,
@@ -5031,6 +5504,36 @@ fn cost(text: &str, cx: &Cx) -> Option<Cost> {
                 filter: ObjectFilter::IsSelf,
                 at_random: false,
             });
+        } else if let Some(r) = part.strip_prefix("mill ")
+            && let Some((n, r)) = words::number(r)
+            && r == if n == 1 { " card" } else { " cards" }
+        {
+            out.additional.push(AdditionalCost::Mill {
+                count: Value::Fixed(n),
+            });
+        } else if let Some(r) = part.strip_prefix("put ")
+            && let Some((n, r)) = words::number(r)
+            && let Some((kind, r)) = r.strip_prefix(' ').and_then(words::counter)
+            && r == if n == 1 { " on ~" } else { "s on ~" }
+        {
+            out.additional.push(AdditionalCost::PutCounters {
+                kind,
+                amount: Value::Fixed(n),
+            });
+        } else if part == "return ~ to its owner's hand" {
+            // Returning the source itself: the only candidate is the source.
+            out.additional.push(AdditionalCost::ReturnToHand {
+                filter: ObjectFilter::IsSelf,
+                count: Value::ONE,
+            });
+        } else if let Some(c) = return_hand_cost(part, cx) {
+            out.additional.push(c);
+        } else if part == "exile ~" {
+            out.additional.push(AdditionalCost::ExileFrom {
+                zone: Zone::Battlefield,
+                filter: ObjectFilter::IsSelf,
+                count: Value::ONE,
+            });
         } else if part == "exile ~ from your graveyard" {
             out.additional.push(AdditionalCost::ExileFrom {
                 zone: Zone::Graveyard,
@@ -5338,6 +5841,27 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
             modification: Modification::SetBasePowerToughness {
                 power: v.clone(),
                 toughness: v,
+            },
+            condition: None,
+        }]);
+    }
+    // Tarmogoyf: "~'s power is equal to the number of card types among cards in all
+    // graveyards and its toughness is equal to that number plus 1."
+    if let Some(r) = line.strip_prefix("~'s power is equal to ")
+        && face.card_types.contains(&CardType::Creature)
+        && let Some((v, r)) = clauses::value_phrase(r, cx)
+        && let Some(r) = r.strip_prefix(" and its toughness is equal to that number")
+    {
+        let plus = match r.strip_prefix(" plus ").and_then(words::number) {
+            Some((n, "")) => n,
+            _ if r.is_empty() => 0,
+            _ => return None,
+        };
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::SetBasePowerToughness {
+                power: v.clone(),
+                toughness: Value::Sum(vec![v, Value::Fixed(plus)]),
             },
             condition: None,
         }]);

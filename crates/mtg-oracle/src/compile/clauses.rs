@@ -136,14 +136,43 @@ pub fn effect(text: &str, cx: &mut Cx) -> Option<Effect> {
             rest = r.strip_prefix(". ")?;
             continue;
         }
+        // "You may search your library and/or graveyard for a card named Ajani, Inspiring
+        // Leader, reveal it, and put it into your hand. If you search your library this
+        // way, shuffle."
+        if let Some(r) =
+            rest.strip_prefix("you may search your library and/or graveyard for a card named ")
+            && let Some((name, r)) = r.split_once(", reveal it, and put it into your hand")
+            && !name.is_empty()
+            && !name.contains('~')
+        {
+            let r = r
+                .strip_prefix(". if you search your library this way, shuffle")
+                .unwrap_or(r);
+            out.push(Effect::SearchLibraryAndGraveyard {
+                filter: mtg_ir::ObjectFilter::Named(name.to_owned()),
+            });
+            if r.is_empty() {
+                break;
+            }
+            rest = r.strip_prefix(". ")?;
+            continue;
+        }
         // "Roll a d20." (its results table, if any, is attached by `compile`), and "Roll a
         // d20. You create … equal to the result.": the rest reads the number rolled.
-        if let Some(r) = rest.strip_prefix("roll a d")
-            && let Some(end) = r.find(|c: char| !c.is_ascii_digit()).or(Some(r.len()))
-            && let Ok(sides) = r[..end].parse::<u32>()
-            && sides > 1
+        // "roll a six-sided die" is the older wording of "roll a d6".
+        let worded = rest
+            .strip_prefix("roll a ")
+            .and_then(|r| r.split_once("-sided die"))
+            .and_then(|(n, r)| match words::number(n)? {
+                (n, "") => Some((n as u32, r)),
+                _ => None,
+            });
+        if let Some((sides, r)) = worded.or_else(|| {
+            let r = rest.strip_prefix("roll a d")?;
+            let end = r.find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len());
+            Some((r[..end].parse::<u32>().ok()?, &r[end..]))
+        }) && sides > 1
         {
-            let r = &r[end..];
             let then = match r.strip_prefix(". ") {
                 Some(after) => effect(after, cx)?,
                 None if r.is_empty() => Effect::Nothing,
@@ -202,6 +231,13 @@ pub fn effect(text: &str, cx: &mut Cx) -> Option<Effect> {
         if let Some((guarded, after)) = guard_suffix(&e, r, cx) {
             e = guarded;
             r = after;
+        }
+        let made = match &e {
+            Effect::Sequence(items) => items.first(),
+            one => Some(one),
+        };
+        if matches!(made, Some(Effect::CreateToken { .. })) {
+            cx.made_tokens = true;
         }
         out.push(e);
         if r.is_empty() {
@@ -582,6 +618,7 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         sacrifice_you,
         search,
         attach,
+        double_counters,
         reveal_random,
         becomes_chosen,
         its_controller_may,
@@ -798,6 +835,28 @@ fn shielded<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, &'s str)> {
     }
     let (to, r) = nouns::recipient(s, cx)?;
     matches!(to, Selector::Target { .. } | Selector::SelfSource).then_some((to, r))
+}
+
+/// "double the number of +1/+1 counters on target creature": as many again, on one object.
+fn double_counters<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("double the number of ")?;
+    let (kind, r) = words::counter(r)?;
+    let r = r.strip_prefix("s on ")?;
+    let mut trial = cx.clone();
+    let (what, plural, r) = nouns::object(r, &mut trial)?;
+    if plural {
+        return None;
+    }
+    battlefield_only(&what, &trial)?;
+    *cx = trial;
+    Some((
+        Effect::AddCounters {
+            what: what.clone(),
+            kind,
+            amount: Value::Counters(Box::new(what), kind),
+        },
+        r,
+    ))
 }
 
 /// "target opponent reveals a card at random from their hand": "that card" is then the
@@ -2400,6 +2459,20 @@ fn doesnt_untap<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         (what, r)
     };
     battlefield_only(&what, cx)?;
+    // "It doesn't untap during its controller's untap step for as long as ~ remains
+    // tapped" (the tappers).
+    if let Some(r) = r.strip_prefix(
+        " doesn't untap during its controller's untap step for as long as ~ remains tapped",
+    ) {
+        return Some((
+            Effect::Continuous {
+                what,
+                modification: Modification::Restriction(Restriction::CantUntapDuringUntapStep),
+                duration: Duration::WhileSourceTapped,
+            },
+            r,
+        ));
+    }
     let r = r
         .strip_prefix(" doesn't untap during its controller's next untap step")
         .or_else(|| r.strip_prefix(" don't untap during their controller's next untap step"))
@@ -3213,6 +3286,33 @@ fn player_verb<'s>(
             r,
         ));
     }
+    // "target opponent exiles a creature they control": that player picks one of theirs.
+    if !bare
+        && let Some(r) = verb(r, "exile")
+        && let Some(r) = r.strip_prefix(" a ").or_else(|| r.strip_prefix(" an "))
+        && let Some((n, r)) = nouns::noun(r, cx)
+        && !n.plural
+        && n.zone == Zone::Battlefield
+        && let Some(r) = r
+            .strip_prefix(" they control")
+            .or_else(|| r.strip_prefix(" of their choice"))
+    {
+        let mine = mtg_ir::ObjectFilter::ControlledBy(Box::new(Selector::You));
+        let chosen = Selector::ChosenBy {
+            chooser: Box::new(Selector::You),
+            zone: Zone::Battlefield,
+            filter: mtg_ir::ObjectFilter::And(vec![n.filter, mine]),
+            count: Value::ONE,
+            up_to: false,
+        };
+        return Some((
+            Effect::AsPlayer {
+                who,
+                body: Box::new(move_zone(chosen, Zone::Exile, ZonePosition::Natural)),
+            },
+            r,
+        ));
+    }
     if let Some(r) = verb(r, "sacrifice") {
         // "sacrifices a creature": the player chooses one they control. "Sacrifice another
         // creature": one other than this.
@@ -3453,6 +3553,8 @@ fn pump<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         (Duration::UntilEndOfCombat, r)
     } else if let Some(r) = r.strip_prefix(" until your next turn") {
         (Duration::UntilYourNextTurn, r)
+    } else if let Some(r) = r.strip_prefix(" for as long as ~ remains tapped") {
+        (Duration::WhileSourceTapped, r)
     } else {
         (
             Duration::UntilEndOfTurn,
@@ -3778,6 +3880,8 @@ fn cant_block<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         (vec![Restriction::CantAttack, Restriction::CantBlock], r)
     } else if let Some(r) = r.strip_prefix(" can't block this turn") {
         (vec![Restriction::CantBlock], r)
+    } else if let Some(r) = r.strip_prefix(" can't block ~ this turn") {
+        (vec![Restriction::CantBlockSource], r)
     } else if let Some(r) = r.strip_prefix(" can't attack this turn") {
         (vec![Restriction::CantAttack], r)
     } else if let Some(r) = r
@@ -3988,8 +4092,54 @@ fn create_token<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     if let Some(r) = s.strip_prefix("investigate") {
         return Some((make_token(predefined("clue", cx)?, 1, false), r));
     }
+    // "target opponent creates a Treasure token", "each opponent creates a 1/1 …": the
+    // tokens are that player's (each player's, for several).
+    if !s.starts_with("create") {
+        let mut trial = cx.clone();
+        if let Some((who, _, r)) = nouns::player(s, &mut trial)
+            && who != Selector::You
+            && let Some(r) = r.strip_prefix(" creates ")
+        {
+            let owned = format!("create {r}");
+            let (mut e, rest) = create_token(&owned, &mut trial)?;
+            let made = match &mut e {
+                Effect::Sequence(items) => items.first_mut()?,
+                one => one,
+            };
+            let (Effect::CreateToken { controller, .. }
+            | Effect::CreateTokenCopy { controller, .. }) = made
+            else {
+                return None;
+            };
+            *controller = who;
+            *cx = trial;
+            return Some((e, &s[s.len() - rest.len()..]));
+        }
+    }
     // "create a number of Food tokens equal to the number of opponents you have": read as
     // "create two …", then that count.
+    // "create X 1/1 white Soldier creature tokens, where X is …" (X defined by the spell's
+    // cost or a "where X is" clause), "create that many 1/1 Insect tokens" (the event's
+    // amount).
+    if let Some(r) = s.strip_prefix("create ")
+        && let Some((count, r)) = amount(r, cx)
+        && !matches!(count, Value::Fixed(_))
+        && let Some(r) = r.strip_prefix(' ')
+    {
+        let owned = format!("create two {r}");
+        let (mut e, rest) = create_token(&owned, cx)?;
+        let made = match &mut e {
+            Effect::Sequence(items) => items.first_mut()?,
+            one => one,
+        };
+        let (Effect::CreateToken { count: c, .. } | Effect::CreateTokenCopy { count: c, .. }) =
+            made
+        else {
+            return None;
+        };
+        *c = count;
+        return Some((e, &s[s.len() - rest.len()..]));
+    }
     if let Some(r) = s
         .strip_prefix("create a number of ")
         .or_else(|| s.strip_prefix("you create a number of "))
@@ -4657,6 +4807,149 @@ fn equal_to<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
 
 /// "the number of creatures you control", "its power", "~'s toughness".
 pub fn value_phrase<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
+    // "7 minus the number of cards in their hand", "the number of cards in their hand
+    // minus 4".
+    if let Some((n, r)) = words::number(s)
+        && let Some(r) = r.strip_prefix(" minus ")
+        && let Some((v, r)) = value_phrase_base(r, cx)
+    {
+        return Some((
+            Value::Sum(vec![Value::Fixed(n), Value::Negate(Box::new(v))]),
+            r,
+        ));
+    }
+    let (v, r) = value_phrase_base(s, cx)?;
+    if let Some(after) = r.strip_prefix(" minus ")
+        && let Some((n, after)) = words::number(after)
+    {
+        return Some((Value::Sum(vec![v, Value::Fixed(-n)]), after));
+    }
+    Some((v, r))
+}
+
+fn value_phrase_base<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
+    if let Some(r) = s.strip_prefix("your life total") {
+        return Some((Value::LifeTotal(Box::new(Selector::You)), r));
+    }
+    if let Some(r) = s.strip_prefix("your starting life total") {
+        return Some((Value::StartingLife, r));
+    }
+    // Starting life totals are even, so half of one needs no rounding.
+    if let Some(r) = s.strip_prefix("half your starting life total")
+        && !r.starts_with(", rounded")
+    {
+        return Some((
+            Value::Half {
+                value: Box::new(Value::StartingLife),
+                up: false,
+            },
+            r,
+        ));
+    }
+    if let Some(r) = s.strip_prefix("your speed") {
+        return Some((Value::Speed, r));
+    }
+    if let Some(r) = s.strip_prefix("the amount of life you gained this turn") {
+        return Some((Value::LifeGainedThisTurn(Box::new(Selector::You)), r));
+    }
+    if let Some(r) = s.strip_prefix("the number of cards you've drawn this turn") {
+        return Some((Value::CardsDrawnThisTurn(Box::new(Selector::You)), r));
+    }
+    // "twice its power", "half your starting life total, rounded up", "1 plus the
+    // sacrificed creature's mana value".
+    if let Some(r) = s.strip_prefix("twice ")
+        && let Some((v, r)) = value_phrase(r, cx)
+    {
+        return Some((Value::Product(vec![Value::Fixed(2), v]), r));
+    }
+    if let Some(r) = s.strip_prefix("half ")
+        && let Some((v, r)) = value_phrase(r, cx)
+    {
+        let (up, r) = if let Some(r) = r.strip_prefix(", rounded up") {
+            (true, r)
+        } else {
+            (false, r.strip_prefix(", rounded down")?)
+        };
+        return Some((
+            Value::Half {
+                value: Box::new(v),
+                up,
+            },
+            r,
+        ));
+    }
+    if let Some((n, r)) = words::number(s)
+        && let Some(r) = r.strip_prefix(" plus ")
+        && let Some((v, r)) = value_phrase(r, cx)
+    {
+        return Some((Value::Sum(vec![Value::Fixed(n), v]), r));
+    }
+    // "the number of colors among permanents you control".
+    if let Some(r) = s.strip_prefix("the number of colors among ")
+        && let Some((what, r)) = super::conditions::counted(r, cx)
+    {
+        return Some((Value::ColorsAmong(Box::new(what)), r));
+    }
+    // "your devotion to green", "your devotion to black and red" (CR 700.5).
+    if let Some(r) = s.strip_prefix("your devotion to ") {
+        let (first, r) = words::first_word(r);
+        let mut colors = vec![words::color(first)?];
+        let r = match r.strip_prefix(" and ") {
+            Some(r2) => {
+                let (second, r2) = words::first_word(r2);
+                match words::color(second) {
+                    Some(c) => {
+                        colors.push(c);
+                        r2
+                    }
+                    None => r,
+                }
+            }
+            None => r,
+        };
+        return Some((Value::Devotion(colors), r));
+    }
+    // "the number of opponents you have", "the number of basic land types among lands you
+    // control": what "for each …" reads, in the plural.
+    for (plural, singular) in [
+        ("the number of opponents you have", "opponent you have"),
+        (
+            "the number of creatures in your party",
+            "creature in your party",
+        ),
+        (
+            "the number of basic land types among lands you control",
+            "basic land type among lands you control",
+        ),
+    ] {
+        if let Some(r) = s.strip_prefix(plural)
+            && let Some((v, "")) = per(singular, cx)
+        {
+            return Some((v, r));
+        }
+    }
+    // "the number of card types among cards in all graveyards" (delirium-like counts).
+    if let Some(r) = s.strip_prefix("the number of card types among cards in all graveyards") {
+        return Some((
+            Value::CardTypesAmong(Box::new(Selector::All {
+                zone: Zone::Graveyard,
+                filter: mtg_ir::ObjectFilter::Any,
+            })),
+            r,
+        ));
+    }
+    // "the number of charge counters on ~", "… on it", "… on this artifact".
+    if let Some(r) = s.strip_prefix("the number of ")
+        && let Some((kind, r)) = words::counter(r)
+        && let Some(r) = r.strip_prefix("s on ")
+    {
+        let (who, r) = if let Some(r) = r.strip_prefix('~') {
+            (Selector::SelfSource, r)
+        } else {
+            (cx.it.clone()?, r.strip_prefix("it")?)
+        };
+        return Some((Value::Counters(Box::new(who), kind), r));
+    }
     // "equal to the result", "where X is the result": the die just rolled.
     if let Some(r) = s.strip_prefix("the result") {
         return Some((Value::RollResult, r));
@@ -4719,16 +5012,32 @@ pub fn value_phrase<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
     .find_map(|p| s.strip_prefix(p));
     let (who, r) = if let Some(r) = sacrificed {
         (Selector::Bound(mtg_ir::selector::Binding::SACRIFICED), r)
-    } else if let Some(r) = s.strip_prefix("its ") {
+    } else if let Some(r) = s
+        .strip_prefix("its ")
+        .or_else(|| s.strip_prefix("their "))
+        .or_else(|| s.strip_prefix("his "))
+        .or_else(|| s.strip_prefix("her "))
+    {
         (cx.it.clone()?, r)
     } else if let Some(r) = s.strip_prefix("~'s ") {
         (Selector::SelfSource, r)
+    } else if let Some(r) = s.strip_prefix("the revealed card's ") {
+        // What `Effect::RevealRandom` bound — read later, whatever "it" is while parsing
+        // ("…, where X is the revealed card's mana value" is read before the reveal).
+        (Selector::Bound(mtg_ir::selector::Binding::It), r)
     } else {
-        let r = s
-            .strip_prefix("that creature's ")
-            .or_else(|| s.strip_prefix("that card's "))
-            .or_else(|| s.strip_prefix("the revealed card's "))?;
-        (cx.it.clone()?, r)
+        // "That spell" is never the source itself: a "where X is that spell's mana value"
+        // read before "counter target spell" would otherwise mean this permanent.
+        if let Some(r) = s.strip_prefix("that spell's ") {
+            let it = cx.it.clone().filter(|it| *it != Selector::SelfSource)?;
+            (it, r)
+        } else {
+            let r = s
+                .strip_prefix("that creature's ")
+                .or_else(|| s.strip_prefix("that card's "))
+                .or_else(|| s.strip_prefix("that permanent's "))?;
+            (cx.it.clone()?, r)
+        }
     };
     if let Some(r) = r.strip_prefix("power") {
         return Some((Value::Power(Box::new(who)), r));

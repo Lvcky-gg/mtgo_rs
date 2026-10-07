@@ -564,6 +564,16 @@ pub fn additional_payable(
         } => obj.counters.get(kind).copied().unwrap_or(0) >= *n,
         // CR 701.43c — a permanent can be exerted even if it is already exerted.
         A::Exert => true,
+        A::Mill {
+            count: Value::Fixed(n),
+        } => {
+            let library = mtg_core::ZoneRef::of(mtg_core::Zone::Library, who);
+            state.objects_in(library).len() as i32 >= *n
+        }
+        A::PutCounters {
+            amount: Value::Fixed(_),
+            ..
+        } => obj.zone.zone == mtg_core::Zone::Battlefield,
         // "Remove X storage counters", "remove any number of …": zero will do.
         A::RemoveCounters {
             what: Selector::SelfSource,
@@ -585,6 +595,12 @@ pub fn additional_payable(
             filter: mtg_ir::ObjectFilter::IsSelf,
             ..
         } => obj.zone.zone == mtg_core::Zone::Graveyard,
+        // "Exile this artifact".
+        A::ExileFrom {
+            zone: mtg_core::Zone::Battlefield,
+            filter: mtg_ir::ObjectFilter::IsSelf,
+            ..
+        } => obj.zone.zone == mtg_core::Zone::Battlefield,
         // "Discard this card" — cycling and friends, from the hand.
         A::Discard {
             count: Value::Fixed(1),

@@ -301,6 +301,12 @@ pub fn can_block(
         let Modification::Restriction(r) = &e.modification else {
             continue;
         };
+        if *r == Restriction::CantBlockSource {
+            if e.source == attacker && crate::layers::applies(state, cards, &e, blocker) {
+                return false;
+            }
+            continue;
+        }
         let (subject, filter, other) = match r {
             Restriction::CantBeBlockedExceptBy(f) => (attacker, f, blocker),
             Restriction::CanBlockOnly(f) => (blocker, f, attacker),
@@ -775,6 +781,7 @@ pub fn lethal_damage(
 
 /// One creature's combat damage assignment.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
 pub struct Assignment {
     pub source: ObjectId,
     pub deathtouch: bool,

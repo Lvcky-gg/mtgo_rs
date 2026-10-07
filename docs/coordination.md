@@ -1,5 +1,227 @@
 # Current work
 
+Codex (2026-10-07, Commander return choices): owner can accept/decline graveyard
+and exile returns once per new object, with APNAP decisions and simultaneous SBA
+application. Eight independent Commander tests, eight replays/four regressions,
+22-check PR campaign and four production mutants pass. See
+[session](sessions/2026-10-07-commander-return-choices.md).
+
+Codex (2026-10-07, Commander verification): shared Command representation fixed
+across casting/returns/monarch/session setup, with owner-only casting eligibility.
+Four independent golden tests, Commander replay and permanent regression added;
+20-check PR campaign and three compiled production mutants pass. Optional owner
+return decisions remain unverified. See
+[session](sessions/2026-10-07-commander-verification.md).
+
+Codex (2026-10-07, verification foundation): new `mtg-verify` scenario/replay,
+canonical/property/fuzz/differential/mutation/confidence and CI tooling. Independent
+campaign found and fixed eliminated-player priority/turn rotation; six replays,
+two regressions and final 18-check PR campaign pass. Closed-alpha assessments
+remain unknown and no primitive is VERIFIED. See
+[session and remaining scope](sessions/2026-10-07-agent-first-verification.md).
+
+Claude (2026-10-07, card coverage round 58 — COMPLETE): 17,154 → 17,165 / 34,913
+(49.2%); all 12 faces mine; zero lost against HEAD.
+- The old Oblivion Ring wording: an enters trigger's "exile …" plus "When ~ leaves the
+  battlefield, return the exiled card(s) …" → `Effect::ExileLinked` (remembered in
+  `state.exiled_with`) and `Effect::ReturnExiledWith`, paired by a post-pass in
+  `compile()`. Not "exile until ~ leaves": if the source is gone before the enters trigger
+  resolves, the card stays exiled (CR 610.3 doesn't apply to the two-ability version).
+  The leaves trigger's source is the card in the graveyard; the return follows the log's
+  zone changes back to the permanent that exiled.
+- A first version also caught Voyager Staff's delayed "return the exiled card" and lost it;
+  the return is now read only as the whole body of a self leaves trigger.
+- Tests: `activation_limits.rs` (+1).
+
+Claude (2026-10-07, card coverage round 57 — COMPLETE): 17,140 → 17,154 / 34,913
+(49.1%); all 14 faces mine; zero lost against HEAD.
+- Tarmogoyf's CDA: "~'s power is equal to <v> and its toughness is equal to that number
+  [plus N]" → `SetBasePowerToughness`.
+- `Restriction::CantBlockSource` — "target creature can't block ~ this turn" (checked in
+  `combat::can_block`).
+- Tests: `value_phrases.rs` (+2).
+
+Claude (2026-10-07, card coverage round 56 — COMPLETE): 17,120 → 17,140 / 34,913
+(49.1%); all 20 faces mine; zero lost against HEAD.
+- `Duration::WhileSourceTapped` — "for as long as ~ remains tapped" on pumps and the
+  tappers' "it doesn't untap during its controller's untap step for as long as ~ remains
+  tapped"; ends as the source untaps (`apply`, `TapChanged`) or leaves.
+- "Roll a six-sided die" (worded die sizes).
+- Tests: `activation_limits.rs` (+1).
+
+Claude (2026-10-07, card coverage round 55 — COMPLETE): 17,117 → 17,120 / 34,913
+(49.0%); 3 faces; zero lost against HEAD.
+- "<player> exiles a <noun> they control" → `AsPlayer` + a chosen `MoveZone` to exile.
+- Probed every player-subject sentence in not-understood lines (468 → 399 failing):
+  the rest is a long tail (mass sacrifice/return "all … they control", reveal follow-ups).
+- Tests: `its_controller_may.rs` (+1).
+
+Claude (2026-10-07, card coverage round 54 — COMPLETE): 17,058 → 17,117 / 34,913
+(49.0%); all 62 faces mine; zero lost against HEAD.
+- "<player> creates <tokens>" (any non-"you" `nouns::player` subject: "its controller",
+  "target opponent", "each player", "that player" …) → `CreateToken { controller }`:
+  Beast Within, Generous Gift, Crib Swap, An Offer You Can't Refuse, Afterlife.
+- Mass recipients "each creature and (each) planeswalker [you/your opponents/you don't
+  control]", "each creature, planeswalker, and battle".
+- Found by probing the bullets of modal blocks that are a card's only obstacle (412
+  distinct failing bullets — mostly long tail).
+- Tests: `create_number.rs` (+2).
+
+Claude (2026-10-07, card coverage round 53 — COMPLETE): 17,031 → 17,058 / 34,913
+(48.9%); all 27 faces mine; zero lost against HEAD.
+- Planeswalker-deck searches: "you may search your library and/or graveyard for a card
+  named <name>, reveal it, and put it into your hand. If you search your library this way,
+  shuffle." → new `Effect::SearchLibraryAndGraveyard { filter }` (one optional card from
+  either zone; shuffle unless it came from the graveyard). **For Codex (UI):** a
+  ChooseObjects mixing library and graveyard cards.
+- Tests: `new_triggers.rs` (+1).
+
+Claude (2026-10-07, card coverage round 52 — COMPLETE): 17,003 → 17,031 / 34,913
+(48.8%); all 28 faces mine; zero lost against HEAD.
+- "create <amount> <tokens>" for any non-fixed `amount()` — X (when defined) and "that
+  many" (the triggering event's amount): Hornet Nest, Old Gnawbone, Tana.
+- "double the number of <kind> counters on <one object>" → `AddCounters` of its own count:
+  Primordial Hydra, Growth Curve, Solarion.
+- Tests: `create_number.rs` (+1).
+
+Claude (2026-10-07, card coverage round 51 — COMPLETE): 16,991 → 17,003 / 34,913
+(48.7%); all 13 faces mine; zero lost against HEAD.
+- Spell filters `ObjectFilter::CastFromZone`, `Kicked`, `HasXInCost` (eval and detect);
+  triggers "you cast a kicked spell", "… a spell from your graveyard", "… a spell from
+  anywhere other than your hand", "… a spell with {X} in its mana cost".
+- Tests: `new_triggers.rs` (+1: kicked triggers, unkicked doesn't).
+
+Claude (2026-10-07, card coverage round 50 — COMPLETE): 16,970 → 16,991 / 34,913
+(48.7%); all 22 faces mine; zero lost against HEAD.
+- Conditions: coven ("you control three or more creatures with different powers", new
+  `Value::DistinctPowers`), "this spell was cast from a graveyard", "~ is on the
+  battlefield"; the "you control …" branch no longer returns early.
+- Values: "your speed" (`Value::Speed`), "half your starting life total" (no rounding
+  needed), "that permanent's …".
+- **Engine fix:** `Condition::WasCast` read only the permanent-side `cast_from`, so a spell
+  still on the stack never knew where it was cast from ("if this spell was cast from a
+  graveyard", "if you cast it from your hand" on spells); it now reads the cast context.
+- Tests: `value_phrases.rs` (+2).
+
+Claude (2026-10-07, card coverage round 49 — COMPLETE): 16,936 → 16,970 / 34,913
+(48.6%); all 34 faces mine; zero lost against HEAD.
+- Activated-ability costs: "return <n> <noun> you control to its owner's hand" (Codex's
+  `ReturnToHand`, now also in `cost()`), "return ~ to its owner's hand"
+  (`ReturnToHand { IsSelf }`), "mill N cards" (new `AdditionalCost::Mill`, payable only
+  with that many in the library), "put N <kind> counters on ~" (new
+  `AdditionalCost::PutCounters`).
+- Tests: `activation_limits.rs` (+2).
+Handoff: `docs/sessions/2026-10-07-exhaust-boast-exile-cost.md` (updated).
+
+Claude (2026-10-07, card coverage round 48 — COMPLETE): 16,895 → 16,936 / 34,913
+(48.5%); all 41 faces mine; zero lost against HEAD.
+- Costs (probed as "<cost>: Draw a card."): "Exile this artifact / ~" as a cost
+  (`ExileFrom { zone: Battlefield, filter: IsSelf }`, paid like the graveyard one).
+- Exhaust (CR 702.177): `ActivationTiming::Exhaust`, `state.activated_ever`.
+- Boast (CR 702.142): once each turn, with a cost condition that it attacked this turn.
+- Not done: Power-up (rules unverified), snow mana {S}, waterbend, discard at random.
+- Tests: `activation_limits.rs` (3, new).
+Handoff: `docs/sessions/2026-10-07-exhaust-boast-exile-cost.md`.
+
+Claude (2026-10-07, card coverage round 47 — COMPLETE): 16,855 → 16,895 / 34,913
+(48.4%); all 44 faces mine; zero lost against HEAD.
+- Conditions (probed as "As long as <condition>, …"): "~ is an enchantment", "you gained
+  N or more life this turn", "you have a full party", "X is N or more" (when X is defined),
+  "there are N or more <noun> cards in your graveyard" (spell mastery etc.); the "you
+  have …" branch no longer returns early without a number.
+- **Fix:** "create X Soldiers … destroy all other creatures" destroyed the new tokens
+  ("other" only excluded the source). `Cx::made_tokens` makes "other" also exclude the
+  tokens just made (`InBinding(It)`) — found by a test of Martial Coup.
+- Tests: `create_number.rs` (+1), `value_phrases.rs` (+1).
+Handoff: `docs/sessions/2026-10-07-conditions-and-other-tokens.md`.
+
+Claude (2026-10-07, card coverage round 46 — COMPLETE): 16,841 → 16,855 / 34,913
+(48.3%); all 14 faces mine; zero lost against HEAD.
+- `value_phrase` wraps `value_phrase_base` for "<n> minus <v>" and "<v> minus <n>"
+  (negative results deal/gain nothing — tested), and reads "the number of creatures in
+  your party". Iron Maiden, Viseling, Storm World, the party cycle.
+- Tests: `value_phrases.rs` (+1).
+
+Claude (2026-10-07, card coverage round 45 — COMPLETE): 16,794 → 16,841 / 34,913
+(48.2%); all 50 faces mine; zero lost against HEAD.
+- "Create X <tokens>" when X is defined (an {X} cost or a "where X is" clause), via the
+  "create two …" reading with `count: Value::X` — Krenko Mob Boss, Dockside Extortionist,
+  Decree of Justice, Elenda, Goblin Offensive, Gelatinous Genesis.
+- Found by probing each blamed trigger's effect under "When ~ enters, <effect>."
+- Tests: `create_number.rs` (+1).
+Handoff: `docs/sessions/2026-10-07-create-x-tokens.md`.
+
+Claude (2026-10-07, card coverage round 44 — COMPLETE): 16,781 → 16,794 / 34,913
+(48.1%); all 13 faces mine; zero lost against HEAD.
+- Trigger heads: "a source deals damage to ~" (`TakesDamage`), "a <noun> deals combat
+  damage to you", "each player's first main phase", "combat on each opponent's turn",
+  "~ is put into your graveyard from the battlefield" (dies, and you own it), "you cast
+  your first spell each turn", "enchanted player is attacked" (`AttacksPlayer`),
+  "enchanted creature becomes the target of a spell or ability"; self triggers now read
+  "… for the first time each turn" (`turn_qualifier`).
+- Tests: `new_triggers.rs` (+1).
+Handoff: `docs/sessions/2026-10-07-trigger-heads.md` (updated).
+
+Claude (2026-10-07, card coverage round 43 — COMPLETE): 16,760 → 16,781 / 34,913
+(48.1%); all 22 faces mine; zero lost against HEAD.
+- More trigger heads (self table and the noun-subject table): "deals combat damage to a
+  player or planeswalker / or battle" (`AnyOf` of the two `DealsDamage`), "deals [combat]
+  damage to a creature", "you scry or surveil" (`AnyOf`), "you discard one or more cards"
+  (once per batch).
+- Tests: `new_triggers.rs` (+2).
+Handoff: `docs/sessions/2026-10-07-trigger-heads.md` (updated).
+
+Claude (2026-10-07, card coverage round 42 — COMPLETE): 16,711 → 16,760 / 34,913
+(48.0%); all 49 faces mine; zero lost against HEAD.
+- Found by probing every failing trigger head as "<head>, draw a card.":
+  "whenever one or more <kind> counters are put on ~ / a <noun>" (`CounterPlaced`),
+  "whenever one or more [<type>] cards leave your graveyard" (`ZoneChange` from the
+  graveyard, once per batch), "whenever a <noun> attacks you [or a planeswalker you
+  control]" (new `EventPattern::AttacksPlayer`).
+- **Engine fix (detect.rs):** a `ZoneChange` pattern's filter was checked only against
+  the card's old identity, which no longer exists once a card leaves a non-battlefield
+  zone (no last-known information there) — such triggers never fired. Now it falls back to
+  the new identity outside the battlefield.
+- Tests: `new_triggers.rs` (3, new).
+Handoff: `docs/sessions/2026-10-07-trigger-heads.md`.
+
+Claude (2026-10-07, card coverage round 41 — COMPLETE): 16,669 → 16,711 / 34,913
+(47.9%); all 44 faces mine; zero lost against HEAD.
+- More `value_phrase`: "your starting life total" (`Value::StartingLife`,
+  `PlayerState::starting_life`), "the amount of life you gained this turn"
+  (`Value::LifeGainedThisTurn`, `state.life_gained_amount`), "twice <v>", "half <v>,
+  rounded up/down", "<n> plus <v>", "the number of colors among …" (`Value::ColorsAmong`),
+  "the number of cards you've drawn this turn", "their/his/her <stat>" as "its".
+- Nouns: "<cards> in all graveyards" (the Lhurgoyf cycle, Cruel Somnophage, Necrogoyf).
+- Tests: `value_phrases.rs` (+3).
+Handoff: `docs/sessions/2026-10-07-more-value-phrases.md`.
+
+Claude (2026-10-07, card coverage round 40 — COMPLETE): 16,588 → 16,669 / 34,913
+(47.7%); 80 faces mine, 1 Codex's; zero lost against HEAD.
+- `value_phrase`: "your life total", "your devotion to <color>[ and <color>]" (new
+  `Value::Devotion`, CR 700.5 — hybrid/Phyrexian symbols count), "the number of opponents
+  you have", "… basic land types among lands you control", "… card types among cards in
+  all graveyards", "the number of <kind> counters on ~/it", "that spell's …" (never the
+  source itself — refused when "it" is still the source, e.g. Draining Whelk).
+  `counted`: "… in all graveyards".
+- Tests: `value_phrases.rs` (4, new): devotion with hybrid and its own symbols, a
+  sacrificed source's counters, the triggering spell's mana value, opponents.
+Handoff: `docs/sessions/2026-10-07-value-phrases-devotion.md`.
+
+Claude (2026-10-07, card coverage round 39 — COMPLETE): 16,571 → 16,588 / 34,913
+(47.5%); 13 faces mine, 4 Codex's; zero lost against HEAD.
+- `Restriction::PlayLandsFromGraveyard` — "You may play lands from your graveyard"
+  (Crucible of Worlds); `legal_actions` offers those lands as the turn's land play.
+- `Effect::AddManaAnyCombination` — "add N mana in any combination of colors" on spells
+  and non-mana triggers, a color asked per mana; refused inside activated abilities
+  (mana abilities can't ask). Manamorphose, Cosmic Crucible.
+- `Effect::RevealRandom` — "<player> reveals a card at random from their hand", binding
+  it as "that card" / "the revealed card" (always the binding, even in a "where X is"
+  read before the reveal). Ignite Memories, the Planeswalker's cycle, Merfolk Spy.
+- Tests: `graveyard_lands.rs` (2), `reveal_random.rs` (2), both new;
+  `announced_mana.rs` (+1).
+Handoff: `docs/sessions/2026-10-07-crucible-mana-combos-random-reveal.md`.
+
 - Completed launch-time automatic package updates for Windows/macOS/Flatpak. Checks latest stable GitHub release, verifies package size and SHA-256, gates startup before opening data, and restarts with path overrides retained. Existing SQLite/WAL/decks remain untouched; native swaps roll back on failure. Release workflow now publishes signed macOS ZIP bundles and tests native installer scripts. Validation: 1,745 workspace tests passed, 44 ignored; formatting, workspace Clippy, and release/installer Python checks passed. Native package execution awaits native CI.
 
 Claude (2026-10-07, card coverage round 38 — COMPLETE): 16,562 → 16,571 / 34,913

@@ -727,9 +727,12 @@ fn pattern_matches(
         ) => {
             let from_ok = want_from.is_none_or(|z| z == from.zone);
             let to_ok = want_to.is_none_or(|z| z == to.zone);
-            // The pre-move identity is the one a filter should describe.
-            (from_ok && to_ok && subject_ok(who, *object))
-                .then(|| bind(Some(Target::Object(*new_object)), None))
+            // The pre-move identity is the one a filter should describe. Only a permanent
+            // leaves last-known information behind; a card from any other zone is the same
+            // card (same owner, same printed types) under its new identity.
+            let described = subject_ok(who, *object)
+                || (from.zone != Zone::Battlefield && subject_ok(who, *new_object));
+            (from_ok && to_ok && described).then(|| bind(Some(Target::Object(*new_object)), None))
         }
 
         // ---- turn structure --------------------------------------------
@@ -816,6 +819,27 @@ fn pattern_matches(
             },
         ) => subject_ok(who, *attacker)
             .then(|| bind(Some(Target::Object(*attacker)), Some(*defender))),
+        (
+            EventPattern::AttacksPlayer {
+                who,
+                player,
+                or_planeswalkers,
+            },
+            Event::Attacked {
+                attacker,
+                defender,
+                defending_player,
+            },
+        ) => {
+            let attacked = match defender {
+                Target::Player(p) => Some(*p),
+                // A planeswalker: its controller as it was attacked.
+                Target::Object(_) if *or_planeswalkers => *defending_player,
+                Target::Object(_) => None,
+            };
+            (subject_ok(who, *attacker) && attacked.is_some_and(|p| player_ok(player, p)))
+                .then(|| bind(Some(Target::Object(*attacker)), Some(*defender)))
+        }
         (
             EventPattern::AttacksMostLife { who },
             Event::Attacked {
@@ -1246,6 +1270,16 @@ fn eval_filter(
             .is_some_and(|c| chars.colors.contains(c)),
         // Targeting legality is not a question a trigger condition asks.
         ObjectFilter::Targetable => true,
+        ObjectFilter::CastFromZone(zone) => {
+            obj.cast_from
+                .or_else(|| obj.cast_context.as_ref().and_then(|c| c.cast_from))
+                == Some(*zone)
+        }
+        ObjectFilter::Kicked => obj.cast_context.as_ref().is_some_and(|c| c.kicked),
+        ObjectFilter::HasXInCost => chars
+            .mana_cost
+            .symbols
+            .contains(&mtg_core::ManaSymbol::Variable),
         ObjectFilter::IsSpell => {
             obj.zone.zone == Zone::Stack
                 && obj

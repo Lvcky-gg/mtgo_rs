@@ -125,6 +125,8 @@ impl Visitor<'_> {
                 AdditionalCost::ChooseMode
                 | AdditionalCost::ReturnUnblockedAttacker
                 | AdditionalCost::Exert
+                | AdditionalCost::Mill { .. }
+                | AdditionalCost::PutCounters { .. }
                 | AdditionalCost::Loyalty { .. }
                 | AdditionalCost::Native { .. } => {}
             }
@@ -158,6 +160,10 @@ impl Visitor<'_> {
             | EventPattern::BecomesMonstrous { who }
             | EventPattern::TurnedFaceUp { who }
             | EventPattern::AttacksMostLife { who } => self.filter(who),
+            EventPattern::AttacksPlayer { who, player, .. } => {
+                self.filter(who);
+                self.selector(player);
+            }
             EventPattern::Scried { whose, .. } => self.selector(whose),
             EventPattern::Cycled { who, by } | EventPattern::Sacrificed { who, by } => {
                 self.filter(who);
@@ -278,6 +284,7 @@ impl Visitor<'_> {
                 | Restriction::AttackDespiteDefender
                 | Restriction::AssignDamageByToughness
                 | Restriction::AssignsNoCombatDamage
+                | Restriction::CantBlockSource
                 | Restriction::CantBlock
                 | Restriction::MustAttackIfAble
                 | Restriction::Goaded
@@ -513,6 +520,9 @@ impl Visitor<'_> {
             Effect::OnceEachTurn { body } => self.effect(body),
             Effect::AddManaAnyCombination { amount } => self.value(amount),
             Effect::RevealRandom { who } => self.selector(who),
+            Effect::SearchLibraryAndGraveyard { filter } => self.filter(filter),
+            Effect::ExileLinked { what } => self.selector(what),
+            Effect::ReturnExiledWith { .. } => {}
             Effect::AsPlayer { who, body } => {
                 self.selector(who);
                 self.effect(body);
@@ -687,6 +697,9 @@ impl Visitor<'_> {
             | ObjectFilter::HasChosenColor
             | ObjectFilter::Targetable
             | ObjectFilter::IsSpell
+            | ObjectFilter::CastFromZone(_)
+            | ObjectFilter::Kicked
+            | ObjectFilter::HasXInCost
             | ObjectFilter::IsAbility => {}
         }
     }
@@ -703,7 +716,13 @@ impl Visitor<'_> {
             | Value::OpponentsAttacked
             | Value::ManaSpentOfColor(_)
             | Value::SpellsCastBefore
-            | Value::RollResult => {}
+            | Value::RollResult
+            | Value::Devotion(_)
+            | Value::StartingLife => {}
+            Value::LifeGainedThisTurn(s) | Value::ColorsAmong(s) | Value::DistinctPowers(s) => {
+                self.selector(s)
+            }
+            Value::Speed => {}
             Value::DiedThisTurn(f) => self.filter(f),
             Value::Half { value, .. } => self.value(value),
             Value::Count(s)

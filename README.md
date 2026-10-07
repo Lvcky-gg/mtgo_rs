@@ -35,6 +35,15 @@ cargo test --workspace --all-features  # includes transport integration tests
 cargo clippy --workspace --all-targets
 ```
 
+Agent-first verification uses versioned scenarios, deterministic replay,
+independent rules/security properties, fuzzing and production mutation checks.
+See [verification commands, evidence and remaining work](docs/verification.md).
+
+```sh
+cargo run -p mtg-verify --bin mtgo-rs -- replay tests/replays/basic_casting.json
+cargo run -p mtg-verify --bin mtgo-rs -- confidence verification/primitives.json
+```
+
 The arena includes short gameplay sounds with **Mute**, **Volume**, and **Test
 sound** controls. Settings carry between matches while the app stays open. Linux
 builds need ALSA development headers and pkg-config (on Debian/Ubuntu:
@@ -172,7 +181,7 @@ cargo run -p mtg-headless --bin mtg-cards -- coverage 0 --list   # every accepte
 cargo run -p mtg-headless --bin mtg-cards -- parse Instant "Draw two cards."
 ```
 
-Currently **16,571 of 34,913 cards (47.5%)** are playable as printed, up from 1,258. Every shape the
+Currently **17,165 of 34,913 cards (49.2%)** are playable as printed, up from 1,258. Every shape the
 compiler emits has an end-to-end test in `crates/mtg-oracle/tests/compiled/` that takes printed
 text through import and plays it in the engine.
 

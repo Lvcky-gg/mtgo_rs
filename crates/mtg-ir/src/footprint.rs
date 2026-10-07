@@ -246,6 +246,9 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::OnceEachTurn { .. }
         | Effect::AddManaAnyCombination { .. }
         | Effect::RevealRandom { .. }
+        | Effect::SearchLibraryAndGraveyard { .. }
+        | Effect::ExileLinked { .. }
+        | Effect::ReturnExiledWith { .. }
         | Effect::MarkOnceEachTurn
         | Effect::Clash { .. } => Footprint::unanalysable(),
         Effect::GrantPlay { what, .. } | Effect::GrantCastLater { what } => objects_write(what, r),
@@ -531,6 +534,12 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         // Fixed as the spell was cast.
         Value::SpellsCastBefore
         | Value::RollResult
+        | Value::Devotion(_)
+        | Value::StartingLife
+        | Value::LifeGainedThisTurn(_)
+        | Value::ColorsAmong(_)
+        | Value::DistinctPowers(_)
+        | Value::Speed
         | Value::DiedThisTurn(_)
         | Value::CastX
         | Value::OpponentsAttacked => Footprint::default(),
