@@ -244,6 +244,8 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::RollDie { .. }
         | Effect::AsPlayer { .. }
         | Effect::OnceEachTurn { .. }
+        | Effect::AddManaAnyCombination { .. }
+        | Effect::RevealRandom { .. }
         | Effect::MarkOnceEachTurn
         | Effect::Clash { .. } => Footprint::unanalysable(),
         Effect::GrantPlay { what, .. } | Effect::GrantCastLater { what } => objects_write(what, r),

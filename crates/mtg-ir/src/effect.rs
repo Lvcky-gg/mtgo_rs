@@ -302,6 +302,16 @@ pub enum Effect {
         kind: mtg_core::CounterKind,
         amount: u32,
     },
+    /// "Target opponent reveals a card at random from their hand": the card is chosen at
+    /// random and bound as "it" ("that card's mana value") for what follows.
+    RevealRandom {
+        who: crate::Selector,
+    },
+    /// "Add two mana in any combination of colors" from a spell or a trigger — never a mana
+    /// ability, which can't ask: each mana's color is chosen as it resolves.
+    AddManaAnyCombination {
+        amount: Value,
+    },
     /// "… you may …. Do this only once each turn.": `body` happens only while its source
     /// hasn't done it yet this turn; doing it is marked by `MarkOnceEachTurn` inside the
     /// "yes" branch, so declining doesn't use it up.

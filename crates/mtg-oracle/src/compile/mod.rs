@@ -2774,6 +2774,18 @@ fn mana_followup(effect: &Effect) -> bool {
 /// color during resolution has no prompt, so it is not compiled.
 pub(crate) fn add_mana_effect(s: &str) -> Option<(Effect, &str)> {
     let r = s.strip_prefix("add ")?;
+    // "add two mana in any combination of colors": chosen as it resolves (not for a mana
+    // ability — see `activated`).
+    let amount = if let Some(r) = r.strip_prefix("x ") {
+        Some((Value::X, r))
+    } else {
+        words::number(r).and_then(|(n, r)| Some((Value::Fixed(n), r.strip_prefix(' ')?)))
+    };
+    if let Some((amount, r)) = amount
+        && let Some(rest) = r.strip_prefix("mana in any combination of colors")
+    {
+        return Some((Effect::AddManaAnyCombination { amount }, rest));
+    }
     let end = r.find(['.', ',']).unwrap_or(r.len());
     let (mana, rest) = r.split_at(end);
     if !mana.starts_with('{') {
@@ -4577,6 +4589,17 @@ pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     } else {
         clauses::effect(body, cx)?
     };
+    // Mana made by an ability is a mana ability's, which can't ask what color it is.
+    let asks_for_mana = |e: &Effect| match e {
+        Effect::AddManaAnyCombination { .. } => true,
+        Effect::Sequence(items) => items
+            .iter()
+            .any(|i| matches!(i, Effect::AddManaAnyCombination { .. })),
+        _ => false,
+    };
+    if asks_for_mana(&effect) {
+        return None;
+    }
     // "{2}, Exile this card from your graveyard: …" — an ability of the card in the
     // graveyard (CR 113.6j).
     let exiles_self = cost.additional.iter().any(|c| {

@@ -1753,6 +1753,60 @@ fn resolve_inner(
             }
             Ok(())
         }
+        Effect::RevealRandom { who } => {
+            let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+            let mut revealed = Vec::new();
+            for p in players {
+                let hand = state.objects_in(ZoneRef::of(Zone::Hand, p));
+                if hand.is_empty() {
+                    continue;
+                }
+                let pick = hand[(state.rng.next_u64() % hand.len() as u64) as usize];
+                apply::apply(state, cause, Event::Revealed { object: pick }, log);
+                revealed.push(Target::Object(pick));
+            }
+            rc.bindings.insert(Binding::It, revealed);
+            Ok(())
+        }
+        Effect::AddManaAnyCombination { amount } => {
+            use mtg_core::Color;
+            const COLORS: [Color; 5] = [
+                Color::White,
+                Color::Blue,
+                Color::Black,
+                Color::Red,
+                Color::Green,
+            ];
+            let n = value_asking(state, cards, rc, amount)?.max(0);
+            let player = rc.controller;
+            for _ in 0..n {
+                let i = match rc.need(
+                    player,
+                    ChoiceKind::ChooseModes {
+                        available: ["white", "blue", "black", "red", "green"]
+                            .map(Box::<str>::from)
+                            .to_vec(),
+                        count: 1,
+                        min: None,
+                    },
+                    "choose a color of mana to add",
+                )? {
+                    Answer::Modes(m) => m.first().copied().unwrap_or(0) as usize,
+                    _ => 0,
+                };
+                apply::apply(
+                    state,
+                    cause,
+                    Event::ManaAdded {
+                        player,
+                        color: Some(COLORS[i.min(4)]),
+                        amount: 1,
+                    },
+                    log,
+                );
+            }
+            Ok(())
+        }
         Effect::OnceEachTurn { body } => {
             if state.done_once_this_turn.contains(&rc.source) {
                 return Ok(());

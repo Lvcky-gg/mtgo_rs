@@ -582,6 +582,7 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         sacrifice_you,
         search,
         attach,
+        reveal_random,
         becomes_chosen,
         its_controller_may,
         may,
@@ -797,6 +798,22 @@ fn shielded<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, &'s str)> {
     }
     let (to, r) = nouns::recipient(s, cx)?;
     matches!(to, Selector::Target { .. } | Selector::SelfSource).then_some((to, r))
+}
+
+/// "target opponent reveals a card at random from their hand": "that card" is then the
+/// revealed one and "that player" the one who revealed it.
+fn reveal_random<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let mut trial = cx.clone();
+    let (who, _, r) = nouns::player(s, &mut trial)?;
+    let r = r
+        .strip_prefix(" reveals a card at random from their hand")
+        .or_else(|| r.strip_prefix(" reveal a card at random from your hand"))?;
+    trial.it = Some(Selector::Bound(mtg_ir::selector::Binding::It));
+    if who != Selector::You {
+        trial.that_player = Some(who.clone());
+    }
+    *cx = trial;
+    Some((Effect::RevealRandom { who }, r))
 }
 
 /// "this creature becomes the creature type of your choice until end of turn", "target
@@ -4709,7 +4726,8 @@ pub fn value_phrase<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
     } else {
         let r = s
             .strip_prefix("that creature's ")
-            .or_else(|| s.strip_prefix("that card's "))?;
+            .or_else(|| s.strip_prefix("that card's "))
+            .or_else(|| s.strip_prefix("the revealed card's "))?;
         (cx.it.clone()?, r)
     };
     if let Some(r) = r.strip_prefix("power") {

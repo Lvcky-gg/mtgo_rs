@@ -511,6 +511,8 @@ impl Visitor<'_> {
             Effect::Choose { then, .. } => self.effect(then),
             Effect::ExileSelfWithCounters { .. } | Effect::MarkOnceEachTurn => {}
             Effect::OnceEachTurn { body } => self.effect(body),
+            Effect::AddManaAnyCombination { amount } => self.value(amount),
+            Effect::RevealRandom { who } => self.selector(who),
             Effect::AsPlayer { who, body } => {
                 self.selector(who);
                 self.effect(body);

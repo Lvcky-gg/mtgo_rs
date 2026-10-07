@@ -287,3 +287,28 @@ fn tapped_artifact_hurts_its_controller_at_the_draw_step() {
         "\"it\" is the artifact, which deals the damage"
     );
 }
+
+/// "Add two mana in any combination of colors" on a spell: each mana's color is asked.
+#[test]
+fn a_spell_adds_mana_in_the_chosen_combination() {
+    let mut table = Table::default();
+    let spell = table.card(
+        "{1}{R}",
+        "Instant",
+        None,
+        "Add two mana in any combination of colors. Draw a card.",
+    );
+    let mut game = Game::new(table);
+    game.lands(2);
+    let spell = game.put(spell, P0, Zone::Hand);
+    game.main();
+    let hand = game.count(Zone::Hand, P0);
+    game.act(
+        Action::Cast { object: spell },
+        &[],
+        &[Answer::Modes(vec![0]), Answer::Modes(vec![4])],
+    );
+    assert_eq!(pool(&game, Color::White as usize), 1);
+    assert_eq!(pool(&game, Color::Green as usize), 1);
+    assert_eq!(game.count(Zone::Hand, P0), hand, "cast one, drew one");
+}
