@@ -31,6 +31,14 @@ fn ctx<'a>(
     source: ObjectId,
     controller: PlayerId,
 ) -> Ctx<'a> {
+    // Filters describe the spell or ability's source, not the ability object
+    // representing it on the stack ("another target" excludes the permanent).
+    let source = state
+        .objects
+        .get(&source)
+        .and_then(|object| object.cast_context.as_ref())
+        .and_then(|cast| cast.source)
+        .unwrap_or(source);
     Ctx {
         state,
         cards,
@@ -57,13 +65,21 @@ pub fn legal_targets(
     already: &[Target],
 ) -> Vec<Target> {
     let chars = ComputedChars(cards);
-    let c = ctx(state, cards, &chars, source, controller);
+    let mut c = ctx(state, cards, &chars, source, controller);
+    // The targets chosen so far, for a slot that refers to an earlier one ("from a single
+    // graveyard": owned by the first target's owner).
+    c.targets = already;
     let mut out = Vec::new();
 
     for id in objects_in(state, spec.zone) {
-        // The spell itself is on the stack while targets are chosen, and a spell does
-        // not target itself.
-        if id == source {
+        // A spell or ability cannot target its own stack object. Its source
+        // permanent can be targeted unless the printed filter excludes it.
+        if id == source
+            && state
+                .objects
+                .get(&source)
+                .is_some_and(|object| object.zone.zone == Zone::Stack)
+        {
             continue;
         }
         // Protection, shroud and hexproof are folded into `Targetable` rather than
@@ -183,7 +199,9 @@ pub fn recheck(
     }
 
     let chars = ComputedChars(cards);
-    let c = ctx(state, cards, &chars, source, controller);
+    let mut c = ctx(state, cards, &chars, source, controller);
+    // A slot may refer to another ("from a single graveyard").
+    c.targets = chosen;
 
     let still_legal: Vec<bool> = chosen
         .iter()
@@ -352,4 +370,46 @@ pub fn player_hexproof_from(
                 )
             ) && crate::layers::controller(state, e.source) == Some(player)
         })
+}
+
+/// The target slots of "deals X damage divided as you choose …" in what `object` is
+/// announcing, in order: the i-th is announced only when X is more than i.
+pub fn x_shares(state: &GameState, cards: &dyn PrintedCards, object: ObjectId) -> Vec<u8> {
+    fn walk(e: &mtg_ir::Effect, out: &mut Vec<u8>) {
+        match e {
+            mtg_ir::Effect::DealDamageDivided {
+                shares, x: true, ..
+            } => out.extend(shares.iter().filter_map(|s| match s {
+                mtg_ir::Selector::Target { index } => Some(*index),
+                _ => None,
+            })),
+            mtg_ir::Effect::Sequence(es) => es.iter().for_each(|e| walk(e, out)),
+            _ => {}
+        }
+    }
+    let Some(obj) = state.objects.get(&object) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    match obj.cast_context.as_ref().and_then(|c| c.ability) {
+        Some(id) => {
+            if let Some(a) = crate::abilities::find(state, cards, object, id)
+                && let mtg_ir::AbilityKind::Activated { effect, .. } = &a.kind
+            {
+                walk(effect, &mut out);
+            }
+        }
+        None => {
+            for a in cards
+                .face(obj.card, obj.face)
+                .map(|f| f.abilities.as_slice())
+                .unwrap_or_default()
+            {
+                if let mtg_ir::AbilityKind::SpellEffect(e) = &a.kind {
+                    walk(e, &mut out);
+                }
+            }
+        }
+    }
+    out
 }

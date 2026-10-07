@@ -1010,3 +1010,222 @@ fn life_gain_boosts_add_then_double() {
         assert_eq!(g.life(P0), 20 + gained, "plus {plus}, twice {twice}");
     }
 }
+
+#[test]
+fn that_card_is_the_one_the_death_moved() {
+    let mut t = Table::default();
+    let aura = t.card(
+        "{2}{B}",
+        "Enchantment — Aura",
+        None,
+        "Enchant creature\nWhen enchanted creature dies, return that card to the battlefield \
+         under your control.",
+    );
+    let bolt = t.card("{R}", "Instant", None, "~ deals 3 damage to target creature.");
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bear, P1, Zone::Battlefield);
+    let a = g.put(aura, P0, Zone::Battlefield);
+    g.engine.state.objects.get_mut(&a).unwrap().attached_to = Some(b);
+    let s = g.put(bolt, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[Target::Object(b)]);
+    let back: Vec<_> = g
+        .engine
+        .state
+        .battlefield()
+        .into_iter()
+        .filter(|id| g.engine.state.objects[id].card == bear)
+        .collect();
+    assert_eq!(back.len(), 1, "it came back");
+    assert_eq!(
+        g.engine.state.objects[&back[0]].controller,
+        P0,
+        "under the aura's controller"
+    );
+}
+
+#[test]
+fn training_needs_a_stronger_fellow_attacker() {
+    for (partner_power, grows) in [(1, false), (3, true)] {
+        let mut t = Table::default();
+        let cadet = t.card("{W}", "Creature — Soldier", Some((1, 1)), "Training");
+        let partner = t.card("{1}", "Creature — Soldier", Some((partner_power, 1)), "");
+        let mut g = Game::new(t);
+        let c = g.put(cadet, P0, Zone::Battlefield);
+        let p = g.put(partner, P0, Zone::Battlefield);
+        g.main();
+        g.combat(&[c, p], &[], &[], &[]);
+        assert_eq!(
+            g.engine.state.objects[&c]
+                .counters
+                .get(&mtg_core::CounterKind::PlusOnePlusOne)
+                .copied()
+                .unwrap_or(0),
+            i32::from(grows),
+            "partner power {partner_power}"
+        );
+    }
+}
+
+#[test]
+fn a_spell_that_targets_a_creature_triggers_by_type_and_target() {
+    let mut t = Table::default();
+    let prowess = t.card(
+        "{U}",
+        "Creature — Wizard",
+        Some((1, 1)),
+        "Whenever you cast an instant or sorcery spell that targets a creature, put a +1/+1 \
+         counter on this creature.",
+    );
+    let growth = t.card("{G}", "Instant", None, "Target creature gets +1/+1 until end of turn.");
+    let shock = t.card("{R}", "Instant", None, "~ deals 1 damage to any target.");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let w = g.put(prowess, P0, Zone::Battlefield);
+    let gr = g.put(growth, P0, Zone::Hand);
+    let sh = g.put(shock, P0, Zone::Hand);
+    g.main();
+    let counters = |g: &Game| {
+        g.engine.state.objects[&w]
+            .counters
+            .get(&mtg_core::CounterKind::PlusOnePlusOne)
+            .copied()
+            .unwrap_or(0)
+    };
+    g.cast(sh, &[Target::Player(P1)]);
+    assert_eq!(counters(&g), 0, "a player is not a creature");
+    g.cast(gr, &[Target::Object(w)]);
+    assert_eq!(counters(&g), 1);
+}
+
+#[test]
+fn counter_only_a_spell_that_targets_a_creature_you_control() {
+    for at_creature in [true, false] {
+        let mut t = Table::default();
+        let ward = t.card(
+            "{U}",
+            "Instant",
+            None,
+            "Counter target spell that targets a creature you control.",
+        );
+        let shock = t.card("{R}", "Instant", None, "~ deals 1 damage to any target.");
+        let bear = t.bear();
+        let mut g = Game::new(t);
+        g.lands(2);
+        let b = g.put(bear, P0, Zone::Battlefield);
+        let w = g.put(ward, P0, Zone::Hand);
+        let s = g.put(shock, P0, Zone::Hand);
+        g.main();
+        let target = if at_creature {
+            Target::Object(b)
+        } else {
+            Target::Player(P1)
+        };
+        g.act_holding(Action::Cast { object: s }, &[target]);
+        let spell = g.stack()[0];
+        let legal = mtg_engine::targeting::legal_targets(
+            &g.engine.state,
+            &g.table,
+            &mtg_engine::targeting::specs_of(&g.engine.state, &g.table, w)[0],
+            w,
+            P0,
+            &[],
+        );
+        assert_eq!(legal.contains(&Target::Object(spell)), at_creature);
+    }
+}
+
+#[test]
+fn looking_at_a_hand_shows_it_to_the_looker_only() {
+    let mut t = Table::default();
+    let peek = t.card(
+        "{U}",
+        "Sorcery",
+        None,
+        "Look at target player's hand. Draw a card.",
+    );
+    let secret = t.card("{5}", "Sorcery", None, "");
+    let mut g = Game::new(t);
+    g.lands(1);
+    g.put(secret, P1, Zone::Hand);
+    let s = g.put(peek, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[Target::Player(P1)]);
+    let seen = |who| {
+        mtg_engine::view::project(&g.engine.state, who)
+            .revealed_cards
+            .iter()
+            .any(|c| c.card == secret)
+    };
+    assert!(seen(P0), "the caster saw it");
+    let mine = mtg_engine::view::project(&g.engine.state, P1);
+    assert!(
+        !mine.revealed_cards.iter().any(|c| c.owner == P0),
+        "nothing of the caster's was shown"
+    );
+}
+
+#[test]
+fn a_dying_creature_passes_its_counters_on() {
+    let mut t = Table::default();
+    let donor = t.card(
+        "{G}",
+        "Creature — Elf",
+        Some((1, 1)),
+        "When this creature dies, put its counters on target creature you control.",
+    );
+    let bolt = t.card("{R}", "Instant", None, "~ deals 5 damage to target creature.");
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let d = g.put(donor, P0, Zone::Battlefield);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    g.engine
+        .state
+        .objects
+        .get_mut(&d)
+        .unwrap()
+        .counters
+        .insert(mtg_core::CounterKind::PlusOnePlusOne, 2);
+    let s = g.put(bolt, P0, Zone::Hand);
+    g.main();
+    g.act(
+        Action::Cast { object: s },
+        &[Target::Object(d), Target::Object(b)],
+        &[],
+    );
+    assert_eq!(g.pt(b), (4, 4));
+}
+
+#[test]
+fn a_counter_comes_off_at_end_of_combat() {
+    let mut t = Table::default();
+    let knight = t.card(
+        "{G}",
+        "Creature — Elf",
+        Some((1, 1)),
+        "Whenever this creature attacks or blocks, remove a +1/+1 counter from it at end of \
+         combat.",
+    );
+    let mut g = Game::new(t);
+    let k = g.put(knight, P0, Zone::Battlefield);
+    g.engine
+        .state
+        .objects
+        .get_mut(&k)
+        .unwrap()
+        .counters
+        .insert(mtg_core::CounterKind::PlusOnePlusOne, 2);
+    g.main();
+    g.combat(&[k], &[], &[], &[]);
+    assert_eq!(
+        g.engine.state.objects[&k]
+            .counters
+            .get(&mtg_core::CounterKind::PlusOnePlusOne)
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(g.life(P1), 17, "dealt 3 before the counter came off");
+}

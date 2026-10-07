@@ -48,6 +48,12 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
         } else if let Some(r) = rest.strip_prefix("nonlegendary ") {
             parts.push(not(ObjectFilter::HasSupertype(Supertype::Legendary)));
             rest = r;
+        } else if let Some(r) = rest.strip_prefix("snow ") {
+            parts.push(ObjectFilter::HasSupertype(Supertype::Snow));
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("nonsnow ") {
+            parts.push(not(ObjectFilter::HasSupertype(Supertype::Snow)));
+            rest = r;
         } else if let Some(r) = rest.strip_prefix("basic ") {
             parts.push(ObjectFilter::HasSupertype(Supertype::Basic));
             rest = r;
@@ -107,6 +113,20 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
             .or_else(|| rest.strip_prefix(" your opponents control"))
         {
             parts.push(ObjectFilter::ControlledBy(Box::new(Selector::Opponents)));
+            rest = r;
+        } else if let Some(who) = cx.controller_target.clone()
+            && let Some(r) = rest
+                .strip_prefix(" target player controls")
+                .or_else(|| rest.strip_prefix(" target opponent controls"))
+        {
+            parts.push(ObjectFilter::ControlledBy(Box::new(who)));
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix(" other than ~") {
+            // "target creature other than this creature"
+            parts.push(not(ObjectFilter::IsSelf));
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix(" that attacked this turn") {
+            parts.push(ObjectFilter::AttackedThisTurn);
             rest = r;
         } else if let Some(r) = rest.strip_prefix(" defending player controls") {
             parts.push(ObjectFilter::ControlledBy(Box::new(
@@ -230,14 +250,18 @@ fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> 
     // "creature or planeswalker", "artifact or enchantment", "instant or sorcery spell" —
     // and, for a plural, "instant and sorcery spells", "artifacts and enchantments",
     // which likewise name everything that is either.
-    let joined = rest.strip_prefix(" or ").or_else(|| {
-        rest.strip_prefix(" and ").filter(|r| {
-            one_head(r, cx).is_some_and(|(_, _, plural2, _)| plural2)
+    // "artifacts and/or enchantments" says the same as "or".
+    let joined = rest
+        .strip_prefix(" or ")
+        .or_else(|| rest.strip_prefix(" and/or "))
+        .or_else(|| {
+            rest.strip_prefix(" and ").filter(|r| {
+                one_head(r, cx).is_some_and(|(_, _, plural2, _)| plural2)
                 // "for each instant and sorcery card in your graveyard": Oracle's singular
                 // for the pair, meaning either.
                 || (s.starts_with("instant") && r.starts_with("sorcery "))
-        })
-    });
+            })
+        });
     if let Some(r) = joined
         && let Some((second, zone2, plural2, rest2)) = one_head(r, cx)
     {
@@ -263,6 +287,7 @@ fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> 
     loop {
         let last = tail
             .strip_prefix(", or ")
+            .or_else(|| tail.strip_prefix(", and/or "))
             .or_else(|| tail.strip_prefix(", and ").filter(|_| plural));
         if let Some(r) = last {
             let Some((last, last_zone, last_plural, left)) = one_head(r, cx) else {
@@ -572,10 +597,37 @@ pub fn permanent_card() -> ObjectFilter {
 /// An object selector. Returns the selector, whether it denotes several objects, and
 /// the rest of the input.
 pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> {
+    // "creatures target player controls": that player is a target of its own, chosen
+    // before the noun is read.
+    if cx.controller_target.is_none() && !s.starts_with("target ") {
+        let players = [
+            (" target player controls", None),
+            (" target opponent controls", Some(Selector::Opponents)),
+        ]
+        .into_iter()
+        .find_map(|(p, who)| s.find(p).map(|at| (at + p.len(), who)));
+        if let Some((end, players)) = players {
+            let saved = cx.clone();
+            cx.controller_target = Some(cx.target(player_target(players)));
+            // Only when the noun itself named that player.
+            if let Some(found) = object(s, cx).filter(|(_, _, r)| s.len() - r.len() >= end) {
+                cx.controller_target = None;
+                return Some(found);
+            }
+            *cx = saved;
+        }
+    }
     if let Some(r) = s.strip_prefix('~') {
         return Some((Selector::SelfSource, false, r));
     }
     if let Some(r) = s.strip_prefix("it").filter(|r| !r.starts_with(['s', '\''])) {
+        return Some((cx.it.clone()?, false, r));
+    }
+    // "When enchanted creature dies, return that card to …": the card the triggering
+    // event moved, as "it" would say.
+    if let Some(r) = s.strip_prefix("that card").filter(|r| !r.starts_with('s'))
+        && cx.it == Some(Selector::Bound(mtg_ir::selector::Binding::EventSubject))
+    {
         return Some((cx.it.clone()?, false, r));
     }
     // "them": what an earlier step made or moved ("create two tokens … exile them").
@@ -591,6 +643,23 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
         && cx.it == Some(Selector::Bound(mtg_ir::selector::Binding::It))
     {
         return Some((cx.it.clone()?, false, r));
+    }
+    // "Two target creatures each get +2/+2 until end of turn. Untap those creatures.":
+    // the several targets just named.
+    if let Some(Selector::Union(slots)) = &cx.it
+        && slots.iter().all(|t| matches!(t, Selector::Target { .. }))
+        && let Some(r) = s
+            .strip_prefix("them")
+            .filter(|r| !r.starts_with(|c: char| c.is_alphanumeric()))
+            .or_else(|| {
+                s.strip_prefix("they")
+                    .filter(|r| !r.starts_with(|c: char| c.is_alphanumeric() || c == '\''))
+            })
+            .or_else(|| s.strip_prefix("those creatures"))
+            .or_else(|| s.strip_prefix("those permanents"))
+            .or_else(|| s.strip_prefix("those cards"))
+    {
+        return Some((cx.it.clone()?, true, r));
     }
     // "Creatures you control get +1/+1 until end of turn. Untap them.": the group the
     // previous clause acted on.
@@ -665,13 +734,31 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
     for (lead, up_to) in [("up to ", true), ("", false)] {
         if let Some(r) = listed.strip_prefix(lead)
             && let Some((n, r)) = words::number(r)
-            && (2..=3).contains(&n)
+            && (2..=4).contains(&n)
             && let Some((other, r)) = r
                 .strip_prefix(" target ")
                 .map(|r| (false, r))
                 .or_else(|| r.strip_prefix(" other target ").map(|r| (true, r)))
         {
-            let (noun, rest) = noun(r, cx)?;
+            // "cards from graveyards" is "cards from a graveyard"; "from a single
+            // graveyard" also keeps every target in the first one's owner's graveyard.
+            let mut single = false;
+            let (noun, rest) = match [" from a single graveyard", " from graveyards"]
+                .iter()
+                .find_map(|p| r.find(p).map(|at| (at, *p)))
+            {
+                Some((at, phrase)) => {
+                    single = phrase.contains("single");
+                    let tail = &r[at + phrase.len()..];
+                    let rewritten = format!("{} from a graveyard{tail}", &r[..at]);
+                    let (noun, rest) = noun(&rewritten, cx)?;
+                    if rest != tail || noun.zone != Zone::Graveyard {
+                        return None;
+                    }
+                    (noun, tail)
+                }
+                None => noun(r, cx)?,
+            };
             if !noun.plural {
                 return None;
             }
@@ -680,24 +767,76 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
             } else {
                 noun.filter.clone()
             };
+            let mut first: Option<Selector> = None;
             let slots = (0..n)
                 .map(|_| {
-                    cx.target(TargetSpec {
+                    let filter = match (&first, single) {
+                        (Some(first), true) => ObjectFilter::And(vec![
+                            filter.clone(),
+                            ObjectFilter::OwnedBy(Box::new(Selector::OwnerOf(Box::new(
+                                first.clone(),
+                            )))),
+                        ]),
+                        _ => filter.clone(),
+                    };
+                    let slot = cx.target(TargetSpec {
                         zone: noun.zone,
-                        filter: filter.clone(),
+                        filter,
                         allows_players: false,
                         players: None,
                         mode: None,
                         count: Value::ONE,
                         up_to,
                         distinct_from_other_targets: true,
-                    })
+                    });
+                    first.get_or_insert_with(|| slot.clone());
+                    slot
                 })
                 .collect();
             let sel = Selector::Union(slots);
             cx.it = Some(sel.clone());
             return Some((sel, true, rest));
         }
+    }
+
+    // "any number of target creatures": a run of optional slots, no object twice
+    // (CR 115.3, 601.2c). The engine asks for them one at a time and ends the run once
+    // one is declined. A spell rarely has more legal targets than this; beyond it the run
+    // simply ends.
+    if let Some((other, r)) = s
+        .strip_prefix("any number of target ")
+        .map(|r| (false, r))
+        .or_else(|| {
+            s.strip_prefix("any number of other target ")
+                .map(|r| (true, r))
+        })
+    {
+        let (noun, rest) = noun(r, cx)?;
+        if !noun.plural {
+            return None;
+        }
+        let filter = if other {
+            ObjectFilter::And(vec![noun.filter.clone(), not(ObjectFilter::IsSelf)])
+        } else {
+            noun.filter.clone()
+        };
+        let slots = (0..ANY_NUMBER_OF_TARGETS)
+            .map(|_| {
+                cx.target(TargetSpec {
+                    zone: noun.zone,
+                    filter: filter.clone(),
+                    allows_players: false,
+                    players: None,
+                    mode: None,
+                    count: Value::ONE,
+                    up_to: true,
+                    distinct_from_other_targets: true,
+                })
+            })
+            .collect();
+        let sel = Selector::Union(slots);
+        cx.it = Some(sel.clone());
+        return Some((sel, true, rest));
     }
 
     // Targets.
@@ -830,6 +969,36 @@ pub fn player<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
     if let Some(r) = s.strip_prefix("that player") {
         return Some((cx.that_player.clone()?, false, r));
     }
+    // "two target players each discard a card", "any number of target opponents each
+    // …": several player slots, none chosen twice.
+    let several = if let Some(r) = s.strip_prefix("any number of target ") {
+        Some((ANY_NUMBER_OF_TARGETS, true, r))
+    } else {
+        words::number(s)
+            .filter(|(n, _)| (2..=3).contains(n))
+            .and_then(|(n, r)| Some((n as usize, false, r.strip_prefix(" target ")?)))
+    };
+    if let Some((n, up_to, r)) = several
+        && let Some((players, r)) = r
+            .strip_prefix("players")
+            .map(|r| (None, r))
+            .or_else(|| {
+                r.strip_prefix("opponents")
+                    .map(|r| (Some(Selector::Opponents), r))
+            })
+        && let Some(r) = r.strip_prefix(" each")
+    {
+        let slots = (0..n)
+            .map(|_| {
+                cx.target(TargetSpec {
+                    up_to,
+                    distinct_from_other_targets: true,
+                    ..player_target(players.clone())
+                })
+            })
+            .collect();
+        return Some((Selector::Union(slots), true, r));
+    }
     if let Some(r) = s.strip_prefix("target player") {
         return Some((cx.target(player_target(None)), false, r));
     }
@@ -916,3 +1085,6 @@ pub fn recipient<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, &'s str)> {
     let (o, _, r) = object(s, cx)?;
     Some((o, r))
 }
+
+/// How many slots "any number of target …" is compiled to.
+pub const ANY_NUMBER_OF_TARGETS: usize = 12;

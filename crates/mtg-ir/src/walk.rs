@@ -28,7 +28,9 @@ impl Visitor<'_> {
             self.target(t);
         }
         match &mut a.kind {
-            AbilityKind::SpellEffect(e) => self.effect(e),
+            AbilityKind::SpellEffect(e) | AbilityKind::ExertAsAttacks { effect: e } => {
+                self.effect(e)
+            }
             AbilityKind::Activated { cost, effect, .. } => {
                 self.cost(cost);
                 self.effect(effect);
@@ -63,11 +65,22 @@ impl Visitor<'_> {
             | AbilityKind::Suspend { cost, .. }
             | AbilityKind::ExileToCastLater { cost, .. }
             | AbilityKind::AdditionalCastCost { cost } => self.cost(cost),
+            AbilityKind::AdditionalCastCostChoice { options } => {
+                for (_, cost) in options {
+                    self.cost(cost);
+                }
+            }
             AbilityKind::Aftermath
             | AbilityKind::DeckRule(_)
             | AbilityKind::Dredge(_)
             | AbilityKind::Saga { .. }
             | AbilityKind::Enchant
+            | AbilityKind::Strive { .. }
+            | AbilityKind::Escalate { .. }
+            | AbilityKind::FlashSurcharge { .. }
+            | AbilityKind::SacrificeIfFlashed
+            | AbilityKind::BeginOnBattlefield
+            | AbilityKind::Spree { .. }
             | AbilityKind::Keyword(_)
             | AbilityKind::Native { .. } => {}
         }
@@ -109,6 +122,7 @@ impl Visitor<'_> {
                 AdditionalCost::TapCreaturesWithPower { power } => self.value(power),
                 AdditionalCost::ChooseMode
                 | AdditionalCost::ReturnUnblockedAttacker
+                | AdditionalCost::Exert
                 | AdditionalCost::Loyalty { .. }
                 | AdditionalCost::Native { .. } => {}
             }
@@ -152,9 +166,10 @@ impl Visitor<'_> {
             | EventPattern::NthSpellCast { .. }
             | EventPattern::Reflexive => {}
             EventPattern::NthDraw { whose, .. } => self.selector(whose),
-            EventPattern::CastTargeting { by, target } => {
+            EventPattern::CastTargeting { by, target, spell } => {
                 self.selector(by);
                 self.filter(target);
+                self.filter(spell);
             }
             EventPattern::Copied { who, by } => {
                 self.filter(who);
@@ -260,6 +275,7 @@ impl Visitor<'_> {
                 Restriction::CantAttack
                 | Restriction::AttackDespiteDefender
                 | Restriction::AssignDamageByToughness
+                | Restriction::AssignsNoCombatDamage
                 | Restriction::CantBlock
                 | Restriction::MustAttackIfAble
                 | Restriction::Goaded
@@ -408,6 +424,8 @@ impl Visitor<'_> {
                 }
             }
             Effect::Reveal { what } => self.selector(what),
+            Effect::LookAtHand { whose } => self.selector(whose),
+            Effect::RemoveFromCombat { what } => self.selector(what),
             Effect::Shuffle { who } => self.selector(who),
             Effect::LookAndSort { who, count, .. } => {
                 self.selector(who);
@@ -418,9 +436,14 @@ impl Visitor<'_> {
             | Effect::Tap { what }
             | Effect::Untap { what }
             | Effect::CounterSpell { what, .. }
-            | Effect::CounterUnlessPays { what, .. }
             | Effect::CopySpell { what, .. }
             | Effect::CastWithoutPaying { what, .. } => self.selector(what),
+            Effect::CounterUnlessPays { what, times, .. } => {
+                self.selector(what);
+                if let Some(times) = times {
+                    self.value(times);
+                }
+            }
             Effect::Sacrifice { who, what } => {
                 self.selector(who);
                 self.selector(what);
@@ -430,11 +453,15 @@ impl Visitor<'_> {
                 self.selector(to);
                 self.value(amount);
             }
-            Effect::DealDamageDivided { source, shares } => {
+            Effect::DealDamageDivided { source, shares, .. } => {
                 self.selector(source);
                 for to in shares {
                     self.selector(to);
                 }
+            }
+            Effect::CopyCounters { from, to } => {
+                self.selector(from);
+                self.selector(to);
             }
             Effect::AddCounters { what, amount, .. }
             | Effect::RemoveCounters { what, amount, .. } => {
@@ -468,6 +495,7 @@ impl Visitor<'_> {
                 self.filter(filter);
             }
             Effect::ExtraTurn { who } | Effect::SkipNextTurn { who } => self.selector(who),
+            Effect::AdditionalCombat => {}
             Effect::SpendOnly { only, effect, .. } => {
                 self.filter(only);
                 self.effect(effect);
@@ -475,6 +503,7 @@ impl Visitor<'_> {
             Effect::PutAttacking { what } | Effect::ExileIfDiesThisTurn { what } => {
                 self.selector(what)
             }
+            Effect::Choose { then, .. } => self.effect(then),
             Effect::Reflexive { effect, targets } => {
                 for t in targets {
                     self.filter(&mut t.filter);
@@ -486,11 +515,15 @@ impl Visitor<'_> {
                 count,
                 take,
                 filter,
+                additional_filter,
                 ..
             } => {
                 self.value(count);
                 self.value(take);
                 self.filter(filter);
+                if let Some(filter) = additional_filter {
+                    self.filter(filter);
+                }
             }
             Effect::BecomeMonarch { who, emblem } => {
                 self.selector(who);
@@ -518,6 +551,10 @@ impl Visitor<'_> {
                 self.selector(of);
                 self.value(count);
                 self.selector(controller);
+            }
+            Effect::ExchangeControl { a, b } => {
+                self.selector(a);
+                self.selector(b);
             }
             Effect::GainControl { what, who, .. } => {
                 self.selector(what);
@@ -589,7 +626,7 @@ impl Visitor<'_> {
             | ObjectFilter::ManaValueAtMost(v)
             | ObjectFilter::ManaValueAtLeast(v)
             | ObjectFilter::ToughnessAtMost(v) => self.value(v),
-            ObjectFilter::Not(inner) => self.filter(inner),
+            ObjectFilter::Not(inner) | ObjectFilter::TargetsObject(inner) => self.filter(inner),
             ObjectFilter::And(fs) | ObjectFilter::Or(fs) => {
                 for f in fs {
                     self.filter(f);
@@ -609,6 +646,7 @@ impl Visitor<'_> {
             | ObjectFilter::Blocking
             | ObjectFilter::AttachedToSelf
             | ObjectFilter::DealtDamageBySelfThisTurn
+            | ObjectFilter::AttackedThisTurn
             | ObjectFilter::HasKeyword(_)
             | ObjectFilter::HasCounter(_)
             | ObjectFilter::HasAnyCounter
@@ -617,6 +655,7 @@ impl Visitor<'_> {
             | ObjectFilter::Token
             | ObjectFilter::AttachedToSource
             | ObjectFilter::BlockingSource
+            | ObjectFilter::Named(_)
             | ObjectFilter::NamedLikeSource
             | ObjectFilter::Multicolored
             | ObjectFilter::HasChosenSubtype
@@ -633,8 +672,13 @@ impl Visitor<'_> {
             | Value::X
             | Value::EventAmount
             | Value::ColorsSpent
+            | Value::TimesKicked
+            | Value::CastX
+            | Value::OpponentsAttacked
             | Value::ManaSpentOfColor(_)
             | Value::SpellsCastBefore => {}
+            Value::DiedThisTurn(f) => self.filter(f),
+            Value::Half { value, .. } => self.value(value),
             Value::Count(s)
             | Value::LifeTotal(s)
             | Value::Counters(s, _)

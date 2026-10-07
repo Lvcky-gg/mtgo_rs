@@ -115,6 +115,7 @@ fn fixtures() -> Vec<Fixture> {
         name: "05-targets-and-prevention",
         view: protected,
         kind: Some(ChoiceKind::ChooseTargets {
+            optional: Vec::new(),
             slots: vec![targets.clone(), targets],
         }),
         default: None,

@@ -46,12 +46,67 @@ pub fn total_cost(
     // A kicked spell costs its kicker too (CR 601.2f: additional costs are part of the
     // total cost).
     let mut base = base;
-    if obj.cast_context.as_ref().is_some_and(|c| c.kicked)
+    if let Some(cc) = obj.cast_context.as_ref().filter(|c| c.kicked)
         && let Some(k) = kicker(face)
     {
-        base.symbols.extend(k.symbols);
+        // A multikicker is paid once for each time it was announced (CR 702.33c).
+        for _ in 0..cc.kicks.max(1) {
+            base.symbols.extend(k.symbols.iter().cloned());
+        }
     }
-    let cost = modify(state, cards, object, controller, base);
+    // Additional casting costs paid in mana: "pay {3}", alone or as the chosen option.
+    if let Some(extra) = additional_cast_cost(face) {
+        base.symbols.extend(extra.mana.symbols);
+    }
+    if let Some(i) = obj.cast_context.as_ref().and_then(|c| c.cost_choice)
+        && let Some((_, option)) = cost_choice_options(face).and_then(|o| o.get(usize::from(i)))
+    {
+        base.symbols.extend(option.mana.symbols.iter().cloned());
+    }
+    // Strive: more for each target beyond the first (CR 702.103a).
+    if let Some(per) = strive(face)
+        && let Some(cc) = obj.cast_context.as_ref()
+    {
+        for _ in 1..target_count(cc) {
+            base.symbols.extend(per.symbols.iter().cloned());
+        }
+    }
+    // "… as though it had flash if you pay {2} more": owed when cast at a time a sorcery
+    // couldn't be — as it was cast, or, before then, now.
+    if let Some(extra) = flash_surcharge(face) {
+        let flashed = match obj.cast_context.as_ref() {
+            Some(cc) if obj.zone.zone == mtg_core::Zone::Stack => cc.flashed,
+            _ => !sorcery_timing(state, controller),
+        };
+        if flashed {
+            base.symbols.extend(extra.symbols.iter().cloned());
+        }
+    }
+    // Spree: each chosen mode's own cost (CR 702.172a).
+    if let Some(costs) = spree(face)
+        && let Some(cc) = obj.cast_context.as_ref()
+    {
+        for m in &cc.modes {
+            if let Some(c) = costs.get(usize::from(*m)) {
+                base.symbols.extend(c.symbols.iter().cloned());
+            }
+        }
+    }
+    // Escalate: more for each mode beyond the first (CR 702.120a).
+    if let Some(per) = escalate(face)
+        && let Some(cc) = obj.cast_context.as_ref()
+    {
+        for _ in 1..cc.modes.len() {
+            base.symbols.extend(per.symbols.iter().cloned());
+        }
+    }
+    let mut cost = modify(state, cards, object, controller, base);
+    // Emerge: less by the sacrificed creature's mana value (CR 702.119a).
+    if let Some(cc) = obj.cast_context.as_ref()
+        && cc.emerge_reduction > 0
+    {
+        cost = apply_delta(cost, 0, i64::from(cc.emerge_reduction));
+    }
     // CR 903.8: commander tax. Owed by a commander still in the command zone (what it would
     // cost to cast now) or by one on the stack (what was fixed when it was cast).
     let tax = if obj.zone.zone == mtg_core::Zone::Command
@@ -199,7 +254,7 @@ pub fn cost_with_target(
 }
 
 /// Adjust the generic portion of a cost, leaving coloured symbols untouched.
-fn apply_delta(cost: ManaCost, increase: i64, reduction: i64) -> ManaCost {
+pub(crate) fn apply_delta(cost: ManaCost, increase: i64, reduction: i64) -> ManaCost {
     let generic: i64 = cost
         .symbols
         .iter()
@@ -507,6 +562,14 @@ pub fn additional_payable(
             kind,
             amount: Value::Fixed(n),
         } => obj.counters.get(kind).copied().unwrap_or(0) >= *n,
+        // CR 701.43c — a permanent can be exerted even if it is already exerted.
+        A::Exert => true,
+        // "Remove X storage counters", "remove any number of …": zero will do.
+        A::RemoveCounters {
+            what: Selector::SelfSource,
+            amount: Value::X,
+            ..
+        } => true,
         A::Loyalty { delta } => {
             *delta >= 0
                 || i64::from(
@@ -669,8 +732,8 @@ pub fn cost_candidates(
 }
 
 /// Everything a spell on the stack costs besides mana: its additional casting cost, what
-/// casting it from a graveyard adds (retrace's land, escape's cards), and the non-mana
-/// parts of an alternative cost it was cast for ("pay 1 life and exile a blue card").
+/// any paid kicker, what casting it from a graveyard adds (retrace's land, escape's
+/// cards), and non-mana parts of an alternative cost ("pay 1 life and exile a blue card").
 pub fn spell_extra_cost(
     state: &GameState,
     cards: &dyn PrintedCards,
@@ -687,25 +750,77 @@ pub fn spell_extra_cost(
                 .extend(more);
         }
     };
+    if let Some(i) = cc.and_then(|c| c.cost_choice)
+        && let Some((_, option)) = cost_choice_options(face).and_then(|o| o.get(usize::from(i)))
+    {
+        extend(option.additional.clone());
+    }
+    if let Some(cc) = cc.filter(|c| c.kicked)
+        && let Some(kicker) = kicker_cost(face)
+    {
+        for _ in 0..cc.kicks.max(1) {
+            extend(kicker.additional.clone());
+        }
+    }
     if cc.and_then(|c| c.cast_from) == Some(mtg_core::Zone::Graveyard) {
         extend(cast_from_additional(face, mtg_core::Zone::Graveyard).additional);
     }
-    if cc.and_then(|c| c.alt_cost) == Some(mtg_ir::ability::AltCost::Pay) {
+    if let Some(alt @ (mtg_ir::ability::AltCost::Pay | mtg_ir::ability::AltCost::Emerge)) =
+        cc.and_then(|c| c.alt_cost)
+    {
         extend(
             face.abilities
                 .iter()
                 .find_map(|a| match &a.kind {
-                    mtg_ir::AbilityKind::AlternativeCost {
-                        cost,
-                        kind: mtg_ir::ability::AltCost::Pay,
-                        ..
-                    } => Some(cost.additional.clone()),
+                    mtg_ir::AbilityKind::AlternativeCost { cost, kind, .. } if *kind == alt => {
+                        Some(cost.additional.clone())
+                    }
                     _ => None,
                 })
                 .unwrap_or_default(),
         );
     }
     cost
+}
+
+/// "As an additional cost to cast this spell, sacrifice a creature or pay {3}.": the
+/// options, each with how it reads.
+pub fn cost_choice_options(face: &mtg_ir::CardFace) -> Option<&[(Box<str>, mtg_ir::Cost)]> {
+    face.abilities.iter().find_map(|a| match &a.kind {
+        mtg_ir::AbilityKind::AdditionalCastCostChoice { options } => Some(options.as_slice()),
+        _ => None,
+    })
+}
+
+/// Which options of an "A or B" additional cost `who` could pay for `object` now, with
+/// the rest of its cost.
+pub fn payable_cost_choices(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    who: PlayerId,
+) -> Vec<u8> {
+    let Some(obj) = state.objects.get(&object) else {
+        return Vec::new();
+    };
+    let Some(options) = cards
+        .face(obj.card, obj.face)
+        .and_then(cost_choice_options)
+    else {
+        return Vec::new();
+    };
+    let Some(total) = total_cost(state, cards, object, who) else {
+        return Vec::new();
+    };
+    (0..options.len() as u8)
+        .filter(|i| {
+            let option = &options[usize::from(*i)].1;
+            let mut with = total.clone();
+            with.symbols.extend(option.mana.symbols.iter().cloned());
+            additional_payable(state, cards, object, who, option)
+                && crate::mana::plan_spell(state, cards, who, &with, 0, object).is_some()
+        })
+        .collect()
 }
 
 /// A spell's additional casting cost ("As an additional cost to cast this spell, …").
@@ -795,13 +910,72 @@ pub fn is_entwine(face: &mtg_ir::CardFace) -> bool {
         .any(|a| matches!(a.kind, mtg_ir::AbilityKind::Kicker { entwine: true, .. }))
 }
 
+/// A face's strive cost, paid once for each target beyond the first (CR 702.103).
+pub fn strive(face: &mtg_ir::CardFace) -> Option<&ManaCost> {
+    face.abilities.iter().find_map(|a| match &a.kind {
+        mtg_ir::AbilityKind::Strive { per_target } => Some(per_target),
+        _ => None,
+    })
+}
+
+/// A face's flash surcharge: what casting it as though it had flash costs more.
+pub fn flash_surcharge(face: &mtg_ir::CardFace) -> Option<&ManaCost> {
+    face.abilities.iter().find_map(|a| match &a.kind {
+        mtg_ir::AbilityKind::FlashSurcharge { cost } => Some(cost),
+        _ => None,
+    })
+}
+
+/// Whether `who` could cast a sorcery now (CR 307.1): their main phase, stack empty.
+pub fn sorcery_timing(state: &GameState, who: PlayerId) -> bool {
+    state.active_player == who
+        && state.step.is_main_phase()
+        && state
+            .objects_in(mtg_core::ZoneRef::shared(mtg_core::Zone::Stack))
+            .is_empty()
+}
+
+/// A face's spree costs, one per mode (CR 702.172).
+pub fn spree(face: &mtg_ir::CardFace) -> Option<&[ManaCost]> {
+    face.abilities.iter().find_map(|a| match &a.kind {
+        mtg_ir::AbilityKind::Spree { costs } => Some(costs.as_slice()),
+        _ => None,
+    })
+}
+
+/// A face's escalate cost, paid once for each mode beyond the first (CR 702.120).
+pub fn escalate(face: &mtg_ir::CardFace) -> Option<&ManaCost> {
+    face.abilities.iter().find_map(|a| match &a.kind {
+        mtg_ir::AbilityKind::Escalate { per_mode } => Some(per_mode),
+        _ => None,
+    })
+}
+
+/// How many distinct things a spell targets, leaving out empty-slot placeholders.
+pub fn target_count(cc: &crate::state::CastContext) -> usize {
+    let mut seen: Vec<&mtg_core::Target> = Vec::new();
+    for (i, t) in cc.targets.iter().enumerate() {
+        if !cc.empty_slots.contains(&(i as u8)) && !seen.contains(&t) {
+            seen.push(t);
+        }
+    }
+    seen.len()
+}
+
+/// Whether a face's kicker may be paid any number of times (multikicker, replicate).
+pub fn is_multikicker(face: &mtg_ir::CardFace) -> bool {
+    face.abilities
+        .iter()
+        .any(|a| matches!(a.kind, mtg_ir::AbilityKind::Kicker { multi: true, .. }))
+}
+
 /// A face's kicker mana cost, if it has one the engine can pay: mana, and parts chosen as
-/// it is paid ("kicker—sacrifice an artifact or creature", casualty).
+/// it is paid ("kicker—sacrifice an artifact or creature", casualty), or fixed life.
 pub fn kicker(face: &mtg_ir::CardFace) -> Option<ManaCost> {
     kicker_cost(face).map(|c| c.mana)
 }
 
-/// A face's whole kicker cost, when every non-mana part is a chosen part.
+/// A face's whole kicker cost, with chosen non-mana parts and fixed life payments.
 pub fn kicker_cost(face: &mtg_ir::CardFace) -> Option<mtg_ir::Cost> {
     use mtg_ir::AdditionalCost as A;
     face.abilities.iter().find_map(|a| match &a.kind {
@@ -810,7 +984,12 @@ pub fn kicker_cost(face: &mtg_ir::CardFace) -> Option<mtg_ir::Cost> {
                 && cost.additional.iter().all(|p| {
                     matches!(
                         p,
-                        A::Sacrifice { .. } | A::TapUntapped { .. } | A::Discard { .. }
+                        A::Sacrifice { .. }
+                            | A::TapUntapped { .. }
+                            | A::Discard { .. }
+                            | A::PayLife {
+                                amount: mtg_ir::Value::Fixed(0..)
+                            }
                     )
                 }) =>
         {
@@ -852,4 +1031,47 @@ pub fn conditions_hold(
     conditions
         .iter()
         .all(|c| eval::condition(&ctx, c).unwrap_or(false))
+}
+
+/// Emerge: whether `object` could be cast for its emerge cost by sacrificing `creature`
+/// (CR 702.119a) — the cost less that creature's mana value, paid without it.
+pub fn emerge_affordable(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    who: PlayerId,
+    creature: ObjectId,
+) -> bool {
+    use crate::eval::CharacteristicsSource;
+    let chars = ComputedChars(cards);
+    let Some(mv) = chars
+        .characteristics(state, creature)
+        .map(|c| c.mana_cost.mana_value())
+    else {
+        return false;
+    };
+    let mut trial = state.clone();
+    trial.objects.remove(&creature);
+    let Some(obj) = trial.objects.get_mut(&object) else {
+        return false;
+    };
+    let cost = if obj.zone.zone == mtg_core::Zone::Stack {
+        obj.cast_context
+            .get_or_insert_with(Default::default)
+            .emerge_reduction = mv;
+        total_cost(&trial, cards, object, who)
+    } else {
+        // From the hand, before it is cast: the printed emerge cost.
+        cards.face(obj.card, obj.face).and_then(|f| {
+            f.abilities.iter().find_map(|a| match &a.kind {
+                mtg_ir::AbilityKind::AlternativeCost {
+                    cost,
+                    kind: mtg_ir::ability::AltCost::Emerge,
+                    ..
+                } => Some(apply_delta(cost.mana.clone(), 0, i64::from(mv))),
+                _ => None,
+            })
+        })
+    };
+    cost.is_some_and(|c| crate::mana::plan_spell(&trial, cards, who, &c, 0, object).is_some())
 }

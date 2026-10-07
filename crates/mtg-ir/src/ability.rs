@@ -157,6 +157,10 @@ pub enum AbilityKind {
     /// costs, paid with the mana cost.
     AdditionalCastCost { cost: Cost },
 
+    /// "As an additional cost to cast this spell, sacrifice a creature or pay {3}.": one
+    /// of these, chosen as it is cast (CR 601.2b), each with how it reads.
+    AdditionalCastCostChoice { options: Vec<(Box<str>, Cost)> },
+
     /// "Cast this spell only during combat", "… only if you control a creature": a
     /// condition on casting it at all (CR 601.3), however it is cast.
     CastOnlyIf {
@@ -174,7 +178,42 @@ pub enum AbilityKind {
         /// CR 702.42 — entwine: paying it chooses every mode of the modal spell.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         entwine: bool,
+        /// CR 702.33c / 702.56 — multikicker, replicate: it may be paid any number of
+        /// times; `Value::TimesKicked` counts them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        multi: bool,
     },
+
+    /// CR 702.103 — strive: "This spell costs {1}{U} more to cast for each target beyond
+    /// the first."
+    Strive { per_target: mtg_core::ManaCost },
+
+    /// CR 702.120 — escalate: "This spell costs <cost> more to cast for each mode chosen
+    /// beyond the first."
+    Escalate { per_mode: mtg_core::ManaCost },
+
+    /// CR 702.172 — spree: each mode of the modal spell has its own additional cost, paid
+    /// for each mode chosen (in mode order).
+    Spree { costs: Vec<mtg_core::ManaCost> },
+
+    /// "You may cast this spell as though it had flash if you pay {2} more to cast it.":
+    /// the extra paid when it is cast at a time a sorcery couldn't be. The permission
+    /// itself is a `FlashFor` static beside it.
+    FlashSurcharge { cost: mtg_core::ManaCost },
+
+    /// "If you cast it any time a sorcery couldn't have been cast, the controller of the
+    /// permanent it becomes sacrifices it at the beginning of the next cleanup step."
+    SacrificeIfFlashed,
+
+    /// CR 103.6 — "If this card is in your opening hand, you may begin the game with it on
+    /// the battlefield." (leylines)
+    BeginOnBattlefield,
+
+    /// CR 701.43 — "You may exert this creature as it attacks. When you do, …": chosen as
+    /// attackers are declared (CR 508.1). Exerting it resolves `effect` — the "when you
+    /// do" part as an `Effect::Reflexive`, or `Nothing` — on top of its not untapping
+    /// during its controller's next untap step.
+    ExertAsAttacks { effect: crate::Effect },
 
     /// A card that may be cast from another zone for another cost: flashback
     /// (CR 702.34) is `zone: Graveyard, exile: true`. `exile` means the card is exiled
@@ -300,6 +339,9 @@ pub enum AltCost {
     /// CR 118.9 — "You may sacrifice a Mountain rather than pay this spell's mana cost":
     /// the cost's other parts are paid as additional costs are (`cost::spell_extra_cost`).
     Pay,
+    /// CR 702.119 — emerge: sacrifice a creature and pay this cost, reduced by that
+    /// creature's mana value. The sacrifice is the cost's chosen part.
+    Emerge,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

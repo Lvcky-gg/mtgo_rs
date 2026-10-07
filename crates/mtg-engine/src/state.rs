@@ -61,6 +61,13 @@ pub struct GameState {
     pub day: Option<bool>,
     /// Players who attacked with a creature this turn (raid).
     pub attacked_this_turn: BTreeSet<PlayerId>,
+    /// Creatures declared as attackers this turn, by the identity they attacked with.
+    pub attacked_creatures: BTreeSet<ObjectId>,
+    /// Additional combat phases still to come this turn, each followed by a main phase
+    /// (CR 500.8), and whether one taken after the precombat main phase still owes the
+    /// turn its regular combat.
+    pub extra_combats: u32,
+    pub owed_combat: bool,
     /// Players dealt damage this turn (bloodthirst).
     pub damaged_this_turn: BTreeSet<PlayerId>,
     /// Players who lost life this turn, by damage or otherwise (CR 119.3).
@@ -101,6 +108,12 @@ pub struct GameState {
     pub top_revealed: Vec<PlayerId>,
     /// Announced identities retained for projected views, without hidden-zone positions.
     pub revealed_cards: Vec<crate::view::RevealedCard>,
+    /// Cards shown to one player only ("look at target player's hand"): that player's
+    /// view lists them with the public reveals.
+    pub looked_at: Vec<(PlayerId, crate::view::RevealedCard)>,
+    /// Permanents a static "if a creature … would die, exile it instead" currently covers,
+    /// recomputed as the engine settles (event application has no card data).
+    pub exile_if_dies_now: std::collections::BTreeSet<ObjectId>,
     pub monarch_emblem: Option<ObjectId>,
     /// Prevention shields until cleanup, oldest first (see [`crate::prevention`]).
     pub damage_shields: Vec<mtg_core::DamageShield>,
@@ -184,6 +197,9 @@ pub struct GameObject {
     pub face_down: bool,
     pub phased_out: bool,
     pub summoning_sick: bool,
+    /// The turn this object last entered the battlefield, for "if ~ entered this turn".
+    /// (Summoning sickness lasts until its controller's turn, which can be later.)
+    pub entered_turn: Option<u32>,
     /// Damage marked this turn, cleared in cleanup (CR 514.2).
     pub damage: u32,
     /// Whether any of that damage came from a deathtouch source. Tracked as a flag
@@ -201,6 +217,8 @@ pub struct GameObject {
     /// For a permanent that was a spell: the mana spent to cast it, by color.
     pub mana_spent: Vec<(Option<mtg_core::Color>, u16)>,
     pub kicked: bool,
+    /// How many times a multikicker was paid (CR 702.33c).
+    pub kicks: u32,
     /// The alternative cost it was cast for, if any (dash, evoke).
     pub cast_for: Option<mtg_ir::ability::AltCost>,
     /// For objects on the stack: the targets chosen on announcement, the value of
@@ -280,6 +298,7 @@ impl GameObject {
             face_down: false,
             phased_out: false,
             summoning_sick: false,
+            entered_turn: None,
             damage: 0,
             dealt_deathtouch_damage: false,
             counters: BTreeMap::new(),
@@ -287,6 +306,7 @@ impl GameObject {
             regeneration_shields: 0,
             cast_x: 0,
             kicked: false,
+            kicks: 0,
             cast_for: None,
             cast_context: None,
             attached_player: None,
@@ -337,6 +357,9 @@ pub struct Pregame {
     pub taken: BTreeMap<PlayerId, u32>,
     /// A player who has kept after mulliganing, still to put this many cards on the bottom.
     pub to_bottom: Option<(PlayerId, u32)>,
+    /// Once everyone has kept: index into `order` of the player now choosing which cards
+    /// to begin the game with on the battlefield (CR 103.6).
+    pub leylines: Option<usize>,
 }
 
 impl Pregame {
@@ -434,6 +457,14 @@ pub struct CastContext {
     pub exile_on_leave: bool,
     /// CR 702.33 — the kicker cost was paid.
     pub kicked: bool,
+    /// How many times a multikicker or replicate cost was paid (CR 702.33c, 702.56a).
+    pub kicks: u32,
+    /// Cast at a time a sorcery couldn't have been (for a flash surcharge).
+    pub flashed: bool,
+    /// Emerge: the sacrificed creature's mana value, off the generic cost (CR 702.119a).
+    pub emerge_reduction: u32,
+    /// Which of an "A or B" additional casting cost was chosen.
+    pub cost_choice: Option<u8>,
     /// A delayed trigger's effect, which is not on any card.
     pub effect: Option<mtg_ir::Effect>,
     /// The alternative cost it was cast for (dash, evoke).
@@ -449,6 +480,9 @@ pub struct CastContext {
     /// A granted ability's text, copied as it goes on the stack: what granted it may
     /// leave play before it resolves, and the ability still resolves (CR 113.7a).
     pub granted: Option<Box<mtg_ir::Ability>>,
+    /// A mana ability being announced because its cost is a choice (`mana::announced`):
+    /// the colour picked as it was activated. It resolves as soon as it is paid.
+    pub mana_choice: Option<Option<mtg_core::Color>>,
 }
 
 /// Combat assignments for the current turn (CR 506–511).
@@ -598,6 +632,8 @@ impl GameState {
             consecutive_passes: 0,
             continuous: Vec::new(),
             revealed_cards: Vec::new(),
+            looked_at: Vec::new(),
+            exile_if_dies_now: Default::default(),
             prevent_combat_damage: false,
             damage_unpreventable: false,
             prevent_damage_to: Vec::new(),
@@ -621,6 +657,9 @@ impl GameState {
             gained_life_this_turn: BTreeSet::new(),
             damaged_by_this_turn: BTreeSet::new(),
             attacked_this_turn: BTreeSet::new(),
+            attacked_creatures: BTreeSet::new(),
+            extra_combats: 0,
+            owed_combat: false,
             day: None,
             exiled_instead_of_graveyard: BTreeSet::new(),
             linked_exile: Vec::new(),

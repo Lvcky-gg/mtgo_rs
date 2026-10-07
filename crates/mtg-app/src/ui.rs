@@ -1108,7 +1108,7 @@ impl GuiApp {
                     None
                 }
             }
-            ChoiceKind::ChooseTargets { slots } if slots.len() == 1 => slots[0]
+            ChoiceKind::ChooseTargets { slots, .. } if slots.len() == 1 => slots[0]
                 .contains(&mtg_core::Target::Object(id))
                 .then_some(BoardPick::Target),
             ChoiceKind::ChooseObjects { from, .. } => {
@@ -1930,10 +1930,23 @@ impl GuiApp {
                 }
             }
 
-            ChoiceKind::ChooseTargets { slots } => {
+            ChoiceKind::ChooseTargets { slots, optional } => {
                 let slots = slots.clone();
+                let optional = optional.clone();
                 for (i, options) in slots.iter().enumerate() {
                     ui.label(RichText::new(format!("Target {}", i + 1)).small());
+                    if optional.get(i).copied().unwrap_or(false)
+                        && ui
+                            .selectable_label(!self.picked_targets.contains_key(&i), "No target")
+                            .clicked()
+                    {
+                        if slots.len() == 1 {
+                            self.answer(Answer::Targets(vec![vec![]]));
+                            return;
+                        }
+                        self.picked_targets.remove(&i);
+                        self.target_pick_order.retain(|slot| *slot != i);
+                    }
                     if options.is_empty() {
                         ui.label(RichText::new("No legal targets").weak());
                     }
@@ -2001,7 +2014,7 @@ impl GuiApp {
                         });
                 }
                 if slots.len() != 1 || slots[0].is_empty() {
-                    let answer = selected_target_answer(&slots, &self.picked_targets);
+                    let answer = selected_target_answer(&slots, &optional, &self.picked_targets);
                     if ui
                         .add_enabled(answer.is_some(), egui::Button::new("Confirm targets"))
                         .clicked()
@@ -2550,13 +2563,16 @@ fn object_selection_options(
 /// Assemble complete target slots without accepting stale or illegal selections.
 fn selected_target_answer(
     slots: &[Vec<mtg_core::Target>],
+    optional: &[bool],
     picked: &std::collections::BTreeMap<usize, mtg_core::Target>,
 ) -> Option<Answer> {
     let targets: Option<Vec<_>> = slots
         .iter()
         .enumerate()
         .map(|(i, options)| {
-            if options.is_empty() {
+            if options.is_empty()
+                || (!picked.contains_key(&i) && optional.get(i).copied().unwrap_or(false))
+            {
                 Some(Vec::new())
             } else {
                 picked
@@ -2815,6 +2831,7 @@ mod target_tests {
         );
         let view = mtg_engine::view::project(&state, viewer);
         let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            optional: Vec::new(),
             slots: vec![vec![Target::Object(object)], vec![Target::Object(object)]],
         });
         app.texts = CardTexts::snapshot(&DemoCards::default(), [DUMMY]);
@@ -2878,6 +2895,7 @@ mod target_tests {
         );
         let target = Target::Object(object);
         let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            optional: Vec::new(),
             slots: vec![vec![target], vec![target]],
         });
         app.current.as_mut().unwrap().view = mtg_engine::view::project(&state, viewer);
@@ -2960,6 +2978,44 @@ mod target_tests {
         assert_eq!(app.picked, vec![first]);
         click_question_label(&mut app, &ctx, "Confirm");
         assert!(matches!(answers.try_recv().unwrap(), Answer::Objects(ids) if ids == vec![first]));
+    }
+
+    #[test]
+    fn opening_battlefield_choices_allow_none_some_or_all() {
+        use mtg_headless::cards::{DUMMY, DemoCards, SENTRY};
+        let cards = DemoCards::default();
+        for count in 0..=2 {
+            let mut state = mtg_engine::state::GameState::new(&[PlayerId(0), PlayerId(1)], 20);
+            let ids: Vec<_> = [DUMMY, SENTRY]
+                .into_iter()
+                .map(|card| {
+                    state.place(
+                        card,
+                        PlayerId(0),
+                        mtg_core::ZoneRef::of(mtg_core::Zone::Hand, PlayerId(0)),
+                    )
+                })
+                .collect();
+            let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseObjects {
+                from: ids.clone(),
+                min: 0,
+                max: 2,
+            });
+            app.texts = CardTexts::snapshot(&cards, [DUMMY, SENTRY]);
+            let question = app.current.as_mut().unwrap();
+            question.view = mtg_engine::view::project(&state, PlayerId(0));
+            question.choice.because = "begin the game with these on the battlefield".into();
+            question.choice.default = Some(Answer::Objects(ids.clone()));
+            for card in [DUMMY, SENTRY].into_iter().take(count) {
+                let name = app.texts.name(Some(card));
+                click_question_label(&mut app, &ctx, &name);
+            }
+            click_question_label(&mut app, &ctx, "Confirm");
+            assert!(
+                matches!(answers.try_recv().unwrap(), Answer::Objects(picked)
+                if picked == ids[..count])
+            );
+        }
     }
 
     #[test]
@@ -3222,6 +3278,7 @@ mod target_tests {
         let mine = Target::Player(PlayerId(0));
         let theirs = Target::Player(PlayerId(1));
         let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            optional: Vec::new(),
             slots: vec![vec![mine], vec![theirs]],
         });
         click_question_label(&mut app, &ctx, "You");
@@ -3382,6 +3439,7 @@ mod target_tests {
     fn a_single_target_still_submits_immediately() {
         let target = Target::Player(PlayerId(0));
         let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            optional: Vec::new(),
             slots: vec![vec![target]],
         });
         click_question_label(&mut app, &ctx, "You");
@@ -3396,6 +3454,7 @@ mod target_tests {
         let mine = Target::Player(PlayerId(0));
         let theirs = Target::Player(PlayerId(1));
         let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            optional: Vec::new(),
             slots: vec![vec![mine], vec![theirs]],
         });
         click_question_label(&mut app, &ctx, "Opponent");
@@ -3609,14 +3668,14 @@ mod target_tests {
         let object = Target::Object(ObjectId(3));
         let slots = vec![vec![player, object], vec![object]];
         let mut picked = BTreeMap::from([(1, object)]);
-        assert!(selected_target_answer(&slots, &picked).is_none());
+        assert!(selected_target_answer(&slots, &[], &picked).is_none());
         picked.insert(0, player);
-        let Some(Answer::Targets(targets)) = selected_target_answer(&slots, &picked) else {
+        let Some(Answer::Targets(targets)) = selected_target_answer(&slots, &[], &picked) else {
             panic!("complete selections must produce a target answer");
         };
         assert_eq!(targets, vec![vec![player], vec![object]]);
         picked.insert(1, player);
-        assert!(selected_target_answer(&slots, &picked).is_none());
+        assert!(selected_target_answer(&slots, &[], &picked).is_none());
     }
 
     #[test]
@@ -3624,9 +3683,83 @@ mod target_tests {
         let target = Target::Object(ObjectId(3));
         let slots = vec![vec![target], vec![], vec![target]];
         let picked = BTreeMap::from([(0, target), (2, target)]);
-        let Some(Answer::Targets(targets)) = selected_target_answer(&slots, &picked) else {
+        let Some(Answer::Targets(targets)) = selected_target_answer(&slots, &[], &picked) else {
             panic!("the same legal target may occupy multiple slots");
         };
         assert_eq!(targets, vec![vec![target], vec![], vec![target]]);
+    }
+    #[test]
+    fn an_optional_target_can_be_declined_despite_a_nonempty_default() {
+        let target = Target::Player(PlayerId(0));
+        let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            slots: vec![vec![target]],
+            optional: vec![true],
+        });
+        app.current.as_mut().unwrap().choice.default = Some(Answer::Targets(vec![vec![target]]));
+        click_question_label(&mut app, &ctx, "No target");
+        assert!(
+            matches!(answers.try_recv().unwrap(), Answer::Targets(slots) if slots == vec![vec![]])
+        );
+    }
+
+    #[test]
+    fn mixed_slots_confirm_a_required_pick_and_an_empty_optional_slot() {
+        let mine = Target::Player(PlayerId(0));
+        let theirs = Target::Player(PlayerId(1));
+        let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            slots: vec![vec![mine], vec![theirs]],
+            optional: vec![false, true],
+        });
+        click_question_label(&mut app, &ctx, "Confirm targets");
+        assert!(answers.try_recv().is_err(), "required target still missing");
+        click_question_label(&mut app, &ctx, "You");
+        click_question_label(&mut app, &ctx, "Opponent");
+        click_question_label(&mut app, &ctx, "No target");
+        assert_eq!(app.target_pick_order, vec![0]);
+        assert!(
+            answers.try_recv().is_err(),
+            "multiple slots wait for confirmation"
+        );
+        click_question_label(&mut app, &ctx, "Confirm targets");
+        assert!(
+            matches!(answers.try_recv().unwrap(), Answer::Targets(slots) if slots == vec![vec![mine], vec![]])
+        );
+    }
+
+    #[test]
+    fn mandatory_targets_do_not_offer_a_skip_control() {
+        let (mut app, answers, ctx) = question_app(ChoiceKind::ChooseTargets {
+            slots: vec![vec![Target::Player(PlayerId(0))]],
+            optional: vec![false],
+        });
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw_question(ui));
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::Text(text) if text.galley.text() == "No target")));
+        output.textures_delta.clear();
+        assert!(answers.try_recv().is_err());
+    }
+
+    #[test]
+    fn optional_selection_rejects_illegal_picks_and_missing_metadata_is_required() {
+        let target = Target::Player(PlayerId(0));
+        let slots = vec![vec![target]];
+        assert!(
+            matches!(selected_target_answer(&slots, &[true], &BTreeMap::new()),
+            Some(Answer::Targets(picks)) if picks == vec![vec![]])
+        );
+        assert!(selected_target_answer(&slots, &[], &BTreeMap::new()).is_none());
+        let illegal = BTreeMap::from([(0, Target::Player(PlayerId(1)))]);
+        assert!(selected_target_answer(&slots, &[true], &illegal).is_none());
+    }
+
+    #[test]
+    fn legacy_target_prompts_deserialize_with_required_slots() {
+        let kind: ChoiceKind =
+            serde_json::from_str(r#"{"ChooseTargets":{"slots":[[{"Player":0}]]}}"#).unwrap();
+        let ChoiceKind::ChooseTargets { slots, optional } = kind else {
+            panic!("target prompt");
+        };
+        assert!(optional.is_empty());
+        assert!(selected_target_answer(&slots, &optional, &BTreeMap::new()).is_none());
     }
 }

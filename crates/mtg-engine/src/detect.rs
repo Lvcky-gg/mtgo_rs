@@ -758,20 +758,23 @@ fn pattern_matches(
         ) => (subject_ok(who, *object) && player_ok(by, *caster))
             .then(|| bind(Some(Target::Object(*object)), Some(Target::Player(*caster)))),
         (
-            EventPattern::CastTargeting { by, target },
+            EventPattern::CastTargeting { by, target, spell },
             Event::SpellCast {
                 object,
                 controller: caster,
             },
         ) => (player_ok(by, *caster)
+            && subject_ok(spell, *object)
             && state
                 .objects
                 .get(object)
                 .and_then(|o| o.cast_context.as_ref())
                 .is_some_and(|c| {
-                    c.targets
-                        .iter()
-                        .any(|t| matches!(t, Target::Object(id) if subject_ok(target, *id)))
+                    // Empty-slot placeholders are not targets.
+                    c.targets.iter().enumerate().any(|(i, t)| {
+                        !c.empty_slots.contains(&(i as u8))
+                            && matches!(t, Target::Object(id) if subject_ok(target, *id))
+                    })
                 }))
         .then(|| bind(Some(Target::Object(*object)), Some(Target::Player(*caster)))),
         (
@@ -1147,8 +1150,9 @@ fn eval_filter(
         // The event's object is the trigger's own source, under either of the identities
         // it has in this event (see `pattern_matches`).
         ObjectFilter::IsSelf => selves.contains(&Some(id)),
-        // Resolution-local bindings are unavailable while detecting triggers.
-        ObjectFilter::InBinding(_) => false,
+        // Resolution-local bindings are unavailable while detecting triggers, and no
+        // trigger watches what a stack object targets this way.
+        ObjectFilter::InBinding(_) | ObjectFilter::TargetsObject(_) => false,
         ObjectFilter::HasType(t) => chars.has_type(*t),
         ObjectFilter::HasSubtype(s) => chars.has_subtype(*s, |s| cards.subtype_name(s)),
         ObjectFilter::HasSupertype(s) => chars.supertypes.contains(s),
@@ -1159,6 +1163,9 @@ fn eval_filter(
         ObjectFilter::AttachedToSource => {
             selves.iter().flatten().any(|s| obj.attached_to == Some(*s))
         }
+        ObjectFilter::Named(name) => cards
+            .face(obj.card, obj.face)
+            .is_some_and(|face| face.name.to_lowercase().replace('−', "-") == *name),
         ObjectFilter::NamedLikeSource => {
             let name = |o: &GameObject| cards.face(o.card, o.face).map(|f| f.name.clone());
             selves
@@ -1184,6 +1191,7 @@ fn eval_filter(
         // carry; no printed trigger condition asks it.
         // "Enchanted creature", "equipped creature": what the source is (or was, as it
         // left) attached to.
+        ObjectFilter::AttackedThisTurn => state.attacked_creatures.contains(&id),
         ObjectFilter::DealtDamageBySelfThisTurn => selves
             .iter()
             .flatten()
@@ -1217,7 +1225,7 @@ fn eval_filter(
         ObjectFilter::DealtDamageThisTurn => {
             state.damaged_by_this_turn.iter().any(|(_, o)| *o == id)
         }
-        ObjectFilter::EnteredThisTurn => obj.summoning_sick,
+        ObjectFilter::EnteredThisTurn => obj.entered_turn == Some(state.turn),
         // Chosen as the trigger's source entered.
         ObjectFilter::HasChosenSubtype => selves
             .first()
@@ -1301,6 +1309,7 @@ fn disguise_ward() -> mtg_ir::Ability {
                 life: None,
                 discard: false,
                 exile: false,
+                times: None,
             },
         },
         targets: Vec::new(),

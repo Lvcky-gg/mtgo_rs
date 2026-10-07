@@ -593,6 +593,7 @@ mod tests {
             life,
             poison: 0,
             energy: 0,
+            city_blessing: false,
             hand_size: objects
                 .iter()
                 .filter(|o| o.zone.zone == Zone::Hand && o.zone.player == Some(id))

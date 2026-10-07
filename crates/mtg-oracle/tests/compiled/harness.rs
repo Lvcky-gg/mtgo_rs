@@ -62,6 +62,11 @@ const SUBTYPES: &[&str] = &[
     "Dragon",
     "Gate",
     "Desert",
+    "Merfolk",
+    "Tyranid",
+    "Gargoyle",
+    "Hero",
+    "Monk",
 ];
 
 #[derive(Default)]
@@ -93,6 +98,20 @@ impl Table {
         text: &str,
     ) -> CardId {
         let name = format!("Card {}", self.faces.len());
+        self.named_card(&name, cost, type_line, pt, text)
+    }
+
+    /// Compile a fixture with an explicit name for name-dependent searches.
+    #[track_caller]
+    pub fn named_card(
+        &mut self,
+        name: &str,
+        cost: &str,
+        type_line: &str,
+        pt: Option<(i32, i32)>,
+        text: &str,
+    ) -> CardId {
+        let name = name.to_owned();
         let row = FaceRow {
             name: name.clone(),
             mana_cost: cost.into(),
@@ -291,9 +310,16 @@ impl Game {
                 Progress::GameOver { .. } => return,
                 Progress::NeedsChoice(c) => match &c.kind {
                     ChoiceKind::ChooseTargets { .. } => {
-                        let t = targets.next().expect("asked for more targets than given");
+                        // Out of listed targets, an optional slot takes its default of none.
+                        let answer = match (targets.next(), &c.default) {
+                            (Some(t), _) => Answer::Targets(vec![vec![t]]),
+                            (None, Some(Answer::Targets(d))) if d.iter().all(Vec::is_empty) => {
+                                Answer::Targets(d.clone())
+                            }
+                            (None, _) => panic!("asked for more targets than given"),
+                        };
                         self.engine
-                            .answer(&self.table, c.id, Answer::Targets(vec![vec![t]]))
+                            .answer(&self.table, c.id, answer)
                             .expect("target accepted");
                     }
                     ChoiceKind::Priority { legal } => {

@@ -67,6 +67,9 @@ pub enum ChoiceKind {
     ChooseTargets {
         /// One entry per target slot, listing what is currently legal.
         slots: Vec<Vec<Target>>,
+        /// Whether each slot may be left empty. Missing entries are required.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        optional: Vec<bool>,
     },
     ChooseModes {
         available: Vec<Box<str>>,

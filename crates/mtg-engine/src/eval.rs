@@ -514,6 +514,64 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
                 _ => spent.iter().filter(|(c, n)| c.is_some() && *n > 0).count() as i32,
             }
         }
+        Value::TimesKicked => ctx.state.objects.get(&ctx.source).map_or(0, |o| {
+            o.cast_context
+                .as_ref()
+                .map_or(o.kicks, |c| c.kicks.max(o.kicks)) as i32
+        }),
+        Value::OpponentsAttacked => {
+            let mut players: Vec<PlayerId> = ctx
+                .state
+                .combat
+                .attackers
+                .values()
+                .filter_map(|t| match t {
+                    Target::Player(p) if *p != ctx.controller => Some(*p),
+                    _ => None,
+                })
+                .collect();
+            players.sort();
+            players.dedup();
+            players.len() as i32
+        }
+        Value::CastX => ctx
+            .state
+            .objects
+            .get(&ctx.source)
+            .or_else(|| ctx.state.last_known.get(&ctx.source))
+            .map_or(0, |o| o.cast_x as i32),
+        Value::Half { value: v, up } => {
+            let v = value(ctx, v)?.max(0);
+            if *up { (v + 1) / 2 } else { v / 2 }
+        }
+        Value::DiedThisTurn(filter) => {
+            // Each as it last existed on the battlefield (CR 608.2h): put back into a
+            // scratch copy of the state for the filter to read.
+            let mut then = ctx.state.clone();
+            for id in &ctx.state.died_this_turn {
+                if let Some(o) = ctx.state.last_known.get(id) {
+                    then.objects.insert(*id, o.clone());
+                }
+            }
+            let c = Ctx {
+                state: &then,
+                cards: ctx.cards,
+                chars: ctx.chars,
+                source: ctx.source,
+                controller: ctx.controller,
+                targets: ctx.targets,
+                target_legal: ctx.target_legal,
+                x: ctx.x,
+                bindings: ctx.bindings,
+            };
+            let mut n = 0;
+            for id in &ctx.state.died_this_turn {
+                if matches(&c, filter, *id).unwrap_or(false) {
+                    n += 1;
+                }
+            }
+            n
+        }
         Value::SpellsCastBefore => ctx
             .state
             .objects
@@ -735,6 +793,9 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             .objects
             .get(&id)
             .is_some_and(|o| o.attached_to == Some(ctx.source)),
+        ObjectFilter::Named(name) => ctx.cards
+            .face(obj.card, obj.face)
+            .is_some_and(|face| face.name.to_lowercase().replace('−', "-") == *name),
         ObjectFilter::NamedLikeSource => {
             let name = |id: ObjectId| {
                 ctx.state
@@ -760,6 +821,7 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             .blocks
             .get(&ctx.source)
             .is_some_and(|bs| bs.contains(&id)),
+        ObjectFilter::AttackedThisTurn => ctx.state.attacked_creatures.contains(&id),
         ObjectFilter::DealtDamageBySelfThisTurn => {
             ctx.state.damaged_by_this_turn.contains(&(ctx.source, id))
         }
@@ -809,7 +871,7 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
         }
         // Summoning sickness is set on entry and cleared at the start of its
         // controller's turn, so it is exactly "entered this turn" for a creature.
-        ObjectFilter::EnteredThisTurn => obj.summoning_sick,
+        ObjectFilter::EnteredThisTurn => obj.entered_turn == Some(ctx.state.turn),
         ObjectFilter::HasChosenSubtype => {
             match ctx
                 .state
@@ -863,6 +925,23 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
         }
 
         ObjectFilter::Not(inner) => !matches(ctx, inner, id)?,
+        // Its chosen targets, leaving out empty-slot placeholders.
+        ObjectFilter::TargetsObject(inner) => {
+            let Some(cc) = obj.cast_context.as_ref() else {
+                return Ok(false);
+            };
+            let mut any = false;
+            for (i, t) in cc.targets.iter().enumerate() {
+                if let Target::Object(t) = t
+                    && !cc.empty_slots.contains(&(i as u8))
+                    && matches(ctx, inner, *t)?
+                {
+                    any = true;
+                    break;
+                }
+            }
+            any
+        }
         ObjectFilter::And(fs) => {
             for f in fs {
                 if !matches(ctx, f, id)? {

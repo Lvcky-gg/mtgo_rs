@@ -18,6 +18,17 @@ pub enum Value {
     EventAmount,
     /// Sunburst, converge: how many colors of mana were spent to cast the source.
     ColorsSpent,
+    /// How many times the source's multikicker or replicate cost was paid (CR 702.33c).
+    TimesKicked,
+    /// The X the source permanent was cast with (CR 107.3m): ravenous's "if X is 5 or more".
+    CastX,
+    /// How many opponents of the controller are being attacked this combat (melee).
+    OpponentsAttacked,
+    /// "half their life, rounded up" (CR 107.1a): half of a value, rounded up or down.
+    Half { value: Box<Value>, up: bool },
+    /// How many permanents matching this died this turn ("for each creature that died
+    /// this turn"), as each last existed.
+    DiedThisTurn(Box<crate::ObjectFilter>),
     /// Mana of this color spent to cast the source ("if {R} was spent to cast it",
     /// adamant).
     ManaSpentOfColor(mtg_core::Color),

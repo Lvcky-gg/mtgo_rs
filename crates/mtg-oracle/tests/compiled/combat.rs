@@ -554,3 +554,122 @@ fn its_controller_chooses_the_division() {
     assert!(g.engine.state.objects.contains_key(&a), "assigned none");
     assert!(!g.engine.state.objects.contains_key(&b), "assigned all 3");
 }
+
+#[test]
+fn a_blocked_creature_slips_out_of_combat() {
+    let mut t = Table::default();
+    let rogue = t.card(
+        "{U}",
+        "Creature — Elf",
+        Some((2, 2)),
+        "Whenever this creature becomes blocked, you may untap it and remove it from combat.",
+    );
+    let wall = t.card("{1}", "Creature — Bear", Some((5, 5)), "");
+    let mut g = Game::new(t);
+    let r = g.put(rogue, P0, Zone::Battlefield);
+    let w = g.put(wall, P1, Zone::Battlefield);
+    g.main();
+    g.combat(&[r], &[(w, r)], &[], &[Answer::Bool(true)]);
+    assert!(g.engine.state.objects.contains_key(&r), "dealt no damage, took none");
+    assert!(!g.engine.state.objects[&r].tapped, "untapped");
+    assert_eq!(g.engine.state.objects[&w].damage, 0);
+}
+
+#[test]
+fn blocks_or_becomes_blocked_by_a_non_wall() {
+    for (other_wall, attacking) in [(false, true), (true, true), (false, false)] {
+        let mut t = Table::default();
+        let basilisk = t.card(
+            "{2}",
+            "Creature — Elf",
+            Some((1, 4)),
+            "Whenever this creature blocks or becomes blocked by a non-Wall creature, destroy \
+             that creature at end of combat.",
+        );
+        let other = t.card(
+            "{1}",
+            if other_wall {
+                "Creature — Wall"
+            } else {
+                "Creature — Bear"
+            },
+            Some((1, 4)),
+            "",
+        );
+        let mut g = Game::new(t);
+        let (b, o) = if attacking {
+            (
+                g.put(basilisk, P0, Zone::Battlefield),
+                g.put(other, P1, Zone::Battlefield),
+            )
+        } else {
+            (
+                g.put(basilisk, P1, Zone::Battlefield),
+                g.put(other, P0, Zone::Battlefield),
+            )
+        };
+        g.main();
+        if attacking {
+            g.combat(&[b], &[(o, b)], &[], &[]);
+        } else {
+            g.combat(&[o], &[(b, o)], &[], &[]);
+        }
+        assert_eq!(
+            g.engine.state.objects.contains_key(&o),
+            other_wall,
+            "wall: {other_wall}, attacking: {attacking}"
+        );
+    }
+}
+
+#[test]
+fn an_additional_combat_phase_after_this_main_phase() {
+    let text = "Untap all creatures that attacked this turn. After this main phase, there is an \
+                additional combat phase followed by an additional main phase.";
+    // Cast after combat: untap the attacker and attack again.
+    let mut t = Table::default();
+    let assault = t.card("{R}", "Sorcery", None, text);
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let s = g.put(assault, P0, Zone::Hand);
+    g.main();
+    g.combat(&[b], &[], &[], &[]);
+    assert_eq!(g.life(P1), 18);
+    assert!(g.engine.state.objects[&b].tapped);
+    g.cast(s, &[]);
+    assert!(!g.engine.state.objects[&b].tapped, "it attacked, so it untaps");
+    g.combat(&[b], &[], &[], &[]);
+    assert_eq!(g.life(P1), 16, "a second combat");
+    assert_eq!(g.engine.state.turn, 2);
+
+    // Cast before combat: the extra combat comes first, and the regular one still follows.
+    let mut t = Table::default();
+    let assault = t.card("{R}", "Sorcery", None, text);
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let s = g.put(assault, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[]);
+    g.combat(&[b], &[], &[], &[]);
+    assert_eq!(g.life(P1), 18);
+    // Untap it by hand to show the regular combat is still there.
+    g.engine.state.objects.get_mut(&b).unwrap().tapped = false;
+    g.combat(&[b], &[], &[], &[]);
+    assert_eq!(g.life(P1), 16);
+    assert_eq!(g.engine.state.turn, 2);
+}
+
+#[test]
+fn melee_counts_the_opponents_attacked() {
+    let mut t = Table::default();
+    let knight = t.card("{1}{W}", "Creature — Soldier", Some((2, 2)), "Melee");
+    let mut g = Game::new(t);
+    let k = g.put(knight, P0, Zone::Battlefield);
+    g.main();
+    g.combat(&[k], &[], &[], &[]);
+    assert_eq!(g.life(P1), 17, "3 damage: one opponent attacked");
+}

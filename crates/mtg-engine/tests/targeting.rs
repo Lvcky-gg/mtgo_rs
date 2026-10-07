@@ -55,7 +55,7 @@ fn play(
                         })
                         .map(Answer::Action)
                         .unwrap_or(Answer::Pass),
-                    ChoiceKind::ChooseTargets { slots } => {
+                    ChoiceKind::ChooseTargets { slots, .. } => {
                         asked.push(c.clone());
                         Answer::Targets(slots.iter().map(|s| pick(s)).collect())
                     }
@@ -117,7 +117,7 @@ fn a_targeted_spell_asks_for_its_target() {
     );
 
     let slots = asked.iter().find_map(|c| match &c.kind {
-        ChoiceKind::ChooseTargets { slots } => Some(slots.clone()),
+        ChoiceKind::ChooseTargets { slots, .. } => Some(slots.clone()),
         _ => None,
     });
     let slots = slots.expect("should have asked for a target");
@@ -367,7 +367,7 @@ fn cast_then_kill(spell: mtg_core::CardId) -> (Engine, TestCards) {
                         .cloned()
                         .map(Answer::Action)
                         .unwrap_or(Answer::Pass),
-                    ChoiceKind::ChooseTargets { slots } => {
+                    ChoiceKind::ChooseTargets { slots, .. } => {
                         Answer::Targets(slots.iter().map(|s| s.to_vec()).collect())
                     }
                     _ => c.default.clone().unwrap_or(Answer::Pass),
@@ -492,7 +492,7 @@ fn a_triggered_ability_chooses_targets_as_it_goes_on_the_stack() {
     let _ = cards;
 
     let slots = asked.iter().find_map(|c| match &c.kind {
-        ChoiceKind::ChooseTargets { slots } => Some(slots.clone()),
+        ChoiceKind::ChooseTargets { slots, .. } => Some(slots.clone()),
         _ => None,
     });
     let slots = slots.expect("the trigger should have asked for a target");
@@ -649,7 +649,7 @@ fn a_targeted_trigger_fizzles_if_its_target_is_gone_by_resolution() {
                         .cloned()
                         .map(Answer::Action)
                         .unwrap_or(Answer::Pass),
-                    ChoiceKind::ChooseTargets { slots } => {
+                    ChoiceKind::ChooseTargets { slots, .. } => {
                         // Name the victim specifically: the sentinel itself is also a
                         // legal target, and targeting that would make the test pass for
                         // the wrong reason.

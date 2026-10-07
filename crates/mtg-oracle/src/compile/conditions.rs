@@ -54,6 +54,7 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
         ("~ is untapped", ObjectFilter::Tapped(false)),
         ("it's tapped", ObjectFilter::Tapped(true)),
         ("~ is tapped", ObjectFilter::Tapped(true)),
+        ("~ entered this turn", ObjectFilter::EnteredThisTurn),
     ] {
         if let Some(r) = s.strip_prefix(prefix) {
             return Some((me(f), r));
@@ -328,10 +329,11 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
         }
         return None;
     }
-    if let Some(r) = s.strip_prefix("there are ") {
-        // "there are seven or more cards in your graveyard".
-        let (n, r) = words::number(r)?;
-        let r = r.strip_prefix(" or more cards in your graveyard")?;
+    // "there are seven or more cards in your graveyard".
+    if let Some(r) = s.strip_prefix("there are ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more cards in your graveyard")
+    {
         return Some((
             Condition::CountAtLeast {
                 what: Selector::All {
@@ -388,6 +390,29 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
                 r,
             ));
         }
+    }
+    // "there are no depletion counters on ~", "~ has no time counters on it".
+    let none_on = s
+        .strip_prefix("there are no ")
+        .and_then(|r| {
+            let (kind, r) = words::counter(r)?;
+            Some((kind, r.strip_prefix("s on ~")?))
+        })
+        .or_else(|| {
+            let r = s
+                .strip_prefix("~ has no ")
+                .or_else(|| s.strip_prefix("it has no ").filter(|_| it_is_self))?;
+            let (kind, r) = words::counter(r)?;
+            Some((kind, r.strip_prefix("s on it")?))
+        });
+    if let Some((kind, r)) = none_on {
+        return Some((
+            Condition::Not(Box::new(at_least(
+                Value::Counters(Box::new(Selector::SelfSource), kind),
+                1,
+            ))),
+            r,
+        ));
     }
     // "enchanted creature is red", "equipped creature is a Human", "… is legendary".
     for host in [

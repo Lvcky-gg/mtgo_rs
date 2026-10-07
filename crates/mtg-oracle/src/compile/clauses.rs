@@ -16,15 +16,53 @@ use super::{Cx, nouns, words};
 /// A whole effect: one or more sentences. `None` unless every word is accounted for.
 pub fn effect(text: &str, cx: &mut Cx) -> Option<Effect> {
     let text = text.trim().strip_suffix('.').unwrap_or(text.trim());
+    let text = words::strip_ability_word(text);
     cx.until_eot = false;
+    // "Choose a creature type. Creatures you control of that type get +1/+0 …": asked as it
+    // resolves; "that type" is the chosen one.
+    for (lead, choice, noun) in [
+        ("choose a color. ", mtg_ir::effect::EntryChoice::Color, "color"),
+        (
+            "choose a creature type. ",
+            mtg_ir::effect::EntryChoice::CreatureType,
+            "type",
+        ),
+    ] {
+        if let Some(r) = text.strip_prefix(lead) {
+            let r = r.replace(&format!("that {noun}"), &format!("the chosen {noun}"));
+            return Some(Effect::Choose {
+                choice,
+                then: Box::new(effect(&r, cx)?),
+            });
+        }
+    }
     // "…, where X is the number of creatures you control."
-    if let Some((body, what)) = text.split_once(", where x is ") {
+    // A top-X library count has a local definition before its selection instructions.
+    // Dig consumes that definition directly instead of substituting X through the effect.
+    if let Some((body, what)) = text.split_once(", where x is ")
+        && !body.ends_with("top x cards of your library")
+    {
         let (v, rest) = value_phrase(what, cx)?;
-        if !rest.is_empty() || cx.x {
+        if cx.x {
             return None;
         }
+        let body = if rest.is_empty() {
+            body.to_owned()
+        } else {
+            // An inline scry definition may be followed by a fixed-number draw.
+            // Later references to X are excluded from this continuation.
+            if !body.ends_with("scry x") {
+                return None;
+            }
+            let next = rest.strip_prefix(", then ")?;
+            let (_, tail) = count_of(next.strip_prefix("draw ")?, "card", cx)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            format!("{body}, then {next}")
+        };
         cx.x = true;
-        let mut e = effect(body, cx);
+        let mut e = effect(&body, cx);
         cx.x = false;
         if let Some(e) = &mut e {
             replace_x(e, &v)?;
@@ -122,6 +160,7 @@ fn guard_suffix<'s>(e: &Effect, r: &'s str, cx: &mut Cx) -> Option<(Effect, &'s 
             | Effect::ForEach { .. }
             | Effect::Repeat { .. }
             | Effect::Reflexive { .. }
+            | Effect::Choose { .. }
             | Effect::Delayed { .. }
     ) {
         return None;
@@ -275,6 +314,33 @@ fn shuffle_self_away<'s>(s: &'s str, _: &mut Cx) -> Option<(Effect, &'s str)> {
     ))
 }
 
+/// "Its owner shuffles it into their library", or an explicit targeted object.
+fn owner_shuffles_object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let (what, r) = if let Some(r) = s.strip_prefix("the owner of ") {
+        let (what, plural, r) = nouns::object(r, cx)?;
+        if plural {
+            return None;
+        }
+        (what, r.strip_prefix(" shuffles it into their library")?)
+    } else {
+        let r = s.strip_prefix("its owner shuffles it into their library")?;
+        let what = cx.it.clone()?;
+        if !matches!(what, Selector::Target { .. } | Selector::SelfSource) {
+            return None;
+        }
+        (what, r)
+    };
+    Some((
+        Effect::Sequence(vec![
+            move_zone(what, Zone::Library, ZonePosition::Natural),
+            Effect::Shuffle {
+                who: Selector::OwnerOf(Box::new(Selector::Bound(mtg_ir::selector::Binding::It))),
+            },
+        ]),
+        r,
+    ))
+}
+
 /// The object an effect acts on, for "it" in a sentence that follows.
 fn acted_on(e: &Effect) -> Option<Selector> {
     match e {
@@ -347,7 +413,9 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     const SHAPES: &[Shape] = &[
         choose_target,
         owner_top_or_bottom,
+        owner_shuffles_object,
         shuffle_self_away,
+        shuffle_selected_into_library,
         prevent_combat_damage,
         prevent_target_damage,
         prevent_damage,
@@ -358,6 +426,7 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         reorder_top,
         get_energy,
         monstrosity,
+        reveal_top_to_hand,
         reveal_hand_choose,
         proliferate,
         exile_if_dies,
@@ -395,6 +464,7 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         tap_untap,
         counter_spell,
         put_counters,
+        remove_counters,
         scry_surveil,
         mill_you,
         sacrifice_self,
@@ -408,6 +478,11 @@ fn clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         cant_cast_this_turn,
         shuffle_into_library,
         shuffle_you,
+        look_at_hand,
+        exchange_control,
+        additional_combat,
+        remove_from_combat,
+        put_its_counters,
     ];
     for shape in SHAPES {
         let saved = cx.clone();
@@ -738,7 +813,7 @@ fn have_to_does(s: &str) -> Option<String> {
 
 /// The ability after "when you do,": its own effect and targets (CR 603.12), the rest of
 /// that sentence and any that follow it.
-fn reflexive<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+pub(crate) fn reflexive<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let mut inner = cx.fresh();
     inner.it = cx.it.clone();
     inner.that_player = cx.that_player.clone();
@@ -833,8 +908,10 @@ fn possible(e: &Effect) -> Option<mtg_ir::trigger::Condition> {
             },
             at_least: count.clone(),
         },
-        // Drawing and gaining life always happen when chosen.
-        Effect::Draw { .. } | Effect::GainLife { .. } => C::Always,
+        // Drawing and gaining life always happen when chosen, and so does dealing damage:
+        // an illegal target stops the whole ability, and a source gone from the
+        // battlefield still deals it (CR 609.7b).
+        Effect::Draw { .. } | Effect::GainLife { .. } | Effect::DealDamage { .. } => C::Always,
         _ => return None,
     })
 }
@@ -857,6 +934,10 @@ fn draw<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
 fn cards_drawn<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
     if let Some(r) = s.strip_prefix("an additional card") {
         return Some((Value::ONE, r));
+    }
+    // "draw cards equal to its power"
+    if let Some(r) = s.strip_prefix("cards equal to ") {
+        return value_phrase(r, cx);
     }
     if let Some((n, r)) = amount(s, cx)
         && n != Value::ONE
@@ -902,13 +983,41 @@ fn destroy<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let r = s.strip_prefix("destroy ")?;
     let (what, plural, r) = nouns::object(r, cx)?;
     battlefield_only(&what, cx)?;
+    // "Destroy target creature and target land.": two targets at once.
+    if let Selector::Target { .. } = what
+        && let Some(after) = r.strip_prefix(" and target ")
+    {
+        let saved = cx.clone();
+        let both = nouns::object(&s[s.len() - after.len() - "target ".len()..], cx)
+            .filter(|(second, plural, _)| !plural && matches!(second, Selector::Target { .. }))
+            .and_then(|(second, _, rest)| {
+                battlefield_only(&second, cx)?;
+                Some((second, rest))
+            });
+        match both {
+            Some((second, rest)) => {
+                return Some((
+                    Effect::Destroy {
+                        what: Selector::Union(vec![what, second]),
+                    },
+                    rest,
+                ));
+            }
+            None => *cx = saved,
+        }
+    }
     // "Destroy target creature. It can't be regenerated." (CR 701.15c)
     let no_regen = if plural {
-        [". they can't be regenerated", ". it can't be regenerated"]
+        [
+            ". they can't be regenerated",
+            ". those creatures can't be regenerated",
+            ". it can't be regenerated",
+        ]
     } else {
         [
             ". it can't be regenerated",
             ". that creature can't be regenerated",
+            ". it can't be regenerated",
         ]
     };
     for tail in no_regen {
@@ -925,6 +1034,9 @@ fn destroy<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
                 rest,
             ));
         }
+    }
+    if let Selector::All { filter, .. } = &what {
+        cx.destroyed = Some(filter.clone());
     }
     Some((Effect::Destroy { what }, r))
 }
@@ -1031,9 +1143,9 @@ fn bounce<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     } else {
         nouns::object(r, cx)?
     };
-    // After a card returns to the battlefield, "it" is the permanent it became: "Return
-    // target creature card … to the battlefield. It gains haste."
-    if !plural && r.starts_with(" to the battlefield") {
+    // After a card returns, follow-up instructions use its new object identity.
+    // MoveZone stores that identity in the ordinary "it" binding.
+    if !plural {
         cx.it = Some(Selector::Bound(mtg_ir::selector::Binding::It));
         cx.moved = true;
     }
@@ -1194,20 +1306,52 @@ fn damage_to_itself<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     ))
 }
 
-/// "look at the top four cards of your library, then put them back in any order".
-fn reorder_top<'s>(s: &'s str, _: &mut Cx) -> Option<(Effect, &'s str)> {
-    let r = s.strip_prefix("look at the top ")?;
-    let (n, r) = words::number(r)?;
+/// Reveal and take the top card, retaining its new identity for subsequent instructions.
+fn reveal_top_to_hand<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("reveal the top card of your library and put ")?;
     let r = r
-        .strip_prefix(" cards of your library, then put them back in any order")
-        .or_else(|| r.strip_prefix(" cards of your library and put them back in any order"))?;
+        .strip_prefix("that card into your hand")
+        .or_else(|| r.strip_prefix("it into your hand"))?;
+    let top = Selector::TopOfLibrary {
+        player: Box::new(Selector::You),
+        count: Value::ONE,
+    };
+    cx.it = Some(Selector::Bound(mtg_ir::selector::Binding::It));
+    cx.moved = true;
     Some((
-        Effect::ReorderLibraryTop {
-            who: Selector::You,
-            count: Value::Fixed(n),
-        },
+        Effect::Sequence(vec![
+            Effect::Reveal { what: top.clone() },
+            move_zone(top, Zone::Hand, ZonePosition::Natural),
+        ]),
         r,
     ))
+}
+
+/// "look at the top four cards of your library, then put them back in any order".
+fn reorder_top<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("look at the top ")?;
+    let (who, count, r) =
+        if let Some(definition) = r.strip_prefix("x cards of your library, where x is ") {
+            if cx.x {
+                return None;
+            }
+            let (count, r) = value_phrase(definition, cx)?;
+            (Selector::You, count, r)
+        } else {
+            let (count, r) = amount(r, cx)?;
+            let r = r.strip_prefix(" cards of ")?;
+            let (who, r) = if let Some(r) = r.strip_prefix("your library") {
+                (Selector::You, r)
+            } else {
+                let (who, _, r) = nouns::player(r, cx)?;
+                (who, r.strip_prefix("'s library")?)
+            };
+            (who, count, r)
+        };
+    let r = r
+        .strip_prefix(", then put them back in any order")
+        .or_else(|| r.strip_prefix(" and put them back in any order"))?;
+    Some((Effect::ReorderLibraryTop { who, count }, r))
 }
 
 /// "you get {e}{e}" (CR 107.14).
@@ -1318,10 +1462,30 @@ fn amass<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
 /// "Look at the top four cards of your library. You may reveal a creature card from among
 /// them and put it into your hand. Put the rest on the bottom of your library in a random
 /// order." — and "put one of them into your hand and the rest into your graveyard".
+/// Also "Reveal the top four cards ... Put all land cards revealed this way into your
+/// hand and the rest into your graveyard": reveal the entire group before taking cards.
 fn dig<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
-    let r = s.strip_prefix("look at the top ")?;
-    let (n, r) = amount(r, cx)?;
-    let r = r.strip_prefix(" cards of your library. ")?;
+    let (reveal_top, r) = if let Some(r) = s.strip_prefix("reveal the top ") {
+        (true, r)
+    } else {
+        (false, s.strip_prefix("look at the top ")?)
+    };
+    let (n, r) = if let Some(definition) = r.strip_prefix("x cards of your library, where x is ") {
+        if cx.x {
+            return None;
+        }
+        let (count, rest) = value_phrase(definition, cx)?;
+        let rest = rest
+            .strip_prefix(". ")
+            .or_else(|| rest.strip_prefix(", then "))?;
+        (count, rest)
+    } else {
+        let (count, rest) = amount(r, cx)?;
+        let rest = rest
+            .strip_prefix(" cards of your library. ")
+            .or_else(|| rest.strip_prefix(" cards of your library, then "))?;
+        (count, rest)
+    };
     // Where the rest go: (zone, random order).
     let rest_of = |r: &'s str| -> Option<((Zone, bool), &'s str)> {
         if let Some(r) = r.strip_prefix(" on the bottom of your library in a random order") {
@@ -1331,6 +1495,12 @@ fn dig<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         } else if let Some(r) = r.strip_prefix(" on the bottom of your library") {
             // One card left: no order to choose.
             Some(((Zone::Library, false), r))
+        } else if let Some(r) = r.strip_prefix(" on the bottom in a random order") {
+            Some(((Zone::Library, true), r))
+        } else if let Some(r) = r.strip_prefix(" on the bottom in any order") {
+            Some(((Zone::Library, false), r))
+        } else if let Some(r) = r.strip_prefix(" into your hand") {
+            Some(((Zone::Hand, false), r))
         } else {
             Some((
                 (Zone::Graveyard, false),
@@ -1344,6 +1514,9 @@ fn dig<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let card = |r: &'s str| -> Option<(i32, mtg_ir::ObjectFilter, &'s str)> {
         let (k, word, r) = if let Some(r) = r.strip_prefix("a ").or_else(|| r.strip_prefix("an ")) {
             (1, " card ", r)
+        } else if let Some(r) = r.strip_prefix("all ") {
+            // The resolver clamps a mandatory selection to every matching card.
+            (i32::MAX, " cards ", r)
         } else if let Some(r) = r.strip_prefix("any number of ") {
             (i32::from(u8::MAX), " cards ", r)
         } else {
@@ -1351,25 +1524,19 @@ fn dig<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
             let (k, r) = words::number(r)?;
             (k, " cards ", r.strip_prefix(' ')?)
         };
-        let (filter, r) = if let Some(r) = r.strip_prefix(word.trim_start()) {
+        let (mut filter, mut r) = if let Some(r) = r.strip_prefix(word.trim_start()) {
             (mtg_ir::ObjectFilter::Any, r)
         } else {
             let at = r.find(word)?;
             let head = &r[..at];
-            let filter = if head == "permanent" {
-                nouns::permanent_card()
-            } else {
-                // A noun ("creature or land"), or adjectives alone ("white",
-                // "noncreature, nonland", "historic"), read as "… permanent".
-                let read = |text: &str| {
-                    nouns::noun(text, cx)
-                        .filter(|(n, left)| left.is_empty() && n.zone == Zone::Battlefield)
-                        .map(|(n, _)| n.filter)
-                };
-                read(head).or_else(|| read(&format!("{head} permanent")))?
-            };
+            let filter = library_card_filter(head, cx)?;
             (filter, &r[at + word.len()..])
         };
+        if let Some(rest) = r.strip_prefix("of the chosen type ") {
+            filter =
+                mtg_ir::ObjectFilter::And(vec![filter, mtg_ir::ObjectFilter::HasChosenSubtype]);
+            r = rest;
+        }
         // "… with power 2 or less from among them"
         match r
             .strip_prefix("with ")
@@ -1383,46 +1550,125 @@ fn dig<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
             None => Some((k, filter, r)),
         }
     };
-    let dig = |take: i32, up_to, filter, take_to, reveal, (rest_to, rest_random)| Effect::Dig {
-        count: n.clone(),
-        take: Value::Fixed(take),
-        up_to,
-        filter,
-        take_to,
-        reveal,
-        rest_to,
-        rest_random,
+    let dig = |take: i32,
+               up_to,
+               filter,
+               additional_filter,
+               take_to,
+               tapped,
+               reveal,
+               (rest_to, rest_random)| {
+        let effect = Effect::Dig {
+            count: n.clone(),
+            take: Value::Fixed(take),
+            up_to,
+            filter,
+            additional_filter,
+            take_to,
+            tapped,
+            // Revealing the whole group already reveals whichever cards are taken.
+            reveal: reveal && !reveal_top,
+            rest_to,
+            rest_random,
+        };
+        if reveal_top {
+            Effect::Sequence(vec![
+                Effect::Reveal {
+                    what: Selector::TopOfLibrary {
+                        player: Box::new(Selector::You),
+                        count: n.clone(),
+                    },
+                },
+                effect,
+            ])
+        } else {
+            effect
+        }
     };
     // "put one of them into your hand and the rest …"
-    if let Some(r) = r.strip_prefix("put ")
-        && let Some((k, r)) = words::number(r)
-        && let Some(r) = r
-            .strip_prefix(" of them into your hand and the ")
-            .or_else(|| r.strip_prefix(" into your hand and the "))
-        && let Some(r) = r.strip_prefix("rest").or_else(|| r.strip_prefix("other"))
-        && let Some((rest, r)) = rest_of(r)
-    {
-        return Some((
-            dig(k, false, mtg_ir::ObjectFilter::Any, Zone::Hand, false, rest),
-            r,
-        ));
+    let (simple_optional, simple) = match r.strip_prefix("you may ") {
+        Some(r) => (true, r),
+        None => (false, r),
+    };
+    if let Some(r) = simple.strip_prefix("put ") {
+        let (up_to, r) = match r.strip_prefix("up to ") {
+            Some(r) => (true, r),
+            None => (simple_optional, r),
+        };
+        if let Some((k, r)) = words::number(r) {
+            let r = r
+                .strip_prefix(" of those cards")
+                .or_else(|| r.strip_prefix(" of them"))
+                .unwrap_or(r);
+            let destination = if let Some(r) = r.strip_prefix(" into your hand") {
+                Some((Zone::Hand, r))
+            } else if k == 1 {
+                r.strip_prefix(" back on top of your library")
+                    .or_else(|| r.strip_prefix(" on top of your library"))
+                    .map(|r| (Zone::Library, r))
+            } else {
+                None
+            };
+            if let Some((to, r)) = destination
+                && let Some(r) = r
+                    .strip_prefix(" and the ")
+                    .or_else(|| r.strip_prefix(". put the "))
+                && let Some(r) = r.strip_prefix("rest").or_else(|| r.strip_prefix("other"))
+                && let Some((rest, r)) = rest_of(r)
+            {
+                return Some((
+                    dig(
+                        k,
+                        up_to,
+                        mtg_ir::ObjectFilter::Any,
+                        None,
+                        to,
+                        false,
+                        false,
+                        rest,
+                    ),
+                    r,
+                ));
+            }
+        }
     }
     // "you may reveal a creature card from among them and put it into your hand", "you may
     // put a land card from among them onto the battlefield", then where the rest go.
-    let r = r.strip_prefix("you may ")?;
+    let (optional, r) = match r.strip_prefix("you may ") {
+        Some(r) => (true, r),
+        None => (false, r),
+    };
     let (reveal, r) = match r.strip_prefix("reveal ") {
         Some(r) => (true, r),
         None => (false, r.strip_prefix("put ")?),
     };
+    let up_to = optional || r.starts_with("up to ") || r.starts_with("any number of ");
     let (take, filter, r) = card(r)?;
-    let r = r.strip_prefix("from among them ")?;
+    let (additional_filter, r) = if let Some(r) = r.strip_prefix("and/or ") {
+        if !optional || take != 1 {
+            return None;
+        }
+        let (second_take, second_filter, r) = card(r)?;
+        if second_take != 1 {
+            return None;
+        }
+        (Some(second_filter), r)
+    } else {
+        (None, r)
+    };
+    let r = r
+        .strip_prefix("from among them ")
+        .or_else(|| r.strip_prefix("revealed this way ").filter(|_| reveal_top))?;
     let r = if reveal {
         r.strip_prefix("and put it ")
             .or_else(|| r.strip_prefix("and put that card "))
-            .or_else(|| r.strip_prefix("and put them ").filter(|_| take > 1))
+            .or_else(|| {
+                r.strip_prefix("and put them ")
+                    .filter(|_| take > 1 || additional_filter.is_some())
+            })
             .or_else(|| {
                 r.strip_prefix("and put the revealed cards ")
-                    .filter(|_| take > 1)
+                    .filter(|_| take > 1 || additional_filter.is_some())
             })?
     } else {
         r
@@ -1432,11 +1678,33 @@ fn dig<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     } else {
         (Zone::Battlefield, r.strip_prefix("onto the battlefield")?)
     };
-    let r = r.strip_prefix(". put the rest")?;
+    let (tapped, r) = if take_to == Zone::Battlefield {
+        match r.strip_prefix(" tapped") {
+            Some(r) => (true, r),
+            None => (false, r),
+        }
+    } else {
+        (false, r)
+    };
+    let r = r
+        .strip_prefix(". put the rest")
+        .or_else(|| r.strip_prefix(" and the rest"))?;
+    let r = r.strip_prefix(" of the revealed cards").unwrap_or(r);
     let (rest, r) = rest_of(r)?;
-    Some((dig(take, true, filter, take_to, reveal, rest), r))
+    Some((
+        dig(
+            take,
+            up_to,
+            filter,
+            additional_filter,
+            take_to,
+            tapped,
+            reveal,
+            rest,
+        ),
+        r,
+    ))
 }
-
 /// "You may play that card this turn", "until the end of your next turn, you may play
 /// those cards", "you may cast it this turn": a permission for what was just exiled.
 fn grant_play<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
@@ -1679,6 +1947,20 @@ fn exile_if_dies<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
             ))),
         };
         (Selector::Except(Box::new(it), Box::new(noncreature)), r)
+    } else if damaged.is_none()
+        && let Some(r) = r.strip_prefix("a creature dealt damage this way")
+    {
+        // After damage to each creature: whichever this source dealt damage to.
+        (
+            Selector::All {
+                zone: Zone::Battlefield,
+                filter: mtg_ir::ObjectFilter::And(vec![
+                    mtg_ir::ObjectFilter::HasType(mtg_core::CardType::Creature),
+                    mtg_ir::ObjectFilter::DealtDamageBySelfThisTurn,
+                ]),
+            },
+            r,
+        )
     } else if let Some(it) = damaged
         && let Some(r) = r
             .strip_prefix("a permanent dealt damage this way")
@@ -1849,6 +2131,49 @@ fn doesnt_untap<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     ))
 }
 
+fn target_specs<'a>(what: &Selector, cx: &'a Cx) -> Option<Vec<&'a mtg_ir::selector::TargetSpec>> {
+    match what {
+        Selector::Target { index } => Some(vec![cx.targets.get(*index as usize)?]),
+        Selector::Union(parts) if !parts.is_empty() => parts
+            .iter()
+            .map(|part| target_specs(part, cx))
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.into_iter().flatten().collect()),
+        _ => None,
+    }
+}
+
+fn targets_are_in_your_graveyard(what: &Selector, cx: &Cx) -> bool {
+    target_specs(what, cx).is_some_and(|targets| {
+        targets.iter().all(|t| {
+            if t.zone != Zone::Graveyard {
+                return false;
+            }
+            matches!(&t.filter, mtg_ir::ObjectFilter::And(parts)
+                if parts.iter().any(|p| matches!(p, mtg_ir::ObjectFilter::OwnedBy(w)
+                    if **w == Selector::You)))
+                || matches!(&t.filter, mtg_ir::ObjectFilter::OwnedBy(w) if **w == Selector::You)
+        })
+    })
+}
+
+/// "Shuffle any number of target creature cards from your graveyard into your library."
+fn shuffle_selected_into_library<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("shuffle ")?;
+    let (what, _, r) = nouns::object(r, cx)?;
+    if !targets_are_in_your_graveyard(&what, cx) {
+        return None;
+    }
+    let r = r.strip_prefix(" into your library")?;
+    Some((
+        Effect::Sequence(vec![
+            move_zone(what, Zone::Library, ZonePosition::Natural),
+            Effect::Shuffle { who: Selector::You },
+        ]),
+        r,
+    ))
+}
+
 /// "put target creature on top of its owner's library", "put target nonland permanent on
 /// the bottom of its owner's library".
 fn put_into_library<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
@@ -1856,32 +2181,30 @@ fn put_into_library<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let (what, plural, r) = nouns::object(r, cx)?;
     // A permanent, or a card in a graveyard: "put target card from a graveyard on the
     // bottom of its owner's library".
-    let from_graveyard = matches!(&what, Selector::Target { index }
-        if cx.targets.get(*index as usize).is_some_and(|t| t.zone == Zone::Graveyard));
+    let targets = target_specs(&what, cx);
+    let from_graveyard = targets
+        .as_ref()
+        .is_some_and(|targets| targets.iter().all(|t| t.zone == Zone::Graveyard));
     if !from_graveyard {
         battlefield_only(&what, cx)?;
     }
     // "your library" only where the card can only be yours.
-    let yours = from_graveyard
-        && matches!(&what, Selector::Target { index }
-        if cx.targets.get(*index as usize).is_some_and(|t| {
-            matches!(&t.filter, mtg_ir::ObjectFilter::And(parts)
-                if parts.iter().any(|p| matches!(p, mtg_ir::ObjectFilter::OwnedBy(w)
-                    if **w == Selector::You)))
-                || matches!(&t.filter, mtg_ir::ObjectFilter::OwnedBy(w) if **w == Selector::You)
-        }));
+    let yours = targets_are_in_your_graveyard(&what, cx);
     let library = |r: &'s str, at: &str| {
         r.strip_prefix(&*format!(" {at} its owner's library"))
+            .filter(|_| !plural)
+            .or_else(|| {
+                r.strip_prefix(&*format!(" {at} their owners' libraries"))
+                    .filter(|_| plural)
+            })
             .or_else(|| {
                 r.strip_prefix(&*format!(" {at} your library"))
                     .filter(|_| yours)
             })
     };
-    let (position, r) = if plural {
-        return None;
-    } else if let Some(r) = library(r, "on top of") {
+    let (position, r) = if let Some(r) = library(r, "on top of") {
         (ZonePosition::Top, r)
-    } else if let Some(r) = library(r, "into") {
+    } else if let Some(r) = library(r, "into").filter(|_| !plural) {
         let (position, r) = if let Some(r) = r.strip_prefix(" second from the top") {
             (ZonePosition::FromTop(1), r)
         } else {
@@ -1950,13 +2273,19 @@ fn put_onto_battlefield<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)
         if let Effect::MoveZone { tapped: t, .. } = &mut e {
             *t = tapped;
         }
+        cx.it = Some(Selector::Bound(mtg_ir::selector::Binding::It));
+        cx.moved = true;
         return Some((e, rest));
     }
-    let (what, _, r) = nouns::object(r, cx)?;
+    let (what, plural, r) = nouns::object(r, cx)?;
     if matches!(what, Selector::SelfSource) {
         return None;
     }
     let r = r.strip_prefix(" onto the battlefield")?;
+    if !plural {
+        cx.it = Some(Selector::Bound(mtg_ir::selector::Binding::It));
+        cx.moved = true;
+    }
     let (tapped, r) = match r.strip_prefix(" tapped") {
         Some(r) => (true, r),
         None => (false, r),
@@ -2019,6 +2348,22 @@ fn counter_spell<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     if cx.targets.get(index as usize)?.zone != Zone::Stack {
         return None;
     }
+    // "counter target spell that targets a creature you control"
+    let mut r = r;
+    if let Some(after) = r
+        .strip_prefix(" that targets a ")
+        .or_else(|| r.strip_prefix(" that targets an "))
+        && let Some((n, after)) = nouns::noun(after, cx)
+        && n.zone == Zone::Battlefield
+        && !n.plural
+    {
+        let spec = cx.targets.get_mut(index as usize)?;
+        spec.filter = mtg_ir::ObjectFilter::And(vec![
+            spec.filter.clone(),
+            mtg_ir::ObjectFilter::TargetsObject(Box::new(n.filter)),
+        ]);
+        r = after;
+    }
     // "If that spell is countered this way, exile it instead of putting it into its owner's
     // graveyard."
     let exiled = |r: &'s str| {
@@ -2030,6 +2375,14 @@ fn counter_spell<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     };
     if let Some(after) = r.strip_prefix(" unless its controller pays ") {
         let (mana, rest) = super::mana_cost(after)?;
+        // "… pays {1} for each card in your graveyard"
+        let (times, rest) = match rest
+            .strip_prefix(" for each ")
+            .and_then(|r| per(r, cx))
+        {
+            Some((times, rest)) => (Some(times), rest),
+            None => (None, rest),
+        };
         let (exile, rest) = exiled(rest);
         return Some((
             Effect::CounterUnlessPays {
@@ -2038,6 +2391,7 @@ fn counter_spell<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
                 life: None,
                 discard: false,
                 exile,
+                times,
             },
             rest,
         ));
@@ -2070,19 +2424,43 @@ fn put_counters<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     ))
 }
 
+/// "remove a +1/+1 counter from it", "remove two charge counters from this artifact".
+fn remove_counters<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("remove ")?;
+    let (n, r) = amount(r, cx)?;
+    let r = r.strip_prefix(' ')?;
+    let (kind, r) = words::counter(r)?;
+    let r = if n == Value::ONE {
+        r
+    } else {
+        r.strip_prefix('s')?
+    };
+    let r = r.strip_prefix(" from ")?;
+    let (what, _, r) = nouns::object(r, cx)?;
+    battlefield_only(&what, cx)?;
+    Some((
+        Effect::RemoveCounters {
+            what,
+            kind,
+            amount: n,
+        },
+        r,
+    ))
+}
+
 /// "scry 2", "surveil 1" (CR 701.22, 701.25).
-fn scry_surveil<'s>(s: &'s str, _cx: &mut Cx) -> Option<(Effect, &'s str)> {
+fn scry_surveil<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let (other_zone, r) = if let Some(r) = s.strip_prefix("scry ") {
         (Zone::Library, r)
     } else {
         let r = s.strip_prefix("surveil ")?;
         (Zone::Graveyard, r)
     };
-    let (n, r) = words::number(r)?;
+    let (n, r) = amount(r, cx)?;
     Some((
         Effect::LookAndSort {
             who: Selector::You,
-            count: Value::Fixed(n),
+            count: n,
             keep_zone: Zone::Library,
             other_zone,
         },
@@ -2201,7 +2579,7 @@ fn player_does<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let (first, mut r) = player_verb(who.clone(), bare, r, cx)?;
     // "target player draws two cards and loses 2 life": one subject, several verbs.
     let mut effects = vec![first];
-    while let Some(rest) = r.strip_prefix(" and") {
+    while let Some(rest) = r.strip_prefix(" and").or_else(|| r.strip_prefix(", then")) {
         let saved = cx.clone();
         match player_verb(who.clone(), bare, rest, cx) {
             Some((e, rest)) => {
@@ -2263,10 +2641,83 @@ fn player_verb<'s>(
     {
         return Some((Effect::GivePoison { who, amount: n }, r));
     }
+    // "loses half their life, rounded up", "mills half their library, rounded down",
+    // "discards half the cards in their hand, rounded up" — of one player.
+    let single = matches!(
+        who,
+        Selector::You | Selector::Target { .. } | Selector::Bound(_)
+    );
+    let rounding = |r: &'s str| -> Option<(bool, &'s str)> {
+        r.strip_prefix(", rounded up")
+            .map(|r| (true, r))
+            .or_else(|| r.strip_prefix(", rounded down").map(|r| (false, r)))
+    };
+    let half = |of: Value, up: bool| Value::Half {
+        value: Box::new(of),
+        up,
+    };
+    let own = |zone: Zone| {
+        Value::Count(Box::new(Selector::All {
+            zone,
+            filter: mtg_ir::ObjectFilter::OwnedBy(Box::new(who.clone())),
+        }))
+    };
+    if single
+        && let Some(r) = verb(r, "lose").and_then(|r| {
+            r.strip_prefix(" half their life")
+                .or_else(|| r.strip_prefix(" half your life"))
+        })
+        && let Some((up, r)) = rounding(r)
+    {
+        let amount = half(Value::LifeTotal(Box::new(who.clone())), up);
+        return Some((Effect::LoseLife { who, amount }, r));
+    }
+    if single
+        && let Some(r) = verb(r, "mill").and_then(|r| {
+            r.strip_prefix(" half their library")
+                .or_else(|| r.strip_prefix(" half your library"))
+        })
+        && let Some((up, r)) = rounding(r)
+    {
+        let n = half(own(Zone::Library), up);
+        return Some((mill(who, n), r));
+    }
+    if single
+        && let Some(r) = verb(r, "discard").and_then(|r| {
+            r.strip_prefix(" half the cards in their hand")
+                .or_else(|| r.strip_prefix(" half the cards in your hand"))
+        })
+        && let Some((up, r)) = rounding(r)
+    {
+        let count = half(own(Zone::Hand), up);
+        return Some((
+            Effect::Discard {
+                who,
+                count,
+                at_random: false,
+            },
+            r,
+        ));
+    }
     if let Some(r) = verb(r, "lose") {
         let (n, r) = amount(r.strip_prefix(' ')?, cx)?;
         let r = r.strip_prefix(" life")?;
         return Some((Effect::LoseLife { who, amount: n }, r));
+    }
+    // "each player discards their hand": as many as are in every hand, which is all of
+    // each player's own.
+    if let Some(r) = verb(r, "discard").and_then(|r| r.strip_prefix(" their hand")) {
+        return Some((
+            Effect::Discard {
+                who,
+                count: Value::Count(Box::new(Selector::All {
+                    zone: Zone::Hand,
+                    filter: mtg_ir::ObjectFilter::Any,
+                })),
+                at_random: false,
+            },
+            r,
+        ));
     }
     if let Some(r) = verb(r, "discard") {
         let r = r.strip_prefix(' ')?;
@@ -2396,6 +2847,22 @@ fn deals_damage<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let r = r.strip_prefix(" deals ")?;
     let (n, r) = amount(r, cx)?;
     if let Some(among) = r.strip_prefix(" damage divided as you choose among ") {
+        // "deals X damage divided as you choose among any number of targets": a share for
+        // each point up to the most X can be, of which the first X are announced.
+        if n == Value::X && among.starts_with("any number of ") {
+            let (e, rest) = divided(source, MAX_X_SHARES, among, cx)?;
+            let Effect::DealDamageDivided { source, shares, .. } = e else {
+                return None;
+            };
+            return Some((
+                Effect::DealDamageDivided {
+                    source,
+                    shares,
+                    x: true,
+                },
+                rest,
+            ));
+        }
         let Value::Fixed(total) = n else {
             return None;
         };
@@ -2427,6 +2894,9 @@ fn deals_damage<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     Some((first, r))
 }
 
+/// The most damage "deals X damage divided …" can divide: X is never announced higher.
+pub const MAX_X_SHARES: i32 = 20;
+
 /// "… divided as you choose among one, two, or three targets" (CR 601.2d): one target slot
 /// per point of damage, any of which may name the same target, so the division is announced
 /// with the targets. Slots are mandatory: all the damage is divided.
@@ -2447,7 +2917,7 @@ fn divided<'s>(
         let (n, r) = words::number(r)?;
         (n, r.strip_prefix(' ')?)
     };
-    if !(1..=10).contains(&total) || total > most {
+    if !(1..=MAX_X_SHARES).contains(&total) || total > most {
         return None;
     }
     let (spec, rest) = if let Some(rest) = r.strip_prefix("targets") {
@@ -2489,7 +2959,14 @@ fn divided<'s>(
     };
     let shares: Vec<Selector> = (0..total).map(|_| cx.target(spec.clone())).collect();
     cx.it = Some(Selector::Union(shares.clone()));
-    Some((Effect::DealDamageDivided { source, shares }, rest))
+    Some((
+        Effect::DealDamageDivided {
+            source,
+            shares,
+            x: false,
+        },
+        rest,
+    ))
 }
 
 /// "target creature gets +2/+2 until end of turn", "creatures you control get +1/+0 and
@@ -2554,6 +3031,12 @@ fn pump<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         mods.push(Modification::Restriction(Restriction::MustBeBlocked));
         r = after;
     }
+    if let Some(after) = r.strip_prefix(" and can't be blocked this turn") {
+        mods.push(Modification::Restriction(Restriction::CantBeBlockedExceptBy(
+            mtg_ir::ObjectFilter::Not(Box::new(mtg_ir::ObjectFilter::Any)),
+        )));
+        r = after;
+    }
     Some((continuous(what, mods, Duration::UntilEndOfTurn), r))
 }
 
@@ -2574,13 +3057,75 @@ pub fn grants<'s>(
         (v, true) => format!(" {v} "),
     };
     let and_has = format!(" and{}", has);
+    // "has base power and toughness 1/1" (CR 613.4b), alone or after another predicate.
+    let base_phrase = if plural {
+        " have base power and toughness "
+    } else {
+        " has base power and toughness "
+    };
+    let base_pt = |r: &'s str| -> Option<(Modification, &'s str)> {
+        let ((p, t), r) = words::pt(r)?;
+        Some((
+            Modification::SetBasePowerToughness {
+                power: Value::Fixed(p),
+                toughness: Value::Fixed(t),
+            },
+            r,
+        ))
+    };
+    // " is a Wizard in addition to its other types" as one item of the list.
+    let is_a = |r: &'s str| -> Option<(Modification, &'s str)> {
+        if plural {
+            return None;
+        }
+        let r = r.strip_prefix("is a ").or_else(|| r.strip_prefix("is an "))?;
+        let (w, r) = words::first_word(r);
+        let st = cx.subtype(w)?;
+        let r = r.strip_prefix(" in addition to its other types")?;
+        Some((Modification::AddSubtypes(vec![st]), r))
+    };
     let mut out = Vec::new();
     let mut r = s;
+    // "is a Wizard in addition to its other types and has flying"
+    if let Some((m, after)) = r.strip_prefix(' ').and_then(is_a) {
+        out.push(m);
+        r = after;
+        if let Some(after) = r
+            .strip_prefix(and_has.as_str())
+            .or_else(|| r.strip_prefix(&format!(",{}", and_has)))
+        {
+            let (ms, after) = granted(after, verb == "have", cx)?;
+            out.extend(ms);
+            r = after;
+        }
+        return Some((out, r));
+    }
+    if let Some((m, after)) = r.strip_prefix(base_phrase).and_then(base_pt) {
+        out.push(m);
+        return Some((out, after));
+    }
     if let Some(after) = r.strip_prefix(get) {
         let ((power, toughness), after) = pt_delta_value(after, x_ok)?;
         out.push(Modification::ModifyPowerToughness { power, toughness });
         r = after;
-        if let Some(after) = r.strip_prefix(and_has.as_str()) {
+        // "gets +1/+1, is a Ninja in addition to its other types, and has …"
+        if let Some((m, after)) = r.strip_prefix(", ").and_then(is_a)
+            && let Some(after) = after.strip_prefix(&format!(",{}", and_has))
+        {
+            out.push(m);
+            let (ms, after) = granted(after, verb == "have", cx)?;
+            out.extend(ms);
+            r = after;
+        } else if let Some(after) = r.strip_prefix(and_has.as_str()) {
+            let (ms, after) = granted(after, verb == "have", cx)?;
+            out.extend(ms);
+            r = after;
+        } else if let Some(after) = r
+            .strip_prefix(',')
+            .and_then(|a| a.strip_prefix(has.as_str()))
+            .filter(|a| a.contains(", and is ") || a.contains(" and is "))
+        {
+            // "gets +2/+1, has ward {1}, and is a Knight in addition to its other types"
             let (ms, after) = granted(after, verb == "have", cx)?;
             out.extend(ms);
             r = after;
@@ -2592,6 +3137,15 @@ pub fn grants<'s>(
     }) {
         out.push(Modification::LoseAllAbilities);
         r = after;
+        // "loses all abilities and has base power and toughness 1/1"
+        if let Some((m, after)) = r
+            .strip_prefix(" and")
+            .and_then(|a| a.strip_prefix(base_phrase))
+            .and_then(base_pt)
+        {
+            out.push(m);
+            r = after;
+        }
     } else if let Some(after) = r.strip_prefix(if plural { " lose " } else { " loses " })
         && let Some((ks, after)) = words::keyword_list(after)
     {
@@ -2608,6 +3162,23 @@ pub fn grants<'s>(
             && let Some(((power, toughness), after)) = pt_delta_value(after, x_ok)
         {
             out.push(Modification::ModifyPowerToughness { power, toughness });
+            r = after;
+        }
+    }
+    // "… and is a Monk in addition to its other types" (equipment, auras).
+    if !plural
+        && let Some(after) = r
+            .strip_prefix(", and is ")
+            .or_else(|| r.strip_prefix(" and is "))
+        && let Some(after) = after
+            .strip_prefix("a ")
+            .or_else(|| after.strip_prefix("an "))
+    {
+        let (w, after) = words::first_word(after);
+        if let Some(st) = cx.subtype(w)
+            && let Some(after) = after.strip_prefix(" in addition to its other types")
+        {
+            out.push(Modification::AddSubtypes(vec![st]));
             r = after;
         }
     }
@@ -2639,6 +3210,18 @@ fn quoted_grant<'s>(s: &'s str, cx: &Cx) -> Option<(Vec<Modification>, &'s str)>
 /// from red", "protection from the color of your choice" — not for a static ability,
 /// which has no moment to choose).
 fn granted<'s>(s: &'s str, is_static: bool, cx: &Cx) -> Option<(Vec<Modification>, &'s str)> {
+    // "has ward {1}": the ward trigger itself (CR 702.21), granted.
+    if let Some(r) = s.strip_prefix("ward ")
+        && let Some((mana, rest)) = super::mana_cost(r)
+        && !mana.symbols.is_empty()
+    {
+        let text = &s[..s.len() - rest.len()];
+        let mods = super::quoted_abilities(text, cx)?
+            .into_iter()
+            .map(|a| Modification::GrantAbility(Box::new(a)))
+            .collect();
+        return Some((mods, rest));
+    }
     if let Some(q) = s.strip_prefix("protection from ") {
         let end = [" until end of turn", ".", ", ", " and "]
             .iter()
@@ -2754,6 +3337,8 @@ fn cant_block<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         .or_else(|| r.strip_prefix(" can attack this turn as though they didn't have defender"))
     {
         (vec![Restriction::AttackDespiteDefender], r)
+    } else if let Some(r) = r.strip_prefix(" assigns no combat damage this turn") {
+        (vec![Restriction::AssignsNoCombatDamage], r)
     } else if let Some(r) = r.strip_prefix(" can't be regenerated this turn") {
         (vec![Restriction::CantBeRegenerated], r)
     } else if let Some(r) = r.strip_prefix(" can block an additional creature this turn") {
@@ -2828,7 +3413,7 @@ fn shuffle_into_library<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)
             },
             to: Zone::Library,
             owner_relative_to: None,
-            position: ZonePosition::Top,
+            position: ZonePosition::Natural,
             tapped: false,
             face_down: false,
             under_control_of: None,
@@ -3013,7 +3598,15 @@ fn create_token<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
             return Some((create, rest));
         }
     }
-    let ((p, t), r) = words::pt(r)?;
+    // "an X/X green Ooze creature token": made 0/0, then given X/X as its base power and
+    // toughness, X fixed as the effect resolves.
+    let (variable, (p, t), r) = match r.strip_prefix("x/x") {
+        Some(r) => (true, (0, 0), r),
+        None => {
+            let (pt, r) = words::pt(r)?;
+            (false, pt, r)
+        }
+    };
     let r = r.strip_prefix(' ')?;
     let (colors, r) = token_colors(r)?;
     // Subtypes, then card types, then "token(s)".
@@ -3094,7 +3687,26 @@ fn create_token<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         toughness: Value::Fixed(t),
         abilities,
     };
-    let made = make_token(spec, n, tapped);
+    let mut made = make_token(spec, n, tapped);
+    if variable {
+        let (x, after) = match rest.strip_prefix(", where x is ") {
+            Some(r) => value_phrase(r, cx)?,
+            None if cx.x => (Value::X, rest),
+            None => return None,
+        };
+        rest = after;
+        made = Effect::Sequence(vec![
+            made,
+            Effect::Continuous {
+                what: Selector::Bound(mtg_ir::selector::Binding::It),
+                modification: Modification::SetBasePowerToughness {
+                    power: x.clone(),
+                    toughness: x,
+                },
+                duration: Duration::Permanent,
+            },
+        ]);
+    }
     // "Sacrifice it at the beginning of the next end step": the tokens just made.
     cx.it = Some(Selector::Bound(mtg_ir::selector::Binding::It));
     if attacking {
@@ -3467,6 +4079,8 @@ pub(crate) fn scale(e: &mut Effect, by: Value) -> bool {
         | Effect::LoseLife { amount, .. }
         | Effect::DealDamage { amount, .. }
         | Effect::AddCounters { amount, .. } => times(amount),
+        // "create a 1/1 Soldier creature token for each creature you control"
+        Effect::CreateToken { count, .. } | Effect::CreateTokenCopy { count, .. } => times(count),
         Effect::Continuous {
             modification: Modification::ModifyPowerToughness { power, toughness },
             ..
@@ -3522,12 +4136,23 @@ fn equal_to<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
         && let Some(r) = r.strip_prefix(" deals damage to ")
         && let Some((to, r)) = nouns::recipient(r, cx)
         && let Some(r) = r.strip_prefix(" equal to ")
-        && let Some((amount, r)) = value_phrase(r, cx)
+        && let Some((amount, r)) = {
+            // "… to target player equal to the number of cards in that player's hand"
+            let mut inner = cx.clone();
+            inner.that_player = Some(to.clone());
+            value_phrase(r, &inner)
+        }
     {
         return Some((Effect::DealDamage { source, to, amount }, r));
     }
     *cx = saved;
     let (who, bare, r) = nouns::player(s, cx)?;
+    // "Target player loses life equal to the number of cards in their hand."
+    let mut inner = cx.clone();
+    if inner.that_player.is_none() {
+        inner.that_player = Some(who.clone());
+    }
+    let cx = &inner;
     let verb = |v: &str| {
         if bare {
             format!(" {v} ")
@@ -3561,10 +4186,32 @@ fn equal_to<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
 
 /// "the number of creatures you control", "its power", "~'s toughness".
 pub fn value_phrase<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
+    // "the number of cards in that player's hand", "… in their hand".
+    if let Some(r) = s
+        .strip_prefix("the number of cards in that player's hand")
+        .or_else(|| s.strip_prefix("the number of cards in their hand"))
+        && let Some(who) = cx.that_player.clone()
+    {
+        return Some((
+            Value::Count(Box::new(Selector::All {
+                zone: Zone::Hand,
+                filter: mtg_ir::ObjectFilter::OwnedBy(Box::new(who)),
+            })),
+            r,
+        ));
+    }
     if let Some(r) = s.strip_prefix("the number of colors of mana spent to cast ")
         && let Some(r) = spent_on_self(r)
     {
         return Some((Value::ColorsSpent, r));
+    }
+    // "the number of creatures that died this turn"
+    if let Some(r) = s.strip_prefix("the number of ")
+        && let Some((noun, r)) = super::nouns::noun(r, cx)
+        && let Some(r) = r.strip_prefix(" that died this turn")
+        && noun.zone == Zone::Battlefield
+    {
+        return Some((Value::DiedThisTurn(Box::new(noun.filter)), r));
     }
     if let Some(r) = s.strip_prefix("the number of ") {
         let (what, r) = super::conditions::counted(r, cx)?;
@@ -3586,12 +4233,25 @@ pub fn value_phrase<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
             return Some((make(Box::new(what)), r));
         }
     }
-    let (who, r) = if let Some(r) = s.strip_prefix("its ") {
+    // "the sacrificed creature's power": what was sacrificed to pay the cost, as it last
+    // existed (CR 608.2h).
+    let sacrificed = [
+        "the sacrificed creature's ",
+        "the sacrificed artifact's ",
+        "the sacrificed permanent's ",
+    ]
+    .iter()
+    .find_map(|p| s.strip_prefix(p));
+    let (who, r) = if let Some(r) = sacrificed {
+        (Selector::Bound(mtg_ir::selector::Binding::SACRIFICED), r)
+    } else if let Some(r) = s.strip_prefix("its ") {
         (cx.it.clone()?, r)
     } else if let Some(r) = s.strip_prefix("~'s ") {
         (Selector::SelfSource, r)
     } else {
-        let r = s.strip_prefix("that creature's ")?;
+        let r = s
+            .strip_prefix("that creature's ")
+            .or_else(|| s.strip_prefix("that card's "))?;
         (cx.it.clone()?, r)
     };
     if let Some(r) = r.strip_prefix("power") {
@@ -3621,35 +4281,79 @@ pub fn scale_mods(mods: &mut [Modification], by: Value) {
     }
 }
 
+/// A library-card quality: explicit permanent types are required only when
+/// "permanent" is printed. Adjectives alone ("legendary", "nonland", "white")
+/// may also select instants and sorceries with those qualities.
+fn library_card_filter(head: &str, cx: &Cx) -> Option<mtg_ir::ObjectFilter> {
+    if head == "permanent" {
+        return Some(nouns::permanent_card());
+    }
+    let (head, permanent) = match head.strip_suffix(" permanent") {
+        Some(head) => (head, true),
+        None => (head, false),
+    };
+    let read = |text: &str| {
+        nouns::noun(text, cx)
+            .filter(|(noun, rest)| rest.is_empty() && noun.zone == Zone::Battlefield)
+            .map(|(noun, _)| noun.filter)
+    };
+    // The noun "permanent" supplies a head for otherwise bare adjectives.
+    // Its zone is the battlefield, so its noun filter itself is unrestricted;
+    // permanent *card* types must be added separately when explicitly printed.
+    let filter = read(head).or_else(|| read(&format!("{head} permanent")))?;
+    Some(if permanent {
+        mtg_ir::ObjectFilter::And(vec![filter, nouns::permanent_card()])
+    } else {
+        filter
+    })
+}
+
 /// One quality of a searched card, including adjectives and numeric bounds.
 fn search_quality<'s>(r: &'s str, n: i32, cx: &Cx) -> Option<(mtg_ir::ObjectFilter, &'s str)> {
     // The noun runs up to " card" / " cards".
     let marker = if n == 1 { " card" } else { " cards" };
     let (filter, r) = if let Some(r) = r.strip_prefix(marker.trim_start()) {
-        // "a card named ~"
-        match r.strip_prefix(" named ~") {
-            Some(r) => (mtg_ir::ObjectFilter::NamedLikeSource, r),
-            None => (mtg_ir::ObjectFilter::Any, r),
+        if let Some(names) = r.strip_prefix(" named ") {
+            // Names may contain commas ("Halvar, God of Battle"). Stop at the
+            // following search instruction or a repeated card-noun alternative.
+            let at = [
+                ", reveal ",
+                ", put ",
+                " and put ",
+                ", then ",
+                " or a ",
+                " or an ",
+                " and/or ",
+            ]
+            .iter()
+            .filter_map(|delimiter| names.find(delimiter))
+            .min()?;
+            let filters: Option<Vec<_>> = names[..at]
+                .split(" or ")
+                .map(|name| {
+                    if name == "~" {
+                        Some(mtg_ir::ObjectFilter::NamedLikeSource)
+                    } else if name.is_empty() || name.contains('~') {
+                        None
+                    } else {
+                        Some(mtg_ir::ObjectFilter::Named(name.to_owned()))
+                    }
+                })
+                .collect();
+            let mut filters = filters?;
+            let filter = if filters.len() == 1 {
+                filters.pop()?
+            } else {
+                mtg_ir::ObjectFilter::Or(filters)
+            };
+            (filter, &names[at..])
+        } else {
+            (mtg_ir::ObjectFilter::Any, r)
         }
     } else {
         let at = r.find(marker)?;
         let (head, rest) = r.split_at(at);
-        // "a Mercenary permanent card", "a permanent card".
-        let filter = if head == "permanent" {
-            nouns::permanent_card()
-        } else if let Some(head) = head.strip_suffix(" permanent") {
-            let (noun, left) = nouns::noun(head, cx)?;
-            if !left.is_empty() || noun.zone != Zone::Battlefield {
-                return None;
-            }
-            mtg_ir::ObjectFilter::And(vec![noun.filter, nouns::permanent_card()])
-        } else {
-            let (noun, left) = nouns::noun(head, cx)?;
-            if !left.is_empty() || noun.zone != Zone::Battlefield {
-                return None;
-            }
-            noun.filter
-        };
+        let filter = library_card_filter(head, cx)?;
         (filter, &rest[marker.len()..])
     };
     // "… card with mana value 3 or less"
@@ -3662,7 +4366,6 @@ fn search_quality<'s>(r: &'s str, n: i32, cx: &Cx) -> Option<(mtg_ir::ObjectFilt
     };
     Some((filter, r))
 }
-
 /// "search your library for a basic land card, put it onto the battlefield tapped, then
 /// shuffle" (CR 701.19): the controller chooses among matching cards in their library, and
 /// may find none — a searched-for quality can always fail to be found (CR 701.19b).
@@ -3683,7 +4386,18 @@ fn search<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let (mut filter, mut r) = search_quality(r, n, cx)?;
     // Each alternative retains its own adjectives: "basic land cards and/or
     // Gate cards" includes nonbasic Gates but excludes other nonbasic lands.
-    while let Some(next) = r.strip_prefix(" and/or ") {
+    loop {
+        // Repeated singular nouns are alternatives for the same one-card search.
+        // "an instant card and/or a sorcery card" instead has separate quotas.
+        let alternative = if n == 1 {
+            r.strip_prefix(" or a ")
+                .or_else(|| r.strip_prefix(" or an "))
+        } else {
+            None
+        };
+        let Some(next) = alternative.or_else(|| r.strip_prefix(" and/or ")) else {
+            break;
+        };
         let (alternative, rest) = search_quality(next, n, cx)?;
         filter = mtg_ir::ObjectFilter::Or(vec![filter, alternative]);
         r = rest;
@@ -3878,6 +4592,76 @@ fn search<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     ))
 }
 
+/// "When this creature dies, put its counters on target creature you control.": the
+/// counters it had on the battlefield (the dies event's other object).
+fn put_its_counters<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("put its counters on ")?;
+    if cx.it != Some(Selector::Bound(mtg_ir::selector::Binding::EventSubject)) {
+        return None;
+    }
+    let from = Selector::Bound(mtg_ir::selector::Binding::EventOther);
+    let (to, plural, r) = nouns::object(r, cx)?;
+    if plural {
+        return None;
+    }
+    battlefield_only(&to, cx)?;
+    Some((Effect::CopyCounters { from, to }, r))
+}
+
+/// "remove target attacking creature from combat", "remove it from combat".
+fn remove_from_combat<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("remove ")?;
+    let (what, _, r) = nouns::object(r, cx)?;
+    battlefield_only(&what, cx)?;
+    let r = r.strip_prefix(" from combat")?;
+    Some((Effect::RemoveFromCombat { what }, r))
+}
+
+/// "After this main phase, there is an additional combat phase followed by an additional
+/// main phase." (CR 500.8) Only a spell or ability resolving in a main phase says it.
+fn additional_combat<'s>(s: &'s str, _: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s
+        .strip_prefix("after this main phase, there is an additional combat phase followed by an additional main phase")?;
+    Some((Effect::AdditionalCombat, r))
+}
+
+/// "exchange control of two target creatures", "exchange control of ~ and target creature
+/// an opponent controls" (CR 701.12).
+fn exchange_control<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("exchange control of ")?;
+    let (first, plural, r) = nouns::object(r, cx)?;
+    battlefield_only(&first, cx)?;
+    if plural {
+        // "two target creatures": its two slots.
+        let Selector::Union(slots) = first else {
+            return None;
+        };
+        let [a, b] = <[Selector; 2]>::try_from(slots).ok()?;
+        return Some((Effect::ExchangeControl { a, b }, r));
+    }
+    let r = r.strip_prefix(" and ")?;
+    let (b, plural, r) = nouns::object(r, cx)?;
+    battlefield_only(&b, cx)?;
+    if plural {
+        return None;
+    }
+    Some((Effect::ExchangeControl { a: first, b }, r))
+}
+
+/// "look at target player's hand", "look at each opponent's hand": shown to you only.
+fn look_at_hand<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
+    let r = s.strip_prefix("look at ")?;
+    let (whose, r) = if let Some(r) = r.strip_prefix("each opponent's hand") {
+        (Selector::Opponents, r)
+    } else if let Some(r) = r.strip_prefix("that player's hand") {
+        (cx.that_player.clone()?, r)
+    } else {
+        let (who, _, r) = nouns::player(r, cx)?;
+        (who, r.strip_prefix("'s hand")?)
+    };
+    Some((Effect::LookAtHand { whose }, r))
+}
+
 fn shuffle_you<'s>(s: &'s str, _: &mut Cx) -> Option<(Effect, &'s str)> {
     let rest = s.strip_prefix("shuffle")?;
     let rest = rest.strip_prefix(" your library").unwrap_or(rest);
@@ -3899,6 +4683,36 @@ pub fn per<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
         && let Some(r) = spent_on_self(r)
     {
         return Some((Value::ColorsSpent, r));
+    }
+    // Multikicker: "for each time it was kicked", "… this spell was kicked".
+    if let Some(r) = s.strip_prefix("time ")
+        && let Some(r) = ["it", "~", "this spell", "he", "she", "they"]
+            .iter()
+            .find_map(|w| r.strip_prefix(w)?.strip_prefix(" was kicked"))
+    {
+        return Some((Value::TimesKicked, r));
+    }
+    // "for each creature destroyed this way": the destroyed set, when the noun names
+    // exactly what was destroyed (or any permanent).
+    if let Some(destroyed) = &cx.destroyed
+        && let Some((noun, r)) = super::nouns::noun(s, cx)
+        && let Some(r) = r.strip_prefix(" destroyed this way")
+        && (noun.filter == *destroyed || s.starts_with("permanent "))
+    {
+        return Some((
+            Value::Count(Box::new(Selector::Bound(
+                mtg_ir::selector::Binding::DESTROYED,
+            ))),
+            r,
+        ));
+    }
+    // "for each creature that died this turn", "for each nontoken creature that died this
+    // turn" — as each last existed.
+    if let Some((noun, r)) = super::nouns::noun(s, cx)
+        && let Some(r) = r.strip_prefix(" that died this turn")
+        && noun.zone == Zone::Battlefield
+    {
+        return Some((Value::DiedThisTurn(Box::new(noun.filter)), r));
     }
     // "for each creature in your party" (CR 700.8).
     if let Some(r) = s.strip_prefix("creature in your party") {
@@ -4048,23 +4862,41 @@ fn replace_x(e: &mut Effect, v: &Value) -> Option<()> {
             replace_x(otherwise, v)?;
         }
         Effect::May { then, .. } | Effect::MayPay { then, .. } => replace_x(then, v)?,
-        Effect::Draw { count, .. } | Effect::Discard { count, .. } => sub(count),
+        Effect::Let { body, .. } | Effect::ForEach { body, .. } => replace_x(body, v)?,
+        Effect::Repeat { times, body } => {
+            sub(times);
+            replace_x(body, v)?;
+        }
+        Effect::PreventDamageShield {
+            amount: Some(amount),
+            ..
+        } => sub(amount),
+        Effect::Draw { count, .. }
+        | Effect::Discard { count, .. }
+        | Effect::LookAndSort { count, .. } => sub(count),
         Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
         | Effect::DealDamage { amount, .. }
         | Effect::AddCounters { amount, .. } => sub(amount),
         Effect::Continuous {
-            modification: Modification::ModifyPowerToughness { power, toughness },
+            modification:
+                Modification::ModifyPowerToughness { power, toughness }
+                | Modification::SetBasePowerToughness { power, toughness },
             ..
         } => {
             sub(power);
             sub(toughness);
         }
+        Effect::CreateToken { count, .. } | Effect::CreateTokenCopy { count, .. } => sub(count),
         Effect::MoveZone {
             what: Selector::TopOfLibrary { count, .. },
             ..
         } => sub(count),
         _ => {}
+    }
+    // An X this didn't reach would silently mean the spell's X (CR 107.3): refuse instead.
+    if format!("{e:?}").split(|c: char| !c.is_alphanumeric()).any(|w| w == "X") {
+        return None;
     }
     Some(())
 }

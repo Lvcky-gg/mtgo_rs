@@ -1726,3 +1726,471 @@ fn skip_your_next_turn() {
     g.until(P0, Step::Upkeep);
     assert_eq!(g.engine.state.turn, turn + 3, "then P0 as usual");
 }
+
+#[test]
+fn life_for_each_creature_destroyed_this_way() {
+    let mut t = Table::default();
+    let wrath = t.card(
+        "{W}",
+        "Sorcery",
+        None,
+        "Destroy all creatures. You gain 1 life for each creature destroyed this way.",
+    );
+    let bear = t.bear();
+    let wall = t.card("{1}", "Creature — Bear", Some((0, 4)), "Indestructible");
+    let mut g = Game::new(t);
+    g.lands(1);
+    g.put(bear, P0, Zone::Battlefield);
+    g.put(bear, P1, Zone::Battlefield);
+    g.put(bear, P1, Zone::Battlefield);
+    let w = g.put(wall, P1, Zone::Battlefield);
+    let s = g.put(wrath, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[]);
+    assert_eq!(g.life(P0), 23, "three destroyed; the indestructible one isn't");
+    assert!(g.engine.state.objects.contains_key(&w));
+}
+
+#[test]
+fn creatures_target_player_controls() {
+    let mut t = Table::default();
+    let sleep = t.card(
+        "{U}",
+        "Sorcery",
+        None,
+        "Creatures you control get +1/+1 until end of turn. Tap all creatures target player \
+         controls.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    let mine = g.put(bear, P0, Zone::Battlefield);
+    let theirs = g.put(bear, P1, Zone::Battlefield);
+    let s = g.put(sleep, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[Target::Player(P1)]);
+    assert!(g.engine.state.objects[&theirs].tapped);
+    assert!(!g.engine.state.objects[&mine].tapped);
+    assert_eq!(g.pt(mine), (3, 3));
+}
+
+#[test]
+fn destroy_target_creature_and_target_land() {
+    let mut t = Table::default();
+    let rain = t.card("{B}", "Sorcery", None, "Destroy target creature and target land.");
+    let bear = t.bear();
+    let land = t.card("", "Land", None, "");
+    let mut g = Game::new(t);
+    g.lands(1);
+    let b = g.put(bear, P1, Zone::Battlefield);
+    let l = g.put(land, P1, Zone::Battlefield);
+    let s = g.put(rain, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[Target::Object(b), Target::Object(l)]);
+    assert!(!g.engine.state.objects.contains_key(&b));
+    assert!(!g.engine.state.objects.contains_key(&l));
+}
+
+#[test]
+fn creatures_dealt_damage_this_way_are_exiled_if_they_die() {
+    let mut t = Table::default();
+    let sweep = t.card(
+        "{R}",
+        "Sorcery",
+        None,
+        "~ deals 2 damage to each creature. If a creature dealt damage this way would die \
+         this turn, exile it instead.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    g.put(bear, P1, Zone::Battlefield);
+    let s = g.put(sweep, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[]);
+    let exiled = g
+        .engine
+        .state
+        .objects
+        .values()
+        .filter(|o| o.card == bear && o.zone.zone == Zone::Exile)
+        .count();
+    assert_eq!(exiled, 1, "exiled, not put in the graveyard");
+    assert_eq!(g.count(Zone::Graveyard, P1), 0);
+}
+
+#[test]
+fn an_opponents_creature_that_would_die_is_exiled() {
+    let mut t = Table::default();
+    let rest = t.card(
+        "{1}{W}",
+        "Enchantment",
+        None,
+        "If a creature an opponent controls would die, exile it instead.",
+    );
+    let wrath = t.card("{W}", "Sorcery", None, "Destroy all creatures.");
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    g.put(rest, P0, Zone::Battlefield);
+    g.put(bear, P0, Zone::Battlefield);
+    g.put(bear, P1, Zone::Battlefield);
+    let s = g.put(wrath, P0, Zone::Hand);
+    g.main();
+    g.cast(s, &[]);
+    let where_ = |owner| {
+        g.engine
+            .state
+            .objects
+            .values()
+            .find(|o| o.card == bear && o.owner == owner && o.zone.zone != Zone::Library)
+            .map(|o| o.zone.zone)
+    };
+    assert_eq!(where_(P1), Some(Zone::Exile));
+    assert_eq!(where_(P0), Some(Zone::Graveyard));
+}
+
+#[test]
+fn damage_equal_to_the_cards_in_that_players_hand() {
+    let mut t = Table::default();
+    let storm = t.card(
+        "{R}",
+        "Sorcery",
+        None,
+        "~ deals damage to target player equal to the number of cards in that player's hand.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    for _ in 0..3 {
+        g.put(bear, P1, Zone::Hand);
+    }
+    let s = g.put(storm, P0, Zone::Hand);
+    g.main();
+    let theirs = g.count(Zone::Hand, P1) as i32;
+    g.cast(s, &[Target::Player(P1)]);
+    assert_eq!(g.life(P1), 20 - theirs);
+    assert!(theirs >= 3);
+}
+
+#[test]
+fn each_player_discards_their_hand_then_draws_seven() {
+    let mut t = Table::default();
+    let wheel = t.card(
+        "{R}",
+        "Sorcery",
+        None,
+        "Each player discards their hand, then draws seven cards.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    for _ in 0..2 {
+        g.put(bear, P0, Zone::Hand);
+    }
+    for _ in 0..4 {
+        g.put(bear, P1, Zone::Hand);
+    }
+    let s = g.put(wheel, P0, Zone::Hand);
+    g.main();
+    let (mine, theirs) = (g.count(Zone::Hand, P0) - 1, g.count(Zone::Hand, P1));
+    g.cast(s, &[]);
+    assert_eq!(g.count(Zone::Hand, P0), 7);
+    assert_eq!(g.count(Zone::Hand, P1), 7);
+    assert_eq!(g.count(Zone::Graveyard, P0), mine + 1, "its hand and the spell");
+    assert_eq!(g.count(Zone::Graveyard, P1), theirs);
+}
+
+#[test]
+fn counter_unless_it_pays_one_for_each_card_in_your_graveyard() {
+    for (in_graveyard, countered) in [(3, true), (1, false)] {
+        let mut t = Table::default();
+        let daze = t.card(
+            "{U}",
+            "Instant",
+            None,
+            "Counter target spell unless its controller pays {1} for each card in your \
+             graveyard.",
+        );
+        let shock = t.card("{R}", "Instant", None, "~ deals 2 damage to any target.");
+        let bear = t.bear();
+        let mut g = Game::new(t);
+        g.lands(3);
+        for _ in 0..in_graveyard {
+            g.put(bear, P0, Zone::Graveyard);
+        }
+        let d = g.put(daze, P0, Zone::Hand);
+        let s = g.put(shock, P0, Zone::Hand);
+        g.main();
+        g.act_holding(Action::Cast { object: s }, &[Target::Player(P1)]);
+        let spell = g.stack()[0];
+        // One land left over to pay with.
+        g.act(
+            Action::Cast { object: d },
+            &[Target::Object(spell)],
+            &[Answer::Bool(true)],
+        );
+        assert_eq!(g.life(P1), if countered { 20 } else { 18 }, "{in_graveyard} cards");
+    }
+}
+
+#[test]
+fn an_aura_that_sets_base_power_and_toughness() {
+    let mut t = Table::default();
+    let frog = t.card(
+        "{1}{U}",
+        "Enchantment — Aura",
+        None,
+        "Enchant creature\nEnchanted creature loses all abilities and has base power and \
+         toughness 1/1.",
+    );
+    let dragon = t.card("{4}", "Creature — Bear", Some((4, 4)), "Flying");
+    let mut g = Game::new(t);
+    let d = g.put(dragon, P1, Zone::Battlefield);
+    let a = g.put(frog, P0, Zone::Battlefield);
+    g.engine.state.objects.get_mut(&a).unwrap().attached_to = Some(d);
+    g.main();
+    assert_eq!(g.pt(d), (1, 1));
+    assert!(!g.has(d, mtg_core::Keyword::Flying));
+}
+
+#[test]
+fn target_creature_other_than_this_one() {
+    let mut t = Table::default();
+    let shaman = t.card(
+        "{1}{G}",
+        "Creature — Elf",
+        Some((1, 1)),
+        "{T}: Target creature other than this creature has base power and toughness 0/2 until \
+         end of turn.",
+    );
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    let s = g.put(shaman, P0, Zone::Battlefield);
+    let b = g.put(bear, P1, Zone::Battlefield);
+    g.main();
+    g.act(activate(s, 0), &[Target::Object(b)], &[]);
+    assert_eq!(g.pt(b), (0, 2));
+    let face = mtg_ir::PrintedCards::face(&g.table, shaman, 0).unwrap();
+    let legal = mtg_engine::targeting::legal_targets(
+        &g.engine.state,
+        &g.table,
+        &face.abilities[0].targets[0],
+        s,
+        P0,
+        &[],
+    );
+    assert!(!legal.contains(&Target::Object(s)), "not itself");
+    assert!(legal.contains(&Target::Object(b)));
+}
+
+#[test]
+fn draw_for_each_creature_that_died_this_turn() {
+    let mut t = Table::default();
+    let harvest = t.card(
+        "{B}",
+        "Sorcery",
+        None,
+        "Draw a card for each creature that died this turn.",
+    );
+    let wrath = t.card("{W}", "Sorcery", None, "Destroy all creatures.");
+    let bear = t.bear();
+    let rock = t.card("{1}", "Artifact", None, "");
+    let mut g = Game::new(t);
+    g.lands(2);
+    g.put(bear, P0, Zone::Battlefield);
+    g.put(bear, P1, Zone::Battlefield);
+    g.put(rock, P1, Zone::Battlefield);
+    let w = g.put(wrath, P0, Zone::Hand);
+    let h = g.put(harvest, P0, Zone::Hand);
+    g.main();
+    g.cast(w, &[]);
+    let hand = g.count(Zone::Hand, P0);
+    g.cast(h, &[]);
+    assert_eq!(g.count(Zone::Hand, P0), hand - 1 + 2);
+}
+
+#[test]
+fn half_rounded_up_and_down() {
+    let mut t = Table::default();
+    let drain = t.card(
+        "{B}",
+        "Sorcery",
+        None,
+        "Target opponent loses half their life, rounded up.",
+    );
+    let mill = t.card(
+        "{U}",
+        "Sorcery",
+        None,
+        "Target player mills half their library, rounded down.",
+    );
+    let mut g = Game::new(t);
+    g.lands(2);
+    g.engine.state.players.get_mut(&P1).unwrap().life = 19;
+    let d = g.put(drain, P0, Zone::Hand);
+    let m = g.put(mill, P0, Zone::Hand);
+    g.main();
+    g.cast(d, &[Target::Player(P1)]);
+    assert_eq!(g.life(P1), 9, "half of 19, rounded up, is 10");
+    let library = g.count(Zone::Library, P1);
+    g.cast(m, &[Target::Player(P1)]);
+    assert_eq!(g.count(Zone::Library, P1), library - library / 2);
+}
+
+#[test]
+fn exchange_control_of_two_target_creatures() {
+    for theirs in [true, false] {
+        let mut t = Table::default();
+        let switch = t.card(
+            "{U}",
+            "Sorcery",
+            None,
+            "Exchange control of two target creatures.",
+        );
+        let bear = t.bear();
+        let mut g = Game::new(t);
+        g.lands(1);
+        let mine = g.put(bear, P0, Zone::Battlefield);
+        let other = g.put(bear, if theirs { P1 } else { P0 }, Zone::Battlefield);
+        let s = g.put(switch, P0, Zone::Hand);
+        g.main();
+        g.cast(s, &[Target::Object(mine), Target::Object(other)]);
+        let controller = |id| mtg_engine::layers::controller(&g.engine.state, id);
+        if theirs {
+            assert_eq!(controller(mine), Some(P1));
+            assert_eq!(controller(other), Some(P0));
+        } else {
+            assert_eq!(controller(mine), Some(P0));
+            assert_eq!(controller(other), Some(P0));
+        }
+    }
+}
+
+#[test]
+fn an_x_by_x_token() {
+    let mut t = Table::default();
+    let ooze = t.card(
+        "{X}{G}",
+        "Sorcery",
+        None,
+        "Create an X/X green Elf creature token.",
+    );
+    let wurm = t.card(
+        "{G}",
+        "Sorcery",
+        None,
+        "Create an X/X green Elf creature token, where X is the number of lands you control.",
+    );
+    let mut g = Game::new(t);
+    g.lands(5);
+    let o = g.put(ooze, P0, Zone::Hand);
+    let w = g.put(wurm, P0, Zone::Hand);
+    g.main();
+    g.act(Action::Cast { object: o }, &[], &[Answer::Number(3)]);
+    g.cast(w, &[]);
+    let mut sizes: Vec<(i32, i32)> = g
+        .engine
+        .state
+        .battlefield()
+        .into_iter()
+        .filter(|id| g.engine.state.objects[id].is_token)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|id| g.pt(id))
+        .collect();
+    sizes.sort();
+    assert_eq!(sizes, vec![(3, 3), (5, 5)]);
+}
+
+#[test]
+fn where_x_is_reaches_a_prevention_shield() {
+    let mut t = Table::default();
+    let medic = t.card(
+        "{1}{W}",
+        "Creature — Wizard",
+        Some((1, 1)),
+        "{T}: Prevent the next X damage that would be dealt to target creature this turn, \
+         where X is the number of Wizards on the battlefield.",
+    );
+    let bolt = t.card("{R}", "Instant", None, "~ deals 3 damage to target creature.");
+    let bear = t.card("{1}", "Creature — Bear", Some((2, 4)), "");
+    let mut g = Game::new(t);
+    g.lands(1);
+    let m = g.put(medic, P0, Zone::Battlefield);
+    g.put(medic, P0, Zone::Battlefield);
+    let b = g.put(bear, P0, Zone::Battlefield);
+    let s = g.put(bolt, P0, Zone::Hand);
+    g.main();
+    g.act(activate(m, 0), &[Target::Object(b)], &[]);
+    g.cast(s, &[Target::Object(b)]);
+    assert_eq!(g.engine.state.objects[&b].damage, 1, "two Wizards prevent 2 of 3");
+}
+
+#[test]
+fn granted_ward_counters_unless_paid() {
+    let mut t = Table::default();
+    let shield = t.card(
+        "{1}{U}",
+        "Enchantment",
+        None,
+        "Creatures you control have ward {2}.",
+    );
+    let bolt = t.card("{R}", "Instant", None, "~ deals 3 damage to target creature.");
+    let bear = t.bear();
+    let mut g = Game::new(t);
+    g.lands(1);
+    g.put(shield, P1, Zone::Battlefield);
+    let b = g.put(bear, P1, Zone::Battlefield);
+    let s = g.put(bolt, P0, Zone::Hand);
+    g.main();
+    g.act(Action::Cast { object: s }, &[Target::Object(b)], &[]);
+    assert!(
+        g.engine.state.objects.contains_key(&b),
+        "couldn't pay {{2}}: the bolt was countered"
+    );
+}
+
+#[test]
+fn a_leyline_begins_the_game_on_the_battlefield() {
+    use mtg_engine::{Progress, choice::ChoiceKind};
+    let mut t = Table::default();
+    let leyline = t.card(
+        "{2}{B}{B}",
+        "Enchantment",
+        None,
+        "If this card is in your opening hand, you may begin the game with it on the \
+         battlefield.\nCreatures you control get +1/+1.",
+    );
+    let mut g = Game::new(t);
+    g.put(leyline, P0, Zone::Hand);
+    g.engine.state.pregame = Some(mtg_engine::state::Pregame::new(vec![P0, P1]));
+    let mut asked_leyline = false;
+    for _ in 0..50 {
+        match g.engine.advance(&g.table) {
+            Progress::NeedsChoice(c) => match &c.kind {
+                ChoiceKind::KeepOrMulligan { .. } => {
+                    g.engine.answer(&g.table, c.id, Answer::Bool(true)).unwrap();
+                }
+                ChoiceKind::ChooseObjects { from, .. } => {
+                    asked_leyline = true;
+                    assert_eq!(c.who, P0);
+                    let all = from.clone();
+                    g.engine.answer(&g.table, c.id, Answer::Objects(all)).unwrap();
+                }
+                _ => break,
+            },
+            Progress::Continue => {}
+            Progress::GameOver { .. } => panic!(),
+        }
+    }
+    assert!(asked_leyline);
+    assert!(
+        g.engine
+            .state
+            .battlefield()
+            .iter()
+            .any(|id| g.engine.state.objects[id].card == leyline),
+        "on the battlefield before the first turn"
+    );
+}

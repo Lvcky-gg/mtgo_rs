@@ -156,6 +156,14 @@ pub enum Effect {
     Reveal {
         what: Selector,
     },
+    /// "Remove target creature from combat" (CR 506.4).
+    RemoveFromCombat {
+        what: Selector,
+    },
+    /// "Look at target player's hand": its cards are shown to the controller only.
+    LookAtHand {
+        whose: Selector,
+    },
     Shuffle {
         who: Selector,
     },
@@ -169,12 +177,18 @@ pub enum Effect {
     /// a random order." The controller looks at `count`, takes `take` matching `filter`
     /// (or up to that many) to `take_to`, and the rest go to `rest_to` — the bottom of
     /// the library, randomly or in an order they choose, or the graveyard.
+    /// A Library take destination keeps the selected single card on top.
     Dig {
         count: Value,
         take: Value,
         up_to: bool,
         filter: ObjectFilter,
+        /// Optional second one-card quota from the same group and destination.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_filter: Option<ObjectFilter>,
         take_to: Zone,
+        #[serde(default)]
+        tapped: bool,
         reveal: bool,
         rest_to: Zone,
         rest_random: bool,
@@ -210,12 +224,22 @@ pub enum Effect {
     DealDamageDivided {
         source: Selector,
         shares: Vec<Selector>,
+        /// "deals X damage divided …": only the first X shares are announced; the rest
+        /// stay empty.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        x: bool,
     },
     Tap {
         what: Selector,
     },
     Untap {
         what: Selector,
+    },
+    /// "put its counters on target creature": each kind of counter `from` has (as it last
+    /// existed), that many on `to`.
+    CopyCounters {
+        from: Selector,
+        to: Selector,
     },
     AddCounters {
         what: Selector,
@@ -271,6 +295,12 @@ pub enum Effect {
     GrantCastLater {
         what: Selector,
     },
+    /// "Choose a color. …", "Choose a creature type. …": asked as it resolves; within
+    /// `then`, "the chosen color/type" (`HasChosenColor`, `HasChosenSubtype`) is the answer.
+    Choose {
+        choice: EntryChoice,
+        then: Box<Effect>,
+    },
     /// A reflexive trigger (CR 603.12): "you may pay {2}. When you do, …" — a triggered
     /// ability of its own, going on the stack (and choosing `targets`) once this resolves.
     Reflexive {
@@ -297,6 +327,9 @@ pub enum Effect {
     ExileIfDiesThisTurn {
         what: Selector,
     },
+    /// "After this main phase, there is an additional combat phase followed by an
+    /// additional main phase." (CR 500.8)
+    AdditionalCombat,
     /// "Take an extra turn after this one" (CR 500.7).
     ExtraTurn {
         who: Selector,
@@ -368,6 +401,11 @@ pub enum Effect {
         count: Value,
         controller: Selector,
     },
+    /// CR 701.12 — "exchange control of A and B": each goes to the other's controller.
+    ExchangeControl {
+        a: Selector,
+        b: Selector,
+    },
     /// Gain control until the effect ends.
     GainControl {
         what: Selector,
@@ -417,6 +455,9 @@ pub enum Effect {
         /// A spell countered this way is exiled instead of going to the graveyard.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile: bool,
+        /// "pays {1} for each card in your graveyard": the mana that many times.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        times: Option<Value>,
     },
     /// Copy a spell or ability on the stack, optionally letting new targets be chosen.
     CopySpell {
@@ -560,6 +601,8 @@ pub enum Restriction {
     AttackDespiteDefender,
     /// "Assigns combat damage equal to its toughness rather than its power" (CR 510.1a).
     AssignDamageByToughness,
+    /// "Assigns no combat damage this turn" (CR 510.1a: it assigns none).
+    AssignsNoCombatDamage,
     CantBlock,
     CantBeBlockedExceptBy(ObjectFilter),
     /// "Can block only creatures with flying": what this creature may block.

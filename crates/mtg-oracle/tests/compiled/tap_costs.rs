@@ -284,3 +284,100 @@ fn devour_sacrifices_creatures_as_it_enters_for_counters() {
         assert_eq!(g.count(Zone::Graveyard, P0), if eat { 2 } else { 0 });
     }
 }
+
+#[test]
+fn the_sacrificed_creature_is_read_as_it_last_was() {
+    let mut t = Table::default();
+    let fling = t.card(
+        "{1}{R}",
+        "Instant",
+        None,
+        "As an additional cost to cast this spell, sacrifice a creature.\n~ deals damage equal \
+         to the sacrificed creature's power to any target.",
+    );
+    let altar = t.card(
+        "{2}",
+        "Artifact",
+        None,
+        "{1}, Sacrifice a creature: You gain life equal to the sacrificed creature's toughness.",
+    );
+    let big = t.card("{4}", "Creature — Bear", Some((4, 5)), "");
+    let mut g = Game::new(t);
+    g.lands(3);
+    let s = g.put(fling, P0, Zone::Hand);
+    let a = g.put(altar, P0, Zone::Battlefield);
+    let b1 = g.put(big, P0, Zone::Battlefield);
+    let b2 = g.put(big, P0, Zone::Battlefield);
+    g.main();
+    g.act(
+        mtg_engine::actions::Action::Cast { object: s },
+        &[mtg_core::Target::Player(P1)],
+        &[Answer::Objects(vec![b1])],
+    );
+    assert_eq!(g.life(P1), 16);
+    g.act(activate(a, 0), &[], &[Answer::Objects(vec![b2])]);
+    assert_eq!(g.life(P0), 25);
+}
+
+#[test]
+fn draw_cards_equal_to_the_sacrificed_creatures_power() {
+    let mut t = Table::default();
+    let spell = t.card(
+        "{1}{G}",
+        "Sorcery",
+        None,
+        "As an additional cost to cast this spell, sacrifice a creature.\nDraw cards equal to \
+         the sacrificed creature's power.",
+    );
+    let big = t.card("{4}", "Creature — Bear", Some((3, 5)), "");
+    let mut g = Game::new(t);
+    g.lands(2);
+    let s = g.put(spell, P0, Zone::Hand);
+    let b = g.put(big, P0, Zone::Battlefield);
+    g.main();
+    let hand = g.count(Zone::Hand, P0);
+    g.act(
+        mtg_engine::actions::Action::Cast { object: s },
+        &[],
+        &[Answer::Objects(vec![b])],
+    );
+    assert_eq!(g.count(Zone::Hand, P0), hand - 1 + 3);
+}
+
+#[test]
+fn station_charges_a_spacecraft_until_it_is_a_creature() {
+    let mut t = Table::default();
+    let ship = t.card(
+        "{2}{R}",
+        "Artifact — Spacecraft",
+        Some((3, 3)),
+        "Station (Tap another creature you control: Put charge counters equal to its power on \
+         this Spacecraft. Station only as a sorcery. It's an artifact creature at 3+.)\n3+ | \
+         Flying, haste",
+    );
+    let small = t.card("{1}", "Creature — Bear", Some((2, 2)), "");
+    let big = t.card("{4}", "Creature — Bear", Some((4, 4)), "");
+    let mut g = Game::new(t);
+    let s = g.put(ship, P0, Zone::Battlefield);
+    let a = g.put(small, P0, Zone::Battlefield);
+    let b = g.put(big, P0, Zone::Battlefield);
+    g.main();
+    let is_creature = |g: &Game| {
+        mtg_engine::layers::compute(&g.engine.state, &g.table, s)
+            .unwrap()
+            .has_type(mtg_core::CardType::Creature)
+    };
+    assert!(!is_creature(&g));
+    // Two counters from the 2/2: not yet.
+    g.act(activate(s, 0), &[], &[Answer::Objects(vec![a])]);
+    assert!(!is_creature(&g));
+    assert!(!g.has(s, mtg_core::Keyword::Flying));
+    // Four more from the 4/4: six, past 3+.
+    g.act(activate(s, 0), &[], &[Answer::Objects(vec![b])]);
+    assert!(is_creature(&g));
+    assert_eq!(g.pt(s), (3, 3));
+    assert!(g.has(s, mtg_core::Keyword::Flying));
+    assert!(g.has(s, mtg_core::Keyword::Haste));
+    let charge: i32 = g.engine.state.objects[&s].counters.values().sum();
+    assert_eq!(charge, 6);
+}

@@ -206,10 +206,13 @@ pub enum EventPattern {
     AttacksMostLife {
         who: ObjectFilter,
     },
-    /// Heroic: "whenever you cast a spell that targets ~".
+    /// Heroic: "whenever you cast a spell that targets ~"; also "an instant or sorcery
+    /// spell that targets a creature" (`spell` is what the spell must be).
     CastTargeting {
         by: Selector,
-        target: ObjectFilter,
+        target: Box<ObjectFilter>,
+        #[serde(default = "any_object")]
+        spell: Box<ObjectFilter>,
     },
     /// "Whenever you copy an instant or sorcery spell" (magecraft's other half).
     Copied {
@@ -325,4 +328,8 @@ pub enum Condition {
     Not(Box<Condition>),
     And(Vec<Condition>),
     Or(Vec<Condition>),
+}
+
+fn any_object() -> Box<ObjectFilter> {
+    Box::new(ObjectFilter::Any)
 }

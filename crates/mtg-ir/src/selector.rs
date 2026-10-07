@@ -80,6 +80,13 @@ pub enum Binding {
 impl Binding {
     /// Where a ninjutsu ability keeps what the returned creature was attacking.
     pub const NINJUTSU_DEFENDER: Self = Binding::Named(u16::MAX - 4);
+    /// What was sacrificed to pay a spell's or ability's cost: "the sacrificed creature's
+    /// power", read from last-known information (CR 608.2h).
+    pub const SACRIFICED: Self = Binding::Named(u16::MAX - 8);
+    /// What a "destroy" step actually destroyed: "for each creature destroyed this way".
+    pub const DESTROYED: Self = Binding::Named(u16::MAX - 9);
+    /// What was tapped to pay a cost: station's "equal to the tapped creature's power".
+    pub const TAPPED: Self = Binding::Named(u16::MAX - 10);
 }
 
 /// A predicate over objects. Composable so that printed text maps structurally.
@@ -109,6 +116,8 @@ pub enum ObjectFilter {
     /// Dealt damage this turn by this ability's source: "a creature dealt damage by this
     /// creature this turn".
     DealtDamageBySelfThisTurn,
+    /// "creatures that attacked this turn".
+    AttackedThisTurn,
     /// Has a keyword, printed or granted: "creature with flying".
     HasKeyword(crate::ability::Keyword),
     ToughnessAtMost(Value),
@@ -141,6 +150,8 @@ pub enum ObjectFilter {
     BlockingSource,
     /// Has the same name as this ability's source: "a card named ~".
     NamedLikeSource,
+    /// A specified printed name, stored in lowercase by the Oracle compiler.
+    Named(String),
     /// Two or more colors (CR 105.2).
     Multicolored,
     /// Could be legally targeted by the ability being resolved; folds in
@@ -151,6 +162,8 @@ pub enum ObjectFilter {
     /// Distinct from "an object on the stack": an activated or triggered ability is on
     /// the stack too and is not a spell, so "target spell" must not offer one.
     IsSpell,
+    /// A spell or ability with a target this matches: "spell that targets a creature".
+    TargetsObject(Box<ObjectFilter>),
     /// An ability on the stack, the complement of [`ObjectFilter::IsSpell`].
     IsAbility,
     Not(Box<ObjectFilter>),

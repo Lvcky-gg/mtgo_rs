@@ -682,7 +682,7 @@ pub fn mana_sources(
             let outputs: Vec<ManaOutput> = collect_mana_outputs(effect)
                 .iter()
                 .map(|o| with_chosen_color(o, chosen))
-                .map(|o| counted(state, cards, id, player, o))
+                .map(|o| counted(state, cards, id, player, 0, o))
                 .collect();
             // "The chosen color" with none chosen makes nothing.
             if !outputs.is_empty() && !outputs.iter().any(|o| matches!(o, ManaOutput::ChosenColor))
@@ -701,6 +701,25 @@ pub fn mana_sources(
     }
 
     out
+}
+
+/// Whether a mana ability's cost is a choice — "tap an untapped creature you control",
+/// "remove X storage counters" — so that activating it is announced like any ability,
+/// asking for those, before it resolves at once (CR 605.3b). Automatic payment never
+/// uses such an ability; it is activated by hand.
+pub fn announced(cost: &mtg_ir::Cost) -> bool {
+    use mtg_ir::{AdditionalCost as A, Selector as S, Value};
+    cost.additional.iter().any(|part| {
+        matches!(
+            part,
+            A::TapUntapped { .. }
+                | A::RemoveCounters {
+                    what: S::SelfSource,
+                    amount: Value::X,
+                    ..
+                }
+        )
+    })
 }
 
 /// A source offered for manual activation, including abilities whose input mana
@@ -733,6 +752,13 @@ pub fn manual_source(
                 count: Value::Fixed(1)
             } | A::PayLife {
                 amount: Value::Fixed(0..)
+            } | A::RemoveCounters {
+                what: S::SelfSource,
+                amount: Value::Fixed(1..) | Value::X,
+                ..
+            } | A::TapUntapped {
+                count: Value::Fixed(1..),
+                ..
             }
         )
     }) || !crate::cost::additional_payable(state, cards, object, player, cost)
@@ -744,10 +770,11 @@ pub fn manual_source(
         return None;
     }
     if cost.mana.symbols.is_empty()
+        && !announced(cost)
         && cost
             .additional
             .iter()
-            .all(|part| !matches!(part, A::PayLife { .. }))
+            .all(|part| !matches!(part, A::PayLife { .. } | A::RemoveCounters { .. }))
     {
         return mana_sources(state, cards, player)
             .into_iter()
@@ -802,6 +829,7 @@ pub(crate) fn counted(
     cards: &dyn PrintedCards,
     source: ObjectId,
     player: PlayerId,
+    x: u32,
     out: ManaOutput,
 ) -> ManaOutput {
     match out {
@@ -815,7 +843,7 @@ pub(crate) fn counted(
                 controller: player,
                 targets: &[],
                 target_legal: &[],
-                x: 0,
+                x,
                 bindings: crate::empty_bindings(),
             };
             let n = crate::eval::value(&ctx, &amount).unwrap_or(0).max(0);

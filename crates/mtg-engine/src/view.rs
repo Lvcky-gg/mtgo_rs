@@ -136,6 +136,15 @@ pub fn project_showing(state: &GameState, viewer: PlayerId, shown: &[ObjectId]) 
             && state.objects_in(obj.zone).first() == Some(&obj.id)
     };
     for obj in state.objects.values() {
+        // Mana announcements use an internal object to gather costs, but the
+        // ability never goes on the stack and must not appear in client views.
+        if obj
+            .cast_context
+            .as_ref()
+            .is_some_and(|c| c.mana_choice.is_some())
+        {
+            continue;
+        }
         let entitled = match obj.zone.zone {
             Zone::Battlefield | Zone::Stack | Zone::Graveyard | Zone::Exile | Zone::Command => {
                 !obj.face_down || obj.controller == viewer
@@ -216,8 +225,24 @@ pub fn project_showing(state: &GameState, viewer: PlayerId, shown: &[ObjectId]) 
         })
         .collect();
 
+    let stack = state
+        .objects_in(ZoneRef::shared(Zone::Stack))
+        .into_iter()
+        .filter(|id| visible.contains_key(id))
+        .collect();
     PlayerView {
-        revealed_cards: state.revealed_cards.clone(),
+        revealed_cards: state
+            .revealed_cards
+            .iter()
+            .cloned()
+            .chain(
+                state
+                    .looked_at
+                    .iter()
+                    .filter(|(who, _)| *who == viewer)
+                    .map(|(_, c)| c.clone()),
+            )
+            .collect(),
         prevent_combat_damage: state.prevent_combat_damage,
         prevent_damage_to: state.prevent_damage_to.clone(),
         viewer,
@@ -227,6 +252,6 @@ pub fn project_showing(state: &GameState, viewer: PlayerId, shown: &[ObjectId]) 
         priority: state.priority,
         players,
         visible,
-        stack: state.objects_in(ZoneRef::shared(Zone::Stack)),
+        stack,
     }
 }

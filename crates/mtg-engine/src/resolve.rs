@@ -381,7 +381,8 @@ fn resolve_inner(
                 for out in produces {
                     let out = crate::mana::with_chosen_color(out, chosen);
                     // "Add {G} for each creature you control": counted now.
-                    let out = &crate::mana::counted(state, cards, rc.source, rc.controller, out);
+                    let out =
+                        &crate::mana::counted(state, cards, rc.source, rc.controller, rc.x, out);
                     let (color, amount) = resolve_output(out, rc);
                     if amount > 0 {
                         apply::apply(
@@ -486,7 +487,7 @@ fn resolve_inner(
             deal_damage(state, cards, log, rc, cause, src, &shares)
         }
 
-        Effect::DealDamageDivided { source, shares } => {
+        Effect::DealDamageDivided { source, shares, .. } => {
             let (src, shares) = with_ctx(state, cards, rc, |ctx| {
                 let src = eval::objects(ctx, source)?
                     .first()
@@ -563,6 +564,34 @@ fn resolve_inner(
             Ok(())
         }
 
+        Effect::CopyCounters { from, to } => {
+            let (from, to) = with_ctx(state, cards, rc, |ctx| {
+                Ok((eval::objects(ctx, from)?, eval::objects(ctx, to)?))
+            })?;
+            // As it last existed, for a creature that has died (CR 608.2h).
+            let counters: Vec<(mtg_core::CounterKind, i32)> = from
+                .iter()
+                .filter_map(|id| state.objects.get(id).or_else(|| state.last_known.get(id)))
+                .flat_map(|o| o.counters.iter().map(|(k, n)| (*k, *n)))
+                .filter(|(_, n)| *n > 0)
+                .collect();
+            for id in to {
+                for (kind, delta) in &counters {
+                    apply::apply(
+                        state,
+                        cause,
+                        Event::CountersChanged {
+                            object: id,
+                            kind: *kind,
+                            delta: *delta,
+                        },
+                        log,
+                    );
+                }
+            }
+            Ok(())
+        }
+
         Effect::RemoveCounters { what, kind, amount } => {
             let (ids, n) = with_ctx(state, cards, rc, |ctx| {
                 Ok((eval::objects(ctx, what)?, eval::value(ctx, amount)?))
@@ -586,14 +615,22 @@ fn resolve_inner(
 
         Effect::Destroy { what } => {
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            // Remembered for "for each creature destroyed this way", by the identity each
+            // had on the battlefield (its last-known information).
+            let mut destroyed = Vec::new();
+            let mut events = Vec::new();
             for id in ids {
                 for mut e in destruction(state, cards, id) {
                     if let Event::ZoneChange { new_object, .. } = &mut e {
                         *new_object = state.new_object_id();
+                        destroyed.push(Target::Object(id));
                     }
-                    apply::apply(state, cause, e, log);
+                    events.push(e);
                 }
             }
+            apply::apply_simultaneous(state, cause, events, log);
+            rc.bindings
+                .insert(mtg_ir::selector::Binding::DESTROYED, destroyed);
             Ok(())
         }
 
@@ -688,6 +725,23 @@ fn resolve_inner(
             Ok(())
         }
 
+        Effect::RemoveFromCombat { what } => {
+            for object in with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))? {
+                apply::apply(state, cause, Event::RemovedFromCombat { object }, log);
+            }
+            Ok(())
+        }
+
+        Effect::LookAtHand { whose } => {
+            let by = rc.controller;
+            for p in with_ctx(state, cards, rc, |ctx| eval::players(ctx, whose))? {
+                for object in state.objects_in(ZoneRef::of(Zone::Hand, p)) {
+                    apply::apply(state, cause, Event::LookedAt { object, by }, log);
+                }
+            }
+            Ok(())
+        }
+
         Effect::MoveZone {
             what,
             to,
@@ -711,7 +765,30 @@ fn resolve_inner(
                     .copied(),
                 None => None,
             };
-            let ids = objects_asking(state, cards, rc, what)?;
+            let mut ids = objects_asking(state, cards, rc, what)?;
+            if *to == Zone::Library
+                && matches!(
+                    position,
+                    mtg_ir::effect::ZonePosition::Top | mtg_ir::effect::ZonePosition::Bottom
+                )
+            {
+                let mut by_owner = std::collections::BTreeMap::<PlayerId, Vec<ObjectId>>::new();
+                for id in ids {
+                    if let Some(object) = state.objects.get(&id) {
+                        by_owner.entry(object.owner).or_default().push(id);
+                    }
+                }
+                ids = Vec::new();
+                for (owner, group) in by_owner {
+                    let mut ordered =
+                        ask_order(rc, owner, group, "order for your library, first is highest")?;
+                    // Each top insertion goes above the previous one.
+                    if matches!(position, mtg_ir::effect::ZonePosition::Top) {
+                        ordered.reverse();
+                    }
+                    ids.extend(ordered);
+                }
+            }
             let mut moved = Vec::new();
             for id in ids {
                 // CR 712.14b: putting an MDFC onto the battlefield uses its front,
@@ -967,20 +1044,43 @@ fn resolve_inner(
             times,
             otherwise,
         } => {
-            if !cost.additional.is_empty() {
-                return Err(ResolveError::Unsupported(
-                    "additional cost during resolution",
-                ));
+            // Mana and life ("cumulative upkeep—pay 1 life") are understood.
+            let mut life_each = 0;
+            for part in &cost.additional {
+                match part {
+                    mtg_ir::AdditionalCost::PayLife {
+                        amount: mtg_ir::Value::Fixed(n),
+                    } => life_each += n,
+                    _ => {
+                        return Err(ResolveError::Unsupported(
+                            "additional cost during resolution",
+                        ));
+                    }
+                }
             }
             let n = with_ctx(state, cards, rc, |ctx| eval::value(ctx, times))?.max(0);
             let mana = mtg_core::ManaCost {
                 symbols: (0..n).flat_map(|_| cost.mana.symbols.clone()).collect(),
             };
-            if crate::mana::can_pay(state, cards, rc.controller, &mana, rc.x)
+            let life = life_each * n;
+            // Life can be paid only from a life total at least that large (CR 119.4).
+            if state.player(rc.controller).life >= life
+                && crate::mana::can_pay(state, cards, rc.controller, &mana, rc.x)
                 && ask_confirm(rc, rc.controller, "pay the cost?")?
                 && let Some(plan) = crate::mana::plan(state, cards, rc.controller, &mana, rc.x)
             {
                 pay_plan(state, cards, log, rc.controller, &plan);
+                if life > 0 {
+                    apply::apply(
+                        state,
+                        cause,
+                        Event::LifeChanged {
+                            player: rc.controller,
+                            delta: -life,
+                        },
+                        log,
+                    );
+                }
                 return Ok(());
             }
             resolve(state, cards, log, otherwise, rc)
@@ -1064,8 +1164,13 @@ fn resolve_inner(
                     continue;
                 }
                 // Sacrificing is mandatory once the effect resolves; which one is the
-                // choice.
-                let chosen = ask_objects(rc, p, candidates, 1, 1, "sacrifice")?;
+                // choice. "Sacrifice it" names one object and asks nothing — which a mana
+                // ability, resolving with no way to ask, depends on.
+                let chosen = if matches!(what, Selector::SelfSource) {
+                    candidates
+                } else {
+                    ask_objects(rc, p, candidates, 1, 1, "sacrifice")?
+                };
                 for id in chosen {
                     move_to(state, log, id, Zone::Graveyard, cause);
                     apply::apply(
@@ -1094,7 +1199,7 @@ fn resolve_inner(
                 if top.len() < 2 {
                     continue;
                 }
-                for (i, id) in ask_order(rc, p, top, "order for the top, first is topmost")?
+                for (i, id) in ask_order(rc, rc.controller, top, "order for the top, first is topmost")?
                     .into_iter()
                     .enumerate()
                 {
@@ -1109,7 +1214,9 @@ fn resolve_inner(
             take,
             up_to,
             filter,
+            additional_filter,
             take_to,
+            tapped,
             reveal,
             rest_to,
             rest_random,
@@ -1135,12 +1242,36 @@ fn resolve_inner(
             })?;
             let max = (k.max(0) as u32).min(candidates.len() as u32);
             let min = if *up_to { 0 } else { max };
-            let chosen = ask_objects(rc, p, candidates, min, max, "take from among them")?;
-            for id in &chosen {
-                if *reveal {
+            let mut chosen = ask_objects(rc, p, candidates, min, max, "take from among them")?;
+            if let Some(filter) = additional_filter {
+                let candidates = with_ctx(state, cards, rc, |ctx| {
+                    Ok(top
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            !chosen.contains(id) && eval::matches(ctx, filter, *id).unwrap_or(false)
+                        })
+                        .collect::<Vec<_>>())
+                })?;
+                let max = 1.min(candidates.len() as u32);
+                chosen.extend(ask_objects(rc, p, candidates, 0, max, "take the other quality")?);
+            }
+            if *reveal {
+                for id in &chosen {
                     apply::apply(state, cause, Event::Revealed { object: *id }, log);
                 }
-                move_to(state, log, *id, *take_to, cause);
+            }
+            for id in &chosen {
+                let index = (*take_to == Zone::Library).then_some(0);
+                if let Some(new_id) = move_to_at(state, log, *id, *take_to, index, cause)
+                    && *take_to == Zone::Battlefield
+                {
+                    let pay = enter_choice(state, cards, rc, new_id)?;
+                    entered(state, cards, log, new_id, cause, pay);
+                    if *tapped {
+                        apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
+                    }
+                }
             }
             let rest: Vec<ObjectId> = top.into_iter().filter(|id| !chosen.contains(id)).collect();
             if *rest_to == Zone::Library {
@@ -1522,6 +1653,61 @@ fn resolve_inner(
             }
             Ok(())
         }
+        Effect::Choose { choice, then } => {
+            let options = entry_options(cards, *choice);
+            let what = match choice {
+                mtg_ir::effect::EntryChoice::Color => "choose a color",
+                mtg_ir::effect::EntryChoice::CreatureType => "choose a creature type",
+            };
+            let picked = match rc.need(
+                rc.controller,
+                ChoiceKind::ChooseModes {
+                    available: options.iter().map(|(l, _, _)| l.clone()).collect(),
+                    count: 1,
+                    min: None,
+                },
+                what,
+            )? {
+                Answer::Modes(m) => m.first().copied().unwrap_or(0) as usize,
+                _ => 0,
+            };
+            let Some((_, color, subtype)) = options.get(picked).or_else(|| options.first())
+            else {
+                return resolve(state, cards, log, then, rc);
+            };
+            // Kept on the resolving object, where "the chosen color" is read; a choice the
+            // permanent made as it entered is put back afterwards.
+            let before = state
+                .objects
+                .get(&rc.source)
+                .map(|o| (o.chosen_color, o.chosen_subtype));
+            apply::apply(
+                state,
+                cause,
+                Event::ChoiceMade {
+                    object: rc.source,
+                    color: *color,
+                    subtype: *subtype,
+                },
+                log,
+            );
+            let result = resolve(state, cards, log, then, rc);
+            if let Some((color, subtype)) = before
+                && (color.is_some() || subtype.is_some())
+            {
+                apply::apply(
+                    state,
+                    cause,
+                    Event::ChoiceMade {
+                        object: rc.source,
+                        color,
+                        subtype,
+                    },
+                    log,
+                );
+            }
+            result
+        }
         Effect::Reflexive { effect, targets } => {
             let card = state
                 .objects
@@ -1579,6 +1765,10 @@ fn resolve_inner(
             for player in players {
                 apply::apply(state, cause, Event::ExtraTurnAdded { player }, log);
             }
+            Ok(())
+        }
+        Effect::AdditionalCombat => {
+            apply::apply(state, cause, Event::AdditionalCombatAdded, log);
             Ok(())
         }
         Effect::SkipNextTurn { who } => {
@@ -1801,14 +1991,80 @@ fn resolve_inner(
             Ok(())
         }
         Effect::GainControl { .. } => Err(ResolveError::Unsupported("control change")),
+        Effect::ExchangeControl { a, b } => {
+            let (a, b) = with_ctx(state, cards, rc, |ctx| {
+                Ok((
+                    eval::objects(ctx, a)?.first().copied(),
+                    eval::objects(ctx, b)?.first().copied(),
+                ))
+            })?;
+            let on_field = |id: Option<ObjectId>| {
+                id.filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|o| o.zone.zone == Zone::Battlefield)
+                })
+            };
+            let (Some(a), Some(b)) = (on_field(a), on_field(b)) else {
+                return Ok(());
+            };
+            let (Some(ca), Some(cb)) = (
+                crate::layers::controller(state, a),
+                crate::layers::controller(state, b),
+            ) else {
+                return Ok(());
+            };
+            // Both under one player: no exchange happens (CR 701.12b).
+            if ca == cb {
+                return Ok(());
+            }
+            for (object, to) in [(a, cb), (b, ca)] {
+                let id = state.new_object_id();
+                let timestamp = state.bump();
+                let modification = mtg_ir::effect::Modification::Control(Selector::You);
+                state.continuous.push(ContinuousEffect {
+                    id,
+                    source: rc.source,
+                    affected: AffectedSet::Fixed(vec![object]),
+                    layer: layer_of(&modification),
+                    modification,
+                    duration: mtg_ir::effect::Duration::Permanent,
+                    timestamp,
+                    ability: None,
+                    controller: Some(to),
+                });
+                apply::apply(
+                    state,
+                    cause,
+                    Event::ContinuousEffectBegan {
+                        effect: id,
+                        source: rc.source,
+                    },
+                    log,
+                );
+            }
+            Ok(())
+        }
         Effect::CounterUnlessPays {
             what,
             mana,
             life,
             discard,
             exile,
+            times,
         } => {
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            // "{1} for each card in your graveyard": counted as it resolves.
+            let mana = match times {
+                Some(times) => {
+                    let n = with_ctx(state, cards, rc, |ctx| eval::value(ctx, times))?.max(0);
+                    &mtg_core::ManaCost {
+                        symbols: (0..n).flat_map(|_| mana.symbols.clone()).collect(),
+                    }
+                }
+                None => mana,
+            };
             for id in ids {
                 let Some(payer) = state
                     .objects
@@ -2165,6 +2421,11 @@ fn cast_during_resolution(
         let answer = rc.need(
             who,
             crate::choice::ChoiceKind::ChooseTargets {
+                optional: specs
+                    .iter()
+                    .zip(&wanted)
+                    .map(|(spec, wanted)| !*wanted || spec.up_to)
+                    .collect(),
                 slots: asked.clone(),
             },
             "choose targets",
@@ -2278,6 +2539,8 @@ fn new_targets(
     let answer = rc.need(
         rc.controller,
         crate::choice::ChoiceKind::ChooseTargets {
+            // Retargeting a copy preserves the number of existing targets.
+            optional: vec![false; slots.len()],
             slots: slots.clone(),
         },
         "choose new targets for the copy",

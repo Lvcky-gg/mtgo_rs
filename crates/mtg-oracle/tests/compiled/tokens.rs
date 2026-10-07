@@ -164,3 +164,61 @@ fn powerstone_mana_pays_for_artifacts_and_abilities_but_not_other_spells() {
     g.act(activate(l, 0), &[], &[]);
     assert_eq!(g.life(P0), life + 1);
 }
+
+#[test]
+fn job_select_makes_a_hero_and_attaches_to_it() {
+    let mut t = Table::default();
+    let fist = t.card(
+        "{1}{W}",
+        "Artifact — Equipment",
+        None,
+        "Job select\nEquipped creature gets +1/+0 and is a Monk in addition to its other \
+         types.\nEquip {2}",
+    );
+    let mut g = Game::new(t);
+    g.lands(2);
+    let f = g.put(fist, P0, Zone::Hand);
+    g.main();
+    g.cast(f, &[]);
+    let hero = g
+        .engine
+        .state
+        .battlefield()
+        .into_iter()
+        .find(|id| g.engine.state.objects[id].is_token)
+        .expect("a Hero token");
+    let equipment = g
+        .engine
+        .state
+        .battlefield()
+        .into_iter()
+        .find(|id| g.engine.state.objects[id].card == fist)
+        .unwrap();
+    assert_eq!(g.engine.state.objects[&equipment].attached_to, Some(hero));
+    assert_eq!(g.pt(hero), (2, 1));
+    let monk = mtg_ir::PrintedCards::subtype_named(&g.table, "Monk").unwrap();
+    let chars = mtg_engine::layers::compute(&g.engine.state, &g.table, hero).unwrap();
+    assert!(chars.subtypes.contains(&monk), "a Monk in addition");
+}
+
+#[test]
+fn equipment_adds_a_type_and_a_keyword_in_either_order() {
+    for text in [
+        "Equipped creature gets +1/+1, is a Wizard in addition to its other types, and has \
+         flying.\nEquip {1}",
+        "Equipped creature is a Wizard in addition to its other types and has flying.\nEquip {1}",
+    ] {
+        let mut t = Table::default();
+        let hat = t.card("{1}", "Artifact — Equipment", None, text);
+        let bear = t.bear();
+        let mut g = Game::new(t);
+        let b = g.put(bear, P0, Zone::Battlefield);
+        let h = g.put(hat, P0, Zone::Battlefield);
+        g.engine.state.objects.get_mut(&h).unwrap().attached_to = Some(b);
+        g.main();
+        let wizard = mtg_ir::PrintedCards::subtype_named(&g.table, "Wizard").unwrap();
+        let chars = mtg_engine::layers::compute(&g.engine.state, &g.table, b).unwrap();
+        assert!(chars.subtypes.contains(&wizard), "{text}");
+        assert!(g.has(b, mtg_core::Keyword::Flying), "{text}");
+    }
+}

@@ -5,6 +5,16 @@
 //! the first half; these hold the second, one scenario per shape the compiler emits.
 
 mod abilities_extended;
+mod announced_mana;
+mod choose_on_resolution;
+mod announced_mana_view;
+mod exert;
+mod no_combat_damage;
+mod any_number;
+mod plural_library;
+mod shuffle_selected;
+mod owner_shuffle;
+mod life_buyback;
 mod adventure;
 mod audit;
 mod backup;
@@ -17,6 +27,14 @@ mod combat;
 mod copies;
 mod damage;
 mod dig;
+mod untap_triggers;
+mod reveal_hand;
+mod variable_scry;
+mod reorder_library;
+mod keep_top;
+mod defined_dig;
+mod dig_wording;
+mod two_quality_dig;
 mod discard_costs;
 mod divided_damage;
 mod dredge;
@@ -30,13 +48,19 @@ mod impulse;
 mod keywords;
 mod leveler;
 mod library_positions;
+mod library_qualities;
 mod mana_followups;
 mod multiface;
+mod multikicker;
+mod optional_target_prompts;
 mod prevention;
 mod protection_qualities;
+mod named_search;
 mod search;
+mod search_alternatives;
 mod split;
 mod tap_costs;
+mod tapped_dig;
 mod target_discount;
 mod tokens;
 mod triggers;
@@ -3638,3 +3662,17 @@ fn edict_of_their_choice_and_cheating_from_hand() {
         hand - 1
     );
 }
+
+mod generic_damage_triggers;
+
+mod batch_tap;
+
+mod leaves_trigger;
+
+mod union_combat;
+
+mod labeled_triggers;
+
+mod labeled_modes;
+
+mod unblockable_pump;

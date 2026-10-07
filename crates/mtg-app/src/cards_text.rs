@@ -144,6 +144,7 @@ impl CardTexts {
                                     AltCost::Warp => "warp",
                                     AltCost::Bestow => "bestow",
                                     AltCost::Pay => "alternative cost",
+                                    AltCost::Emerge => "emerge",
                                 };
                                 let mana = crate::format::mana_cost(&cost.mana);
                                 Some((

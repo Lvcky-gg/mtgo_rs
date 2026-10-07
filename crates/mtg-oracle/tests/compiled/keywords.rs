@@ -161,6 +161,68 @@ fn buyback_returns_the_spell_to_hand_when_paid() {
 }
 
 #[test]
+fn buyback_can_be_paid_with_a_sacrifice_or_discard() {
+    use mtg_engine::choice::Answer;
+    for discard in [false, true] {
+        for paid in [false, true] {
+            let mut t = Table::default();
+            let spell = t.card(
+                "{R}",
+                "Instant",
+                None,
+                if discard {
+                    "Buyback—Discard two cards.\n~ deals 1 damage to any target."
+                } else {
+                    "Buyback—Sacrifice a land.\n~ deals 1 damage to any target."
+                },
+            );
+            let land = t.mountain();
+            let mut g = Game::new(t);
+            g.lands(1);
+            let fodder: Vec<_> = (0..if discard { 2 } else { 1 })
+                .map(|_| {
+                    g.put(
+                        land,
+                        P0,
+                        if discard {
+                            Zone::Hand
+                        } else {
+                            Zone::Battlefield
+                        },
+                    )
+                })
+                .collect();
+            let s = g.put(spell, P0, Zone::Hand);
+            g.main();
+            let mut answers = vec![Answer::Bool(paid)];
+            if paid {
+                answers.push(Answer::Objects(fodder.clone()));
+            }
+            g.act(
+                Action::Cast { object: s },
+                &[mtg_core::Target::Player(P1)],
+                &answers,
+            );
+            assert_eq!(g.life(P1), 19);
+            assert_eq!(
+                g.count(Zone::Graveyard, P0),
+                if paid { fodder.len() } else { 1 }
+            );
+            let in_hand = g
+                .engine
+                .state
+                .objects_in(mtg_core::ZoneRef::of(Zone::Hand, P0))
+                .iter()
+                .any(|id| g.engine.state.objects[id].card == spell);
+            assert_eq!(in_hand, paid);
+            for id in fodder {
+                assert_eq!(g.engine.state.objects.contains_key(&id), !paid);
+            }
+        }
+    }
+}
+
+#[test]
 fn a_card_returns_itself_from_the_graveyard_to_hand() {
     let mut t = Table::default();
     let rat = t.card(
@@ -1564,6 +1626,83 @@ fn conniving_grows_only_for_a_nonland_discard() {
         let on = g.find(rogue).unwrap();
         assert_eq!(g.pt(on), if nonland { (2, 2) } else { (1, 1) });
         assert_eq!(g.count(Zone::Graveyard, P0), 1, "discarded one");
+    }
+}
+
+#[test]
+fn printed_auras_with_combined_suppression_compile_completely() {
+    let mut t = Table::default();
+    for text in [
+        "Enchant artifact or creature\nEnchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
+        "Flash\nEnchant artifact or creature\nWhen this Aura enters, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
+        "Enchant creature or planeswalker\nWhen this Aura enters, tap enchanted permanent and investigate.\nEnchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.",
+    ] {
+        t.card("{2}{U}", "Enchantment — Aura", None, text);
+    }
+}
+
+#[test]
+fn aura_combines_untap_and_activated_ability_suppression() {
+    use mtg_core::{Step, Target};
+    for comma in [false, true] {
+        let mut t = Table::default();
+        let aura = t.card(
+            "{U}{U}{U}",
+            "Enchantment — Aura",
+            None,
+            if comma {
+                "Enchant artifact or creature\nEnchanted permanent doesn't untap during its controller's untap step, and its activated abilities can't be activated."
+            } else {
+                "Enchant artifact or creature\nEnchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated."
+            },
+        );
+        let artifact = t.card(
+            "{1}",
+            "Artifact",
+            None,
+            "{T}: Add {C}.\n{0}: You gain 1 life.",
+        );
+        let destroy = t.card("{W}", "Instant", None, "Destroy target enchantment.");
+        let mut g = Game::new(t);
+        g.lands(4);
+        let source = g.put(artifact, P0, Zone::Battlefield);
+        let other = g.put(artifact, P0, Zone::Battlefield);
+        let aura_spell = g.put(aura, P0, Zone::Hand);
+        let destroy_spell = g.put(destroy, P0, Zone::Hand);
+        let mana_offered = |g: &Game, id| {
+            let mtg_engine::choice::ChoiceKind::Priority { legal } =
+                &g.pending.as_ref().unwrap().kind
+            else {
+                panic!("priority choice")
+            };
+            legal
+                .mana_abilities
+                .iter()
+                .any(|a| matches!(a, Action::ActivateManaAbility { source, .. } if *source == id))
+        };
+        let actions = g.main();
+        assert!(offers(&actions, source));
+        assert!(mana_offered(&g, source));
+        g.cast(aura_spell, &[Target::Object(source)]);
+        let actions = g.main();
+        assert!(!offers(&actions, source));
+        assert!(!mana_offered(&g, source));
+        assert!(offers(&actions, other));
+        assert!(mana_offered(&g, other));
+        g.engine.state.objects.get_mut(&source).unwrap().tapped = true;
+        g.engine.state.objects.get_mut(&other).unwrap().tapped = true;
+        g.until(P1, Step::PrecombatMain);
+        g.main();
+        assert!(g.engine.state.objects[&source].tapped);
+        assert!(!g.engine.state.objects[&other].tapped);
+        let attached = g.find(aura).unwrap();
+        g.cast(destroy_spell, &[Target::Object(attached)]);
+        let actions = g.main();
+        assert!(offers(&actions, source));
+        g.until(P1, Step::PrecombatMain);
+        g.main();
+        assert!(!g.engine.state.objects[&source].tapped);
+        assert!(mana_offered(&g, source));
     }
 }
 
@@ -3112,5 +3251,38 @@ fn flash_for_itself_only_while_its_condition_holds() {
         let w = g.put(watch, P0, Zone::Hand);
         let actions = g.until(P0, mtg_core::Step::BeginCombat);
         assert_eq!(actions.contains(&Action::Cast { object: w }), has_wizard);
+    }
+}
+
+#[test]
+fn cumulative_upkeep_paid_in_life() {
+    for pay in [true, false] {
+        let mut t = Table::default();
+        let sage = t.card(
+            "{B}",
+            "Creature — Elf",
+            Some((2, 2)),
+            "Cumulative upkeep—Pay 1 life.",
+        );
+        let mut g = Game::new(t);
+        g.main();
+        g.put(sage, P0, Zone::Battlefield);
+        next_main(&mut g, P0, pay);
+        if pay {
+            assert_eq!(g.life(P0), 19, "one age counter");
+            next_main(&mut g, P0, pay);
+            assert_eq!(g.life(P0), 17, "two age counters");
+            assert!(g.find(sage).is_some());
+        } else {
+            assert_eq!(g.life(P0), 20);
+            assert!(
+                !g.engine
+                    .state
+                    .battlefield()
+                    .iter()
+                    .any(|id| g.engine.state.objects[id].card == sage),
+                "sacrificed"
+            );
+        }
     }
 }

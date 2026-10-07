@@ -798,6 +798,11 @@ pub fn damage_amount(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) 
     let Some(c) = crate::layers::compute(state, cards, id) else {
         return 0;
     };
+    if restricted(state, cards, id, |r| {
+        matches!(r, Restriction::AssignsNoCombatDamage)
+    }) {
+        return 0;
+    }
     let by_toughness = restricted(state, cards, id, |r| {
         matches!(r, Restriction::AssignDamageByToughness)
     });

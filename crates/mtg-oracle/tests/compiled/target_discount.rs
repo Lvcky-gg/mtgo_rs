@@ -38,7 +38,7 @@ fn offered_targets(g: &mut Game, object: ObjectId) -> (Vec<Target>, u64) {
         match g.engine.advance(&g.table) {
             Progress::Continue => {}
             Progress::NeedsChoice(c) => match &c.kind {
-                ChoiceKind::ChooseTargets { slots } => return (slots[0].clone(), c.id),
+                ChoiceKind::ChooseTargets { slots, .. } => return (slots[0].clone(), c.id),
                 other => panic!("unexpected {other:?}"),
             },
             Progress::GameOver { .. } => panic!("game over"),

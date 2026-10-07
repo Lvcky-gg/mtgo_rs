@@ -96,6 +96,9 @@ pub enum AdditionalCost {
     /// Ninjutsu (CR 702.49a): "return an unblocked attacking creature you control to its
     /// owner's hand". What it was attacking is remembered for the ability's effect.
     ReturnUnblockedAttacker,
+    /// "Exert this creature" (CR 701.43): it doesn't untap during its controller's next
+    /// untap step.
+    Exert,
     /// The catch-all for costs carrying their own rules text.
     Native {
         key: Box<str>,

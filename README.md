@@ -94,7 +94,8 @@ for dies triggers, intervening-if clauses, once-per-turn limits, and event bindi
 so "it" refers to the right thing.
 
 **Working** also: choices gathered during resolution — optional effects, modes,
-discard, sacrifice, scry-like sorting, and player-chosen numbers.
+discard, sacrifice, scry-like sorting, library-owner ordering for multiple cards
+placed on top or bottom, and player-chosen numbers.
 
 **Working** also: targeting — legality on announcement, hexproof/shroud, distinct
 target slots, re-checking on resolution, and fizzling when every target is gone.
@@ -170,7 +171,7 @@ cargo run -p mtg-headless --bin mtg-cards -- coverage 0 --list   # every accepte
 cargo run -p mtg-headless --bin mtg-cards -- parse Instant "Draw two cards."
 ```
 
-Currently **15,338 of 34,913 cards (43.9%)** are playable as printed, up from 1,258. Every shape the
+Currently **16,251 of 34,913 cards (46.5%)** are playable as printed, up from 1,258. Every shape the
 compiler emits has an end-to-end test in `crates/mtg-oracle/tests/compiled/` that takes printed
 text through import and plays it in the engine.
 

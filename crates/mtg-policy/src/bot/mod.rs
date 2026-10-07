@@ -355,7 +355,7 @@ impl Bot {
                 }
                 Some(self.attack_plan(&attackers, defenders, view))
             }
-            ChoiceKind::ChooseTargets { slots } => self.targets(choice, slots, view),
+            ChoiceKind::ChooseTargets { slots, .. } => self.targets(choice, slots, view),
             // Blocks something must make (lure, CR 509.1c) come as the engine's default,
             // which the bot's own choice would not know to include.
             ChoiceKind::DeclareBlockers { .. } if matches!(&choice.default, Some(Answer::Blocks(b)) if !b.is_empty()) => {
@@ -366,6 +366,14 @@ impl Bot {
             }
             ChoiceKind::KeepOrMulligan { mulligans_taken } => {
                 Some(Answer::Bool(self.keeps(view, *mulligans_taken)))
+            }
+            // Leylines are beneficial opening-hand selections, rather than discards.
+            ChoiceKind::ChooseObjects { from, min: 0, max }
+                if choice.because.as_ref() == "begin the game with these on the battlefield" =>
+            {
+                Some(Answer::Objects(
+                    from.iter().take(*max as usize).copied().collect(),
+                ))
             }
             // Choosing cards out of its own hand — to bottom after a mulligan, or to discard —
             // gives up the least useful ones.
@@ -705,6 +713,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opening_battlefield_choices_are_kept_instead_of_discarded() {
+        let b = bot(&[creature(1, 1)]);
+        let mut v = view(ME, Step::Cleanup, &[(1, 0, ME), (2, 0, ME)]);
+        in_hand(&mut v, &[1, 2]);
+        let mut choice = Choice {
+            id: 1,
+            who: ME,
+            kind: ChoiceKind::ChooseObjects {
+                from: vec![ObjectId(1), ObjectId(2)],
+                min: 0,
+                max: 2,
+            },
+            because: "begin the game with these on the battlefield".into(),
+            default: Some(Answer::Objects(vec![ObjectId(1), ObjectId(2)])),
+            undo: false,
+        };
+        assert!(matches!(b.decide(&choice, &v), Answer::Objects(ids)
+            if ids == vec![ObjectId(1), ObjectId(2)]));
+        choice.because = "discard cards".into();
+        assert!(matches!(b.decide(&choice, &v), Answer::Objects(ids) if ids.is_empty()));
+    }
+
     /// A bot whose card N has the given stats.
     fn bot(cards: &[Stats]) -> Bot {
         Bot {
@@ -728,6 +759,7 @@ mod tests {
             life: 20,
             poison: 0,
             energy: 0,
+            city_blessing: false,
             hand_size: 3,
             library_size: 20,
             graveyard: Vec::new(),
@@ -1364,6 +1396,7 @@ mod tests {
             id: 1,
             who: ME,
             kind: ChoiceKind::ChooseTargets {
+                optional: Vec::new(),
                 slots: vec![vec![
                     Target::Object(ObjectId(2)),
                     Target::Object(ObjectId(3)),
@@ -1393,6 +1426,7 @@ mod tests {
             id: 1,
             who: ME,
             kind: ChoiceKind::ChooseTargets {
+                optional: Vec::new(),
                 slots: vec![vec![
                     Target::Object(ObjectId(2)),
                     Target::Object(ObjectId(3)),

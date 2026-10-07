@@ -64,7 +64,7 @@ fn cast_each(engine: &mut Engine, cards: &TestCards, sequence: &[ObjectId]) {
                             None => Answer::Pass,
                         }
                     }
-                    ChoiceKind::ChooseTargets { slots } => {
+                    ChoiceKind::ChooseTargets { slots, .. } => {
                         Answer::Targets(slots.iter().map(|s| s.to_vec()).collect())
                     }
                     _ => c.default.clone().unwrap_or(Answer::Pass),

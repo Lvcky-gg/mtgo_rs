@@ -61,7 +61,7 @@ pub fn well_formed(choice: &Choice, view: &PlayerView) -> Answer {
         ChoiceKind::OrderTriggers { triggers, .. } => Answer::Order((0..triggers.len()).collect()),
         ChoiceKind::OrderReplacements { count } => Answer::Order((0..*count).collect()),
         ChoiceKind::OrderBlockers { blockers, .. } => Answer::Order((0..blockers.len()).collect()),
-        ChoiceKind::ChooseTargets { slots } => Answer::Targets(
+        ChoiceKind::ChooseTargets { slots, .. } => Answer::Targets(
             slots
                 .iter()
                 .map(|s| s.iter().take(1).copied().collect())
@@ -157,7 +157,7 @@ impl Policy {
             // this choice at all. Reaching here means it *does* matter.
             ChoiceKind::OrderTriggers { .. } => None,
 
-            ChoiceKind::ChooseTargets { slots } => {
+            ChoiceKind::ChooseTargets { slots, .. } => {
                 if !self.auto_target_when_single {
                     return None;
                 }

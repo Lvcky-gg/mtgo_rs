@@ -71,10 +71,11 @@ fn replace(state: &GameState, event: Event) -> Event {
     } = event
         && from.zone == Zone::Battlefield
         && to.zone == Zone::Graveyard
-        && state
+        && (state
             .objects
             .get(&object)
             .is_some_and(|o| o.exile_if_dies == Some(state.turn))
+            || state.exile_if_dies_now.contains(&object))
     {
         let _ = index;
         return Event::ZoneChange {
@@ -227,6 +228,7 @@ fn perform(state: &mut GameState, event: &Event) {
             obj.timestamp = ts;
             // A creature token is as summoning sick as any other new creature.
             obj.summoning_sick = true;
+            obj.entered_turn = Some(state.turn);
             state.objects.insert(*object, obj);
         }
 
@@ -547,6 +549,7 @@ fn perform(state: &mut GameState, event: &Event) {
                 let who = o.controller;
                 state.attacked_this_turn.insert(who);
             }
+            state.attacked_creatures.insert(*attacker);
         }
 
         Event::Blocked { blocker, attacker } => {
@@ -639,6 +642,7 @@ fn perform(state: &mut GameState, event: &Event) {
         }
         Event::ExtraTurnAdded { player } => state.extra_turns.push(*player),
         Event::TurnSkipAdded { player } => state.skipped_turns.push(*player),
+        Event::AdditionalCombatAdded => state.extra_combats += 1,
         Event::ReflexiveTriggered { .. } => {}
         Event::SpentToCast { object, mana } => {
             if let Some(o) = state.objects.get_mut(object) {
@@ -743,6 +747,23 @@ fn perform(state: &mut GameState, event: &Event) {
                     card: card.card,
                     face: card.face,
                 });
+            }
+        }
+        Event::RemovedFromCombat { object } => {
+            state.combat.attackers.remove(object);
+            state.combat.blocks.remove(object);
+            for bs in state.combat.blocks.values_mut() {
+                bs.retain(|b| b != object);
+            }
+        }
+        Event::LookedAt { object, by } => {
+            if let Some(card) = state.objects.get(object) {
+                let seen = crate::view::RevealedCard {
+                    owner: card.owner,
+                    card: card.card,
+                    face: card.face,
+                };
+                state.looked_at.push((*by, seen));
             }
         }
         Event::ExileIfLeaves { object } => {
@@ -852,6 +873,7 @@ fn zone_change(
     obj.regeneration_shields = 0;
     obj.cast_x = 0;
     obj.kicked = false;
+    obj.kicks = 0;
     obj.cast_for = None;
     obj.tapped = false;
     // A face-down spell resolves into a face-down permanent (CR 708.4); any other move
@@ -873,6 +895,7 @@ fn zone_change(
     }
     // Only a creature entering the battlefield is summoning sick.
     obj.summoning_sick = to.zone == Zone::Battlefield;
+    obj.entered_turn = (to.zone == Zone::Battlefield).then_some(state.turn);
 
     if to.zone.is_ordered() {
         let order = state.zone_order.entry(to).or_default();

@@ -400,6 +400,9 @@ pub enum Event {
     ExtraTurnAdded {
         player: PlayerId,
     },
+    /// "After this main phase, there is an additional combat phase followed by an
+    /// additional main phase." (CR 500.8)
+    AdditionalCombatAdded,
     /// "You skip your next turn": `player`'s next turn is skipped.
     TurnSkipAdded {
         player: PlayerId,
@@ -440,6 +443,15 @@ pub enum Event {
     /// A card is revealed to every player (CR 701.20).
     Revealed {
         object: ObjectId,
+    },
+    /// A creature stops being an attacking or blocking creature (CR 506.4).
+    RemovedFromCombat {
+        object: ObjectId,
+    },
+    /// A hidden card is looked at by one player only: "look at target player's hand".
+    LookedAt {
+        object: ObjectId,
+        by: PlayerId,
     },
     /// A permanent gains "if it would leave the battlefield, exile it instead" (unearth).
     ExileIfLeaves {

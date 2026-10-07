@@ -225,17 +225,20 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             Footprint::unanalysable()
         }
         Effect::Nothing => Footprint::default(),
-        Effect::Ascend => Footprint::reading(Resource::ObjectClass)
-            .with(Footprint::writing(Resource::TurnState)),
+        Effect::Ascend => {
+            Footprint::reading(Resource::ObjectClass).with(Footprint::writing(Resource::TurnState))
+        }
         Effect::GainClassLevel { .. } => objects_write(&Selector::SelfSource, r),
         Effect::BecomeMonarch { .. }
         | Effect::Dig { .. }
         | Effect::ExtraTurn { .. }
+        | Effect::AdditionalCombat
         | Effect::SkipNextTurn { .. }
         | Effect::PutAttacking { .. }
         | Effect::SpendOnly { .. }
         | Effect::ExileIfDiesThisTurn { .. }
-        | Effect::Reflexive { .. } => Footprint::unanalysable(),
+        | Effect::Reflexive { .. }
+        | Effect::Choose { .. } => Footprint::unanalysable(),
         Effect::GrantPlay { what, .. } | Effect::GrantCastLater { what } => objects_write(what, r),
 
         Effect::Sequence(items) => items
@@ -358,12 +361,13 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             .with(objects_write(to, r))
             .with(value_footprint(amount, r)),
 
-        Effect::DealDamageDivided { source, shares } => {
+        Effect::DealDamageDivided { source, shares, .. } => {
             shares.iter().fold(objects_read(source, r), |f, to| {
                 f.with(objects_write(to, r))
             })
         }
 
+        Effect::CopyCounters { from, to } => objects_read(from, r).with(objects_write(to, r)),
         Effect::AddCounters { what, kind, amount }
         | Effect::RemoveCounters { what, kind, amount } => {
             let mut f = objects_write(what, r);
@@ -401,6 +405,8 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::Cascade
         | Effect::Proliferate
         | Effect::Reveal { .. }
+        | Effect::LookAtHand { .. }
+        | Effect::RemoveFromCombat { .. }
         | Effect::RevealHandChoose { .. }
         | Effect::Madness { .. } => Footprint::unanalysable(),
         Effect::CreateTokenCopy {
@@ -415,6 +421,7 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             f
         }
 
+        Effect::ExchangeControl { a, b } => objects_write(a, r).with(objects_write(b, r)),
         Effect::GainControl { what, who, .. } => objects_write(what, r)
             .with(selector_read(who, r))
             .with(Footprint::writing(Resource::ContinuousEffects)),
@@ -504,13 +511,18 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
 
 fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
     match v {
+        Value::Half { value, .. } => value_footprint(value, r),
         Value::Fixed(_) => Footprint::default(),
         // X is fixed at announcement, so reading it observes nothing mutable.
-        Value::X | Value::EventAmount | Value::ColorsSpent | Value::ManaSpentOfColor(_) => {
+        Value::X
+        | Value::EventAmount
+        | Value::ColorsSpent
+        | Value::TimesKicked
+        | Value::ManaSpentOfColor(_) => Footprint::default(),
+        // Fixed as the spell was cast.
+        Value::SpellsCastBefore | Value::DiedThisTurn(_) | Value::CastX | Value::OpponentsAttacked => {
             Footprint::default()
         }
-        // Fixed as the spell was cast.
-        Value::SpellsCastBefore => Footprint::default(),
         Value::Count(s)
         | Value::ManaValue(s)
         | Value::CardTypesAmong(s)
@@ -606,7 +618,11 @@ fn life_change(who: &Selector, amount: &Value, r: &dyn SelectorResolver, up: boo
         // A negative gain is a loss, and the reverse.
         Value::Fixed(_) => Some(!up),
         // X is announced as a non-negative number.
-        Value::X | Value::EventAmount | Value::ColorsSpent | Value::ManaSpentOfColor(_) => Some(up),
+        Value::X
+        | Value::EventAmount
+        | Value::ColorsSpent
+        | Value::TimesKicked
+        | Value::ManaSpentOfColor(_) => Some(up),
         _ => None,
     };
     let mut f = players_write(who, r, Resource::Life);
