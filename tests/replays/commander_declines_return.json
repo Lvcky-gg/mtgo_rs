@@ -2178,7 +2178,7 @@
                     "chosen_color": null,
                     "chosen_subtype": null,
                     "class_level": 0,
-                    "controller": 0,
+                    "controller": 1,
                     "controls_host": false,
                     "counters": {
                       "$map": []
@@ -2911,7 +2911,7 @@
           "undo": []
         }
       },
-      "expected_digest": "d461a044affad29af3800c79a126b9873be913cfd9b64a446584df930880aa26"
+      "expected_digest": "9cd22bb89e9981b9a73ca02d6081b068d7ed1ad886d6ae5d190ff54d29f07f4f"
     },
     {
       "who": 0,
@@ -4583,7 +4583,7 @@
                     "chosen_color": null,
                     "chosen_subtype": null,
                     "class_level": 0,
-                    "controller": 0,
+                    "controller": 1,
                     "controls_host": false,
                     "counters": {
                       "$map": []
@@ -5316,7 +5316,7 @@
           "undo": []
         }
       },
-      "expected_digest": "eb607020299990663f712ff79dd40ca8f7d15361262828cbf55e0ba7610efcc2"
+      "expected_digest": "118b831c03c59e968dba15b7bb4e3c043a30738afeef0bab04d1db347ce720ea"
     },
     {
       "who": 1,
@@ -6988,7 +6988,7 @@
                     "chosen_color": null,
                     "chosen_subtype": null,
                     "class_level": 0,
-                    "controller": 0,
+                    "controller": 1,
                     "controls_host": false,
                     "counters": {
                       "$map": []
@@ -7721,12 +7721,23 @@
           "undo": []
         }
       },
-      "expected_digest": "d66b76e7d4890357e7780398f46cd02d8e47fc540e3eba75661fed27c09fe81b"
+      "expected_digest": "fa4954368c4da70ab077c0b75b9fbc41aee0e05abb05d18c62db97a0c3653b7f"
     }
   ],
   "expected": {
     "life": {},
-    "final_digest": "d66b76e7d4890357e7780398f46cd02d8e47fc540e3eba75661fed27c09fe81b",
+    "zones": [
+      {
+        "zone": {
+          "zone": "Graveyard",
+          "player": 1
+        },
+        "card": 1,
+        "owner": 1,
+        "count": 1
+      }
+    ],
+    "final_digest": "fa4954368c4da70ab077c0b75b9fbc41aee0e05abb05d18c62db97a0c3653b7f",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -9381,7 +9392,7 @@
                   "chosen_color": null,
                   "chosen_subtype": null,
                   "class_level": 0,
-                  "controller": 0,
+                  "controller": 1,
                   "controls_host": false,
                   "counters": {
                     "$map": []

@@ -1,4 +1,4 @@
-//! Optionality reaches the client prompt even when the fallback chooses a target.
+//! Optional choices allow no targets; required choices reject empty answers.
 use super::harness::*;
 use mtg_core::{Target, Zone};
 use mtg_engine::{
@@ -56,7 +56,26 @@ fn printed_optional_and_required_targets_are_reported_and_enforced() {
                                 matches!(&c.default, Some(Answer::Targets(picks)) if picks == &vec![vec![Target::Object(creature)]])
                             );
                             asked = true;
-                            Answer::Targets(vec![vec![]])
+                            if optional {
+                                Answer::Targets(vec![vec![]])
+                            } else {
+                                // CR 601.2c: the player must choose the required target.
+                                // An invalid selection cannot silently choose one for them.
+                                assert!(
+                                    g.engine
+                                        .answer(&g.table, c.id, Answer::Targets(vec![vec![]]))
+                                        .is_err()
+                                );
+                                let Progress::NeedsChoice(preserved) = g.engine.advance(&g.table)
+                                else {
+                                    panic!("rejected target selection must preserve the question");
+                                };
+                                assert_eq!(preserved.id, c.id);
+                                assert!(matches!(preserved.kind,
+                                    ChoiceKind::ChooseTargets { slots: ref kept, optional: ref flags }
+                                    if kept == slots && flags == metadata));
+                                Answer::Targets(vec![vec![Target::Object(creature)]])
+                            }
                         }
                         _ => c.default.clone().unwrap_or(Answer::Pass),
                     };
@@ -70,7 +89,7 @@ fn printed_optional_and_required_targets_are_reported_and_enforced() {
         assert_eq!(
             g.find(bear).is_some(),
             optional,
-            "required target is filled in; optional one stays empty"
+            "required target is explicitly chosen after rejection; optional one stays empty"
         );
         assert_eq!(g.count(Zone::Graveyard, P0), 1);
         assert_eq!(g.count(Zone::Hand, P1), usize::from(!optional));

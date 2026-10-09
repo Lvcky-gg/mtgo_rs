@@ -17,9 +17,14 @@ class ReleasePolicyTests(unittest.TestCase):
             for name in gate.REQUIRED}}
 
     def campaign(self):
-        return {"format_version": 1, "passed": True,
-                "checks": [{"name": name, "status": "PASS"}
-                           for name in ("verification_tests", "build_replay_cli", "replays_0", "regressions_0", "semantic_0")]}
+        names = ["verification_tests", "build_replay_cli", "replays_0", "regressions_0", "semantic_0", "semantic_replay_0"]
+        return {"format_version": 1, "passed": True, "tier": "pr",
+                "source_fingerprint": "a" * 64,
+                "plan": {"corpora": {"replays": ["tests/replays/example.json"],
+                                      "regressions": ["tests/regressions/example.json"]},
+                         "semantic_games": 1, "checks": names},
+                "checks": [{"name": name, "status": "PASS", "exit_code": 0}
+                           for name in names]}
 
     def test_unknown_counts_are_not_zero_and_cannot_pass_closed_alpha(self):
         report = gate.evaluate(self.manifest(), self.campaign(), release=True)

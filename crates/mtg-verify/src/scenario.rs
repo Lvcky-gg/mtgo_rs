@@ -10,10 +10,21 @@ use mtg_ir::{CardFace, PrintedCards};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::Path};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 pub const FORMAT_VERSION: u32 = 1;
 pub const RULES_VERSION: &str = "mtgo-supported-rules-v1";
 pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ACTIONS: usize = 100_000;
+pub const MAX_ADVANCE_BUDGET: usize = 10_000;
+fn default_advance_budget() -> usize {
+    MAX_ADVANCE_BUDGET
+}
+fn is_default_advance_budget(value: &usize) -> bool {
+    *value == MAX_ADVANCE_BUDGET
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,6 +34,12 @@ pub struct GameScenario {
     pub engine_version: String,
     pub card_db_hash: String,
     pub seed: u64,
+    /// Maximum automatic engine transitions per choice/terminal boundary.
+    #[serde(
+        default = "default_advance_budget",
+        skip_serializing_if = "is_default_advance_budget"
+    )]
+    pub advance_budget: usize,
     #[serde(default)]
     pub metadata: Metadata,
     pub cards: Vec<CardFace>,
@@ -75,6 +92,8 @@ pub struct ScenarioObject {
     pub zone: ZoneRef,
     #[serde(default)]
     pub tapped: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub phased_out: bool,
     #[serde(default)]
     pub damage: u32,
     #[serde(default)]
@@ -85,6 +104,9 @@ pub struct ScenarioObject {
 pub struct ScenarioAction {
     pub who: PlayerId,
     pub answer: Answer,
+    /// Expect rejection without changing the pending choice or any engine state.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expected_rejection: bool,
     #[serde(default)]
     pub expected_choice: Option<ChoiceKind>,
     #[serde(default)]
@@ -97,10 +119,27 @@ pub struct ScenarioAction {
 pub struct ScenarioAssertions {
     #[serde(default)]
     pub life: BTreeMap<PlayerId, i32>,
+    /// Direct rules assertions are checked even while recording checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<ZoneAssertion>,
     pub final_digest: Option<String>,
     pub final_state: Option<CanonicalGameState>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZoneAssertion {
+    pub zone: ZoneRef,
+    #[serde(default)]
+    pub card: Option<CardId>,
+    #[serde(default)]
+    pub owner: Option<PlayerId>,
+    pub count: usize,
+    /// Total counters across objects selected by this zone assertion.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub counters: BTreeMap<CounterKind, i32>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunReport {
     pub pass: bool,
     pub first_divergent_action: Option<usize>,
@@ -141,6 +180,9 @@ impl GameScenario {
         if self.engine_version.is_empty() {
             return Err("Missing engine/build provenance".into());
         }
+        if !(1..=MAX_ADVANCE_BUDGET).contains(&self.advance_budget) {
+            return Err("Invalid scenario advance budget".into());
+        }
         if self.card_db_hash != self.card_hash() {
             return Err("Card database fingerprint mismatch".into());
         }
@@ -157,6 +199,20 @@ impl GameScenario {
         let ids: std::collections::BTreeSet<_> = players.iter().map(|p| p.id).collect();
         if ids.len() != players.len() || !ids.contains(&self.initial_state.active_player) {
             return Err("Invalid or duplicate player".into());
+        }
+        if self.expected.zones.len() > 1024 {
+            return Err("Too many zone assertions".into());
+        }
+        for assertion in &self.expected.zones {
+            if assertion.zone.zone.is_shared() != assertion.zone.player.is_none()
+                || assertion.zone.player.is_some_and(|p| !ids.contains(&p))
+                || assertion.owner.is_some_and(|p| !ids.contains(&p))
+                || assertion
+                    .card
+                    .is_some_and(|card| card.0 as usize >= self.cards.len())
+            {
+                return Err("Invalid zone assertion".into());
+            }
         }
         for object in &self.initial_state.objects {
             if object.card.0 as usize >= self.cards.len()
@@ -212,6 +268,7 @@ impl GameScenario {
             let mut object = GameObject::new(id, input.card, input.owner, input.zone);
             object.controller = input.controller.unwrap_or(input.owner);
             object.tapped = input.tapped;
+            object.phased_out = input.phased_out;
             object.damage = input.damage;
             object.counters = input.counters.clone();
             object.summoning_sick = false;
@@ -255,19 +312,37 @@ pub fn next_choice(
     engine: &mut Engine,
     cards: &dyn PrintedCards,
 ) -> Result<Option<Choice>, String> {
-    for _ in 0..10000 {
+    next_choice_with_budget(engine, cards, MAX_ADVANCE_BUDGET)
+}
+pub fn next_choice_with_budget(
+    engine: &mut Engine,
+    cards: &dyn PrintedCards,
+    budget: usize,
+) -> Result<Option<Choice>, String> {
+    if !(1..=MAX_ADVANCE_BUDGET).contains(&budget) {
+        return Err("Invalid scenario advance budget".into());
+    }
+    for _ in 0..budget {
         match engine.advance(cards) {
             Progress::Continue => {}
             Progress::NeedsChoice(choice) => return Ok(Some(choice)),
             Progress::GameOver { .. } => return Ok(None),
         }
     }
-    Err("Engine advance budget exceeded (possible nontermination)".into())
+    Err(format!(
+        "Engine advance budget exceeded (limit {budget}; possible nontermination)"
+    ))
 }
 pub fn run(scenario: &GameScenario, record: bool) -> Result<(RunReport, GameScenario), String> {
     let (mut engine, cards) = scenario.setup()?;
     let mut artifact = scenario.clone();
-    let mut choice = next_choice(&mut engine, &cards)?;
+    let mut choice = match next_choice_with_budget(&mut engine, &cards, scenario.advance_budget) {
+        Ok(choice) => choice,
+        Err(error) => return initial_failure(&engine, artifact, &error),
+    };
+    if let Err(error) = crate::invariants::verify(&engine.state, &cards) {
+        return initial_failure(&engine, artifact, &error);
+    }
     for (index, action) in scenario.actions.iter().enumerate() {
         let Some(current) = choice else {
             return Ok((
@@ -297,23 +372,84 @@ pub fn run(scenario: &GameScenario, record: bool) -> Result<(RunReport, GameScen
             ));
         }
         if record {
-            artifact.actions[index].expected_choice = Some(current.kind);
+            artifact.actions[index].expected_choice = Some(current.kind.clone());
         }
-        if let Err(error) = engine.answer(&cards, current.id, action.answer.clone()) {
-            return Ok((
-                failure(
-                    index,
-                    &format!("Illegal recorded answer: {error:?}"),
-                    action.expected_state.clone(),
-                    CanonicalGameState::from_engine(&engine)?,
-                ),
-                artifact,
-            ));
+        let before = action
+            .expected_rejection
+            .then(|| CanonicalGameState::from_engine(&engine))
+            .transpose()?;
+        let result = engine.answer(&cards, current.id, action.answer.clone());
+        match (action.expected_rejection, result) {
+            (true, Ok(())) => {
+                return Ok((
+                    failure(
+                        index,
+                        "Expected answer rejection, but answer was accepted",
+                        before,
+                        CanonicalGameState::from_engine(&engine)?,
+                    ),
+                    artifact,
+                ));
+            }
+            (true, Err(_)) => {
+                let repeated =
+                    match next_choice_with_budget(&mut engine, &cards, scenario.advance_budget) {
+                        Ok(choice) => choice,
+                        Err(error) => {
+                            return Ok((
+                                failure(
+                                    index,
+                                    &error,
+                                    None,
+                                    CanonicalGameState::from_engine(&engine)?,
+                                ),
+                                artifact,
+                            ));
+                        }
+                    };
+                let after = CanonicalGameState::from_engine(&engine)?;
+                if repeated
+                    .as_ref()
+                    .is_none_or(|choice| choice.id != current.id)
+                    || before.as_ref() != Some(&after)
+                {
+                    return Ok((
+                        failure(index, "Rejected answer changed engine state", before, after),
+                        artifact,
+                    ));
+                }
+                choice = repeated;
+            }
+            (false, Err(error)) => {
+                return Ok((
+                    failure(
+                        index,
+                        &format!("Illegal recorded answer: {error:?}"),
+                        action.expected_state.clone(),
+                        CanonicalGameState::from_engine(&engine)?,
+                    ),
+                    artifact,
+                ));
+            }
+            (false, Ok(())) => {
+                choice = match next_choice_with_budget(&mut engine, &cards, scenario.advance_budget)
+                {
+                    Ok(choice) => choice,
+                    Err(error) => {
+                        return Ok((
+                            failure(
+                                index,
+                                &error,
+                                None,
+                                CanonicalGameState::from_engine(&engine)?,
+                            ),
+                            artifact,
+                        ));
+                    }
+                };
+            }
         }
-        choice = next_choice(&mut engine, &cards)?;
-        if choice.is_some()
-            && let Err(error) = crate::invariants::verify(&engine.state, &cards)
-        {
+        if let Err(error) = crate::invariants::verify(&engine.state, &cards) {
             return Ok((
                 failure(
                     index,
@@ -348,6 +484,53 @@ pub fn run(scenario: &GameScenario, record: bool) -> Result<(RunReport, GameScen
         }
     }
     let state = CanonicalGameState::from_engine(&engine)?;
+    for assertion in &scenario.expected.zones {
+        let matching: Vec<_> = engine
+            .state
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == assertion.zone
+                    && assertion.card.is_none_or(|card| object.card == card)
+                    && assertion.owner.is_none_or(|owner| object.owner == owner)
+            })
+            .collect();
+        let count = matching.len();
+        if count != assertion.count {
+            return Ok((
+                failure(
+                    scenario.actions.len(),
+                    &format!(
+                        "Expected zone {:?} card {:?} owner {:?} count {}, actual {count}",
+                        assertion.zone, assertion.card, assertion.owner, assertion.count
+                    ),
+                    scenario.expected.final_state.clone(),
+                    state,
+                ),
+                artifact,
+            ));
+        }
+        for (kind, expected) in &assertion.counters {
+            let actual: i64 = matching
+                .iter()
+                .map(|object| i64::from(object.counters.get(kind).copied().unwrap_or(0)))
+                .sum();
+            if actual != i64::from(*expected) {
+                return Ok((
+                    failure(
+                        scenario.actions.len(),
+                        &format!(
+                            "Expected zone {:?} card {:?} owner {:?} total {:?} counters {}, actual {}",
+                            assertion.zone, assertion.card, assertion.owner, kind, expected, actual
+                        ),
+                        scenario.expected.final_state.clone(),
+                        state,
+                    ),
+                    artifact,
+                ));
+            }
+        }
+    }
     for (player, life) in &scenario.expected.life {
         if engine
             .state
@@ -405,7 +588,16 @@ pub fn run(scenario: &GameScenario, record: bool) -> Result<(RunReport, GameScen
         artifact,
     ))
 }
-fn failure(
+fn initial_failure(
+    engine: &Engine,
+    artifact: GameScenario,
+    message: &str,
+) -> Result<(RunReport, GameScenario), String> {
+    let mut report = failure(0, message, None, CanonicalGameState::from_engine(engine)?);
+    report.first_divergent_action = None;
+    Ok((report, artifact))
+}
+pub(crate) fn failure(
     index: usize,
     message: &str,
     expected: Option<CanonicalGameState>,

@@ -182,6 +182,7 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
             .strip_prefix(" from a graveyard")
             .or_else(|| rest.strip_prefix(" in a graveyard"))
             .or_else(|| rest.strip_prefix(" in all graveyards"))
+            .or_else(|| rest.strip_prefix(" in each graveyard"))
             .filter(|_| zone == Zone::Graveyard)
         {
             rest = r;
@@ -371,6 +372,17 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
             .or_else(|| rest.strip_prefix(" ability"))?;
         return Some((ObjectFilter::IsAbility, Zone::Stack, false, r));
     } else if word == "spell" || word == "spells" {
+        // "spell or ability": anything on the stack.
+        if word == "spell"
+            && let Some(r) = rest.strip_prefix(" or ability")
+        {
+            return Some((
+                ObjectFilter::Or(vec![ObjectFilter::IsSpell, ObjectFilter::IsAbility]),
+                Zone::Stack,
+                false,
+                r,
+            ));
+        }
         return Some((ObjectFilter::IsSpell, Zone::Stack, word == "spells", rest));
     } else if word == "token" || word == "tokens" {
         // "an artifact, enchantment, or token": a token permanent of any type.
@@ -457,11 +469,20 @@ fn card_zone<'s>(
         Some((quality, r)) => (ObjectFilter::And(vec![filter, quality]), r),
         None => (filter, rest),
     };
+    // "card named ~ in each graveyard" (Rite of Flame).
+    let (filter, rest) = match rest.strip_prefix(" named ~") {
+        Some(r) => (
+            ObjectFilter::And(vec![filter, ObjectFilter::NamedLikeSource]),
+            r,
+        ),
+        None => (filter, rest),
+    };
     let zone = if rest.starts_with(" from your graveyard")
         || rest.starts_with(" in your graveyard")
         || rest.starts_with(" from a graveyard")
         || rest.starts_with(" in a graveyard")
         || rest.starts_with(" in all graveyards")
+        || rest.starts_with(" in each graveyard")
         || rest.starts_with(" from an opponent's graveyard")
         || rest.starts_with(" in an opponent's graveyard")
     {
@@ -490,6 +511,10 @@ pub fn with_clause<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
             ));
         }
         return Some((ObjectFilter::HasKeyword(k), rest));
+    }
+    // "target spell with a single target"
+    if let Some(r) = s.strip_prefix("a single target") {
+        return Some((ObjectFilter::SingleTarget, r));
     }
     // "with a +1/+1 counter on it", "with one or more +1/+1 counters on it"
     if let Some(r) = s.strip_prefix("a ").or_else(|| s.strip_prefix("an "))
@@ -712,6 +737,23 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
                 },
                 false,
                 r,
+            ));
+        }
+    }
+    // "enchanted Forest" (Utopia Sprawl): what the source is attached to, of that subtype.
+    if let Some(r) = s.strip_prefix("enchanted ") {
+        let (word, rest) = words::first_word(r);
+        if let Some(st) = cx.subtype(word) {
+            return Some((
+                Selector::All {
+                    zone: Zone::Battlefield,
+                    filter: ObjectFilter::And(vec![
+                        ObjectFilter::AttachedToSelf,
+                        ObjectFilter::HasSubtype(st),
+                    ]),
+                },
+                false,
+                rest,
             ));
         }
     }
@@ -1013,6 +1055,17 @@ pub fn player<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
             })
             .collect();
         return Some((Selector::Union(slots), true, r));
+    }
+    // "up to one target player" (Endurance): a target that may be left unchosen.
+    for (lead, players) in [
+        ("up to one target player", None),
+        ("up to one target opponent", Some(Selector::Opponents)),
+    ] {
+        if let Some(r) = s.strip_prefix(lead) {
+            let mut spec = player_target(players);
+            spec.up_to = true;
+            return Some((cx.target(spec), false, r));
+        }
     }
     if let Some(r) = s.strip_prefix("target player") {
         return Some((cx.target(player_target(None)), false, r));

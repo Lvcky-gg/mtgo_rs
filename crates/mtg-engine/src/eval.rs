@@ -200,6 +200,7 @@ pub fn objects(ctx: &Ctx, sel: &Selector) -> Eval<Vec<ObjectId>> {
         | Selector::ActivePlayer
         | Selector::DefendingPlayer
         | Selector::EnchantedPlayer
+        | Selector::Player(_)
         | Selector::ControllerOf(_)
         | Selector::OwnerOf(_) => Ok(Vec::new()),
 
@@ -268,10 +269,21 @@ pub fn objects(ctx: &Ctx, sel: &Selector) -> Eval<Vec<ObjectId>> {
 }
 
 /// Resolve a selector to players.
+/// A spell or ability with exactly one chosen target (an empty "up to one" slot is none).
+pub(crate) fn single_target(obj: &crate::state::GameObject) -> bool {
+    obj.cast_context.as_ref().is_some_and(|c| {
+        (0..c.targets.len())
+            .filter(|i| !c.empty_slots.contains(&(*i as u8)))
+            .count()
+            == 1
+    })
+}
+
 pub fn players(ctx: &Ctx, sel: &Selector) -> Eval<Vec<PlayerId>> {
     match sel {
         Selector::You => Ok(vec![ctx.controller]),
         Selector::ActivePlayer => Ok(vec![ctx.state.active_player]),
+        Selector::Player(p) => Ok(vec![*p]),
         Selector::DefendingPlayer => Ok(ctx.state.combat.defending_player.into_iter().collect()),
         Selector::EnchantedPlayer => Ok(ctx
             .state
@@ -281,11 +293,11 @@ pub fn players(ctx: &Ctx, sel: &Selector) -> Eval<Vec<PlayerId>> {
             .and_then(|o| o.attached_player)
             .into_iter()
             .collect()),
+        // Players who have left the game are no one's opponents (CR 800.4a).
         Selector::Opponents => Ok(ctx
             .state
-            .turn_order
-            .iter()
-            .copied()
+            .apnap()
+            .into_iter()
             .filter(|p| *p != ctx.controller)
             .collect()),
         // APNAP order, because effects that act on "each player" do so in that
@@ -467,6 +479,22 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             .iter()
             .map(|p| ctx.state.spells_by_player.get(p).copied().unwrap_or(0) as i32)
             .sum(),
+        Value::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            if condition(ctx, cond)? {
+                value(ctx, then)?
+            } else {
+                value(ctx, otherwise)?
+            }
+        }
+        Value::MostSpellsCastThisTurn(who) => players(ctx, who)?
+            .iter()
+            .map(|p| ctx.state.spells_by_player.get(p).copied().unwrap_or(0) as i32)
+            .max()
+            .unwrap_or(0),
         Value::BasicLandTypesAmong(sel) => {
             let mut seen = [false; 5];
             for id in objects(ctx, sel)? {
@@ -982,7 +1010,8 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
         // object can be chosen as a target. Ward does not prevent targeting, only
         // taxes it, so it is excluded here and handled at cost calculation.
         ObjectFilter::Targetable => {
-            !ctx.has_keyword(id, Keyword::Shroud)?
+            !obj.phased_out
+                && !ctx.has_keyword(id, Keyword::Shroud)?
                 && !(ctx.has_keyword(id, Keyword::Hexproof)?
                     && crate::layers::controller(ctx.state, id) != Some(ctx.controller))
                 && !protected_from(ctx.state, ctx.cards, id, ctx.source)
@@ -994,6 +1023,9 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
                 == Some(*zone)
         }
         ObjectFilter::Kicked => obj.cast_context.as_ref().is_some_and(|c| c.kicked),
+        ObjectFilter::IsCommander => ctx.state.commander.is_commander(obj.owner, obj.card),
+        ObjectFilter::InZone(zone) => obj.zone.zone == *zone,
+        ObjectFilter::SingleTarget => single_target(obj),
         ObjectFilter::HasXInCost => ctx
             .characteristics(id)?
             .mana_cost

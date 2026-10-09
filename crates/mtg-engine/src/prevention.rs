@@ -5,7 +5,8 @@
 //! is never dealt (CR 615.6), so nothing downstream sees it: no lifelink, no counters, no
 //! damage triggers.
 //!
-//! Three kinds of prevention are consulted:
+//! Four kinds of prevention are consulted:
+//! - protection from the damage source’s qualities;
 //! - global Fog-style prevention and whole-recipient shields (`GameState::prevent_*`);
 //! - shields created by resolving spells and abilities (`GameState::damage_shields`),
 //!   which may be limited to a source, to combat damage, or to the next N damage;
@@ -37,14 +38,28 @@ pub fn prevent(
     combat: bool,
     events: &mut Vec<Event>,
 ) -> u32 {
-    // CR 615.12: "damage can't be prevented" overrides every prevention effect.
+    if amount == 0 {
+        return 0;
+    }
+    // CR 615.12: prevention cannot reduce this damage, but applicable effects
+    // still perform their additional actions. Finite damage shields are not spent.
     if state.damage_unpreventable {
+        if let Target::Object(object) = to {
+            if crate::layers::restricted(state, cards, object, |r| {
+                matches!(r, Restriction::PreventDamageRemoveCounter)
+            }) {
+                remove_counter(state, object, CounterKind::PlusOnePlusOne, events);
+            }
+            remove_counter(state, object, CounterKind::Shield, events);
+        }
         return amount;
     }
-    if amount == 0
-        || (combat && state.prevent_combat_damage)
+    if (combat && state.prevent_combat_damage)
         || state.prevent_damage_to.contains(&to)
         || static_prevents(state, cards, source, to, combat)
+        || matches!(to, Target::Object(object)
+            if crate::eval::protected_from(state, cards, object, source))
+        || matches!(to, Target::Player(p) if crate::targeting::player_protected(state, cards, p))
     {
         return 0;
     }
@@ -130,6 +145,27 @@ pub fn prevent(
         }
     }
     left
+}
+
+/// Apply a counter-removal side effect once to this simultaneous damage batch.
+fn remove_counter(state: &GameState, object: ObjectId, kind: CounterKind, events: &mut Vec<Event>) {
+    let already = events.iter().any(|event| {
+        matches!(event,
+        Event::CountersChanged { object: id, kind: counter, delta: -1 }
+            if *id == object && *counter == kind)
+    });
+    let has_counter = state
+        .objects
+        .get(&object)
+        .and_then(|object| object.counters.get(&kind))
+        .is_some_and(|count| *count > 0);
+    if has_counter && !already {
+        events.push(Event::CountersChanged {
+            object,
+            kind,
+            delta: -1,
+        });
+    }
 }
 
 /// Whether a static ability of a permanent prevents this damage.

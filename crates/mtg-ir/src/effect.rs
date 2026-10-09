@@ -90,10 +90,16 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         otherwise: Option<Box<Effect>>,
     },
-    /// "Sacrifice it unless you pay {2}{R}": the controller may pay; if they do not,
-    /// `otherwise` happens. The mana is paid `times` times over ("{1} for each age
-    /// counter on it"); paying it zero times costs nothing.
+    /// "Sacrifice it unless you pay {2}{R}": the payer (the controller, unless named) may
+    /// pay; if they do not, `otherwise` happens. The mana is paid `times` times over ("{1}
+    /// for each age counter on it"); paying it zero times costs nothing. "You may draw a
+    /// card unless that player pays {1}": the opponent decides first.
     UnlessPays {
+        #[serde(
+            default = "crate::selector::you",
+            skip_serializing_if = "crate::selector::is_you"
+        )]
+        payer: Selector,
         cost: Cost,
         #[serde(default = "crate::value::one")]
         times: Value,
@@ -531,6 +537,30 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         times: Option<Value>,
     },
+    /// CR 702.26 — "All permanents you control phase out": they, and what is attached to
+    /// them, are treated as though they don't exist until they phase in during their
+    /// controller's next untap step.
+    PhaseOut {
+        what: Selector,
+    },
+    /// "You lose the game" (CR 104.3e).
+    LoseGame {
+        who: Selector,
+    },
+    /// "You win the game" (CR 104.2a): in a multiplayer game, every other player still in
+    /// it loses.
+    WinGame {
+        who: Selector,
+    },
+    /// "You may choose new targets for target spell or ability" (CR 115.7d): the
+    /// controller may change any of its targets to other legal ones.
+    ChangeTargets {
+        what: Selector,
+        /// "Change the target of …" (CR 115.7a): it must change if another target is
+        /// legal; "you may choose new targets" lets it stay.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        must: bool,
+    },
     /// Copy a spell or ability on the stack, optionally letting new targets be chosen.
     CopySpell {
         what: Selector,
@@ -573,6 +603,24 @@ pub enum ManaOutput {
     AnyOf(Vec<Color>),
     /// One mana of the color its source's controller chose as it entered.
     ChosenColor,
+    /// "One mana of any color in your commander's color identity" (CR 903.4): none when
+    /// the controller has no commander, or it is colorless (CR 903.4f).
+    CommanderIdentity,
+    /// "One mana of any of the exiled card's colors" (Chrome Mox): the cards its source
+    /// exiled (`Effect::ExileLinked`).
+    ExiledCardColors,
+    /// "One mana of any color among legendary creatures and planeswalkers you control"
+    /// (Mox Amber).
+    ColorsAmong(Box<crate::selector::Selector>),
+    /// "For each color among permanents you control, add one mana of that color." (Bloom
+    /// Tender): one mana of each.
+    EachColorAmong(Box<crate::selector::Selector>),
+    /// "Add {G} or one mana of the chosen color." (the Thriving lands): this color, or the
+    /// one its source chose as it entered.
+    OrChosen(Color),
+    /// "One mana of any color that a land an opponent controls could produce" (Fellwar
+    /// Stone, Exotic Orchard): lands those players control (CR 106.7).
+    LandColors(Box<crate::selector::Selector>),
     /// Several mana at once, all of the same kind.
     Repeated {
         amount: Value,
@@ -588,7 +636,13 @@ impl ManaOutput {
             ManaOutput::Colorless => Vec::new(),
             ManaOutput::AnyOf(cs) => cs.clone(),
             // Known only from the source; mana sources resolve it first.
-            ManaOutput::ChosenColor => Vec::new(),
+            ManaOutput::ChosenColor
+            | ManaOutput::CommanderIdentity
+            | ManaOutput::ExiledCardColors
+            | ManaOutput::ColorsAmong(_)
+            | ManaOutput::LandColors(_)
+            | ManaOutput::EachColorAmong(_) => Vec::new(),
+            ManaOutput::OrChosen(c) => vec![*c],
             ManaOutput::Repeated { output, .. } => output.possible_colors(),
         }
     }
@@ -611,6 +665,8 @@ pub enum ZonePosition {
     FromTop(u8),
     /// Unordered zones and the battlefield.
     Natural,
+    /// "On the bottom of their library in a random order" (Endurance).
+    BottomRandom,
     OwnerChooses,
 }
 
@@ -794,6 +850,33 @@ pub enum Restriction {
     CantAttackUnlessDefenderControls(ObjectFilter),
     /// CR 402.2 — "You have no maximum hand size": the controller of the source.
     NoMaximumHandSize,
+    /// "Whenever enchanted land is tapped for mana, its controller adds an additional {G}."
+    /// (Wild Growth), "whenever you tap a creature for mana, add an additional {G}": a
+    /// permanent this applies to makes this too when tapped for mana (CR 605.1b — a
+    /// triggered mana ability, resolved as part of the mana ability).
+    AddsAdditionalMana {
+        produces: Vec<ManaOutput>,
+    },
+    /// "You gain protection from everything" (Teferi's Protection, CR 702.16j): the
+    /// effect's controller can't be targeted or dealt damage.
+    PlayerProtectionFromEverything,
+    /// "Your life total can't change" (CR 119.10): the effect's controller gains and loses
+    /// no life.
+    LifeCantChange,
+    /// "Creatures can't attack you unless their controller pays {2} for each creature they
+    /// control that's attacking you." (Propaganda, Ghostly Prison) — the source's
+    /// controller is "you"; paid as attackers are declared (CR 508.1h).
+    AttackTax {
+        per: mtg_core::ManaCost,
+    },
+    /// "Each opponent can cast spells only any time they could cast a sorcery." (Teferi,
+    /// Time Raveler): these players, from the effect's controller.
+    CastOnlyAsSorcery {
+        who: crate::selector::Selector,
+    },
+    /// "Untap all permanents you control during each other player's untap step." (Seedborn
+    /// Muse): the source's controller.
+    UntapDuringOthersUntap,
     /// CR 615 — a static prevention effect: damage that would be dealt to this object by
     /// a source matching `from` (`dealt_to`), and damage this object would deal
     /// (`dealt_by`), is prevented.
@@ -894,6 +977,12 @@ pub enum ReplacementKind {
     /// "As this enters, choose a color / a creature type" (CR 614.12): the choice is the
     /// permanent's own, read later by "the chosen color/type".
     EntersChoosing(EntryChoice),
+    /// "If this artifact would enter, you may discard a land card instead. If you do, put
+    /// this artifact onto the battlefield. If you don't, put it into its owner's
+    /// graveyard." (Mox Diamond): a card matching this from its controller's hand.
+    EntersIfDiscards(crate::selector::ObjectFilter),
+    /// "As it enters, choose a color other than green." (the Thriving lands)
+    EntersChoosingColorExcept(mtg_core::Color),
     /// Unleash (CR 702.98a): "you may have this creature enter with a +1/+1 counter".
     EntersWithCounterIfChosen,
     /// Riot (CR 702.136a): it enters with your choice of a +1/+1 counter or haste.

@@ -394,7 +394,7 @@
                     "chosen_color": null,
                     "chosen_subtype": null,
                     "class_level": 0,
-                    "controller": 0,
+                    "controller": 1,
                     "controls_host": false,
                     "counters": {
                       "$map": []
@@ -607,12 +607,23 @@
           "undo": []
         }
       },
-      "expected_digest": "6fadd325450766c1c70602b3a5d4da6b364c4653e9e9fc46b84414e74333dd42"
+      "expected_digest": "820be37b704f188447b29aa17ae314985f57a4263d62881e9c435da3620a2763"
     }
   ],
   "expected": {
     "life": {},
-    "final_digest": "6fadd325450766c1c70602b3a5d4da6b364c4653e9e9fc46b84414e74333dd42",
+    "zones": [
+      {
+        "zone": {
+          "zone": "Graveyard",
+          "player": 1
+        },
+        "card": 1,
+        "owner": 1,
+        "count": 1
+      }
+    ],
+    "final_digest": "820be37b704f188447b29aa17ae314985f57a4263d62881e9c435da3620a2763",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -867,7 +878,7 @@
                   "chosen_color": null,
                   "chosen_subtype": null,
                   "class_level": 0,
-                  "controller": 0,
+                  "controller": 1,
                   "controls_host": false,
                   "counters": {
                     "$map": []

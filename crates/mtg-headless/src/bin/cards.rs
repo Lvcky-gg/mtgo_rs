@@ -27,6 +27,7 @@ fn main() {
         "deck" => deck(&args[1..]),
         "stats" => stats(),
         "coverage" => coverage(&args[1..]),
+        "check" => check(&args[1..]),
         "parse" => parse(&args[1..]),
         "help" | "--help" | "-h" => {
             usage();
@@ -51,6 +52,8 @@ fn usage() {
          \x20 stats                what the database currently holds\n\
          \x20 coverage [N]         cards playable as printed, and the N most common lines not\n\
          \x20                      yet understood\n\
+         \x20 check <file>         for card names listed one per line (in priority order),\n\
+         \x20                      which are playable and what blocks the rest\n\
          \x20 parse <type> <text>  compile one card's rules text and show the result\n\n\
          database: {}",
         db_path().display()
@@ -395,6 +398,71 @@ fn coverage(args: &[String]) -> Result<(), String> {
     println!("\nlines that are a card's only obstacle:");
     for (line, n) in sole.into_iter().take(top) {
         println!("{n:6}  {line}");
+    }
+    Ok(())
+}
+
+/// Report on a list of card names: how many are playable as printed, and for each one
+/// that isn't, the lines not understood (or that its layout can't be played). Names are
+/// read one per line; blank lines and `#` comments are skipped, and anything after a
+/// tab is ignored, so ranked lists can carry their scores.
+fn check(args: &[String]) -> Result<(), String> {
+    use std::collections::HashMap;
+    let path = args.first().ok_or("usage: mtg-cards check <file>")?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let store = open()?;
+    let subtypes = mtg_oracle::compile::SubtypeNames(store.subtypes().map_err(|e| e.to_string())?);
+    let cards = store.all_cards().map_err(|e| e.to_string())?;
+    // A card's own name wins over a face name: "Demonic Tutor" is the card, not the
+    // back face of a later card that reprints it.
+    let mut by_name: HashMap<String, &mtg_store::StoredCard> = cards
+        .iter()
+        .flat_map(|(_, c)| c.faces.iter().map(move |f| (f.name.to_lowercase(), c)))
+        .collect();
+    by_name.extend(cards.iter().map(|(_, c)| (c.name.to_lowercase(), c)));
+    let (mut playable, mut listed) = (0usize, 0usize);
+    let mut report = Vec::new();
+    for name in text.lines() {
+        let name = name.split('\t').next().unwrap_or("").trim();
+        if name.is_empty() || name.starts_with('#') {
+            continue;
+        }
+        listed += 1;
+        let Some(card) = by_name.get(&name.to_lowercase()) else {
+            report.push(format!("UNKNOWN\t{name}"));
+            continue;
+        };
+        let mut blockers = Vec::new();
+        for row in &card.faces {
+            let types = mtg_oracle::typeline::parse(&row.type_line);
+            let compiled = mtg_oracle::compile::compile(
+                &mtg_oracle::compile::FaceText {
+                    name: &row.name,
+                    card_types: &types.card_types,
+                    subtypes: &types.subtypes,
+                    oracle_text: row.oracle_text.as_deref(),
+                    mana_cost: row.mana_cost.as_str(),
+                },
+                &subtypes,
+            );
+            blockers.extend(compiled.unparsed.iter().map(|l| l.replace(&row.name, "~")));
+            if card.layout == "split" && !mtg_oracle::compile::split_abilities_understood(&compiled)
+            {
+                blockers.push("(split card abilities)".into());
+            }
+        }
+        if !mtg_oracle::compile::layout_understood(card) {
+            blockers.push(format!("(layout {})", card.layout));
+        }
+        if blockers.is_empty() {
+            playable += 1;
+        } else {
+            report.push(format!("BLOCKED\t{}\t{}", card.name, blockers.join(" | ")));
+        }
+    }
+    println!("{playable} of {listed} listed cards playable as printed");
+    for line in report {
+        println!("{line}");
     }
     Ok(())
 }

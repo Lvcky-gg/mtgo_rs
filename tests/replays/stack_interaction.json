@@ -570,6 +570,14 @@
             "next_delayed": 0,
             "next_shield": 0,
             "no_life_gain": [],
+            "noncreature_spells_by_player": {
+              "$map": [
+                [
+                  0,
+                  1
+                ]
+              ]
+            },
             "objects": {
               "$map": [
                 [
@@ -1108,6 +1116,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -3083,7 +3093,7 @@
           ]
         }
       },
-      "expected_digest": "c6835a2ab5f2e6ee387f770d8550be435adf196ee17872e357b474ba9705cedf"
+      "expected_digest": "109673e40651cf9e873f1e1935e6e9e62c70a16580aa27adaaebc7eee3ca2fb0"
     },
     {
       "who": 0,
@@ -3402,6 +3412,14 @@
             "next_delayed": 0,
             "next_shield": 0,
             "no_life_gain": [],
+            "noncreature_spells_by_player": {
+              "$map": [
+                [
+                  0,
+                  2
+                ]
+              ]
+            },
             "objects": {
               "$map": [
                 [
@@ -3940,6 +3958,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -4021,6 +4041,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -6046,6 +6068,14 @@
                 "next_delayed": 0,
                 "next_shield": 0,
                 "no_life_gain": [],
+                "noncreature_spells_by_player": {
+                  "$map": [
+                    [
+                      0,
+                      1
+                    ]
+                  ]
+                },
                 "objects": {
                   "$map": [
                     [
@@ -6584,6 +6614,8 @@
                           "mana_spent": [],
                           "modes": [],
                           "source": null,
+                          "target_groups": [],
+                          "target_specs": [],
                           "targets": [],
                           "x": 0
                         },
@@ -7267,7 +7299,7 @@
           ]
         }
       },
-      "expected_digest": "ba2c444e28495ba0f86cffa7ac86e532a60816659eb6dbe09836af82f0feefc5"
+      "expected_digest": "1ce60d74783bb8146f3bb83c7ab224a0bfbf89c1aa7fa44205ee1c7d4fbb367a"
     },
     {
       "who": 0,
@@ -7575,6 +7607,14 @@
             "next_delayed": 0,
             "next_shield": 0,
             "no_life_gain": [],
+            "noncreature_spells_by_player": {
+              "$map": [
+                [
+                  0,
+                  2
+                ]
+              ]
+            },
             "objects": {
               "$map": [
                 [
@@ -8113,6 +8153,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -8194,6 +8236,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -8825,7 +8869,7 @@
           "undo": []
         }
       },
-      "expected_digest": "37d84ab3f6b0da2fc7a6866d969620c8f7916e45d0c5918c6c218d16917d081f"
+      "expected_digest": "2766dad81d65bcb9cc26ccd877ce7f29c24ecc939f2f5183522b5c9093863c7e"
     },
     {
       "who": 1,
@@ -9213,6 +9257,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -9284,6 +9330,14 @@
             "next_delayed": 0,
             "next_shield": 0,
             "no_life_gain": [],
+            "noncreature_spells_by_player": {
+              "$map": [
+                [
+                  0,
+                  2
+                ]
+              ]
+            },
             "objects": {
               "$map": [
                 [
@@ -9822,6 +9876,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -10517,7 +10573,7 @@
           "undo": []
         }
       },
-      "expected_digest": "edc1547f4ab8cf50021e587c8483c2ebd2aac1c2f310c7985fc578a237176ebc"
+      "expected_digest": "4d613de353f5bf541f4527e0190c7921e75edf5027531058478509dd62380ab4"
     },
     {
       "who": 0,
@@ -10905,6 +10961,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -10976,6 +11034,14 @@
             "next_delayed": 0,
             "next_shield": 0,
             "no_life_gain": [],
+            "noncreature_spells_by_player": {
+              "$map": [
+                [
+                  0,
+                  2
+                ]
+              ]
+            },
             "objects": {
               "$map": [
                 [
@@ -11514,6 +11580,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -12209,7 +12277,7 @@
           "undo": []
         }
       },
-      "expected_digest": "67ab06a5319242dd0ade1385f2c3a3eea1b39c3fff830fd2a4e9573fd93e32de"
+      "expected_digest": "cdeea469d63e55c15fa73c1b30ddcc96cc40c5053796b4de09e647603e130e8d"
     },
     {
       "who": 1,
@@ -12659,6 +12727,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -12740,6 +12810,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -12811,6 +12883,14 @@
             "next_delayed": 0,
             "next_shield": 0,
             "no_life_gain": [],
+            "noncreature_spells_by_player": {
+              "$map": [
+                [
+                  0,
+                  2
+                ]
+              ]
+            },
             "objects": {
               "$map": [
                 [
@@ -14018,14 +14098,25 @@
           "undo": []
         }
       },
-      "expected_digest": "68da9a960e97265e558064e9f6d0b75779b417fea510340b3942b7a486f4fc80"
+      "expected_digest": "275eec5fbc590d36c5e8b8e3349bff8e8d7e982907953f9233c4e4919d7b016d"
     }
   ],
   "expected": {
     "life": {
       "0": 26
     },
-    "final_digest": "68da9a960e97265e558064e9f6d0b75779b417fea510340b3942b7a486f4fc80",
+    "zones": [
+      {
+        "zone": {
+          "zone": "Graveyard",
+          "player": 0
+        },
+        "card": 1,
+        "owner": 0,
+        "count": 2
+      }
+    ],
+    "final_digest": "275eec5fbc590d36c5e8b8e3349bff8e8d7e982907953f9233c4e4919d7b016d",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -14458,6 +14549,8 @@
                     "mana_spent": [],
                     "modes": [],
                     "source": null,
+                    "target_groups": [],
+                    "target_specs": [],
                     "targets": [],
                     "x": 0
                   },
@@ -14539,6 +14632,8 @@
                     "mana_spent": [],
                     "modes": [],
                     "source": null,
+                    "target_groups": [],
+                    "target_specs": [],
                     "targets": [],
                     "x": 0
                   },
@@ -14610,6 +14705,14 @@
           "next_delayed": 0,
           "next_shield": 0,
           "no_life_gain": [],
+          "noncreature_spells_by_player": {
+            "$map": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
           "objects": {
             "$map": [
               [

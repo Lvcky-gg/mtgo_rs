@@ -74,8 +74,7 @@ pub fn detect(
                     _ => continue,
                 }
             } else {
-                let Some(b) =
-                    pattern_matches(state, cards, &d.on, &stamped.event, d.controller, d.source)
+                let Some(b) = pattern_matches(state, cards, &d.on, stamped, d.controller, d.source)
                 else {
                     continue;
                 };
@@ -150,7 +149,21 @@ pub fn detect(
                 continue;
             }
 
-            let controller = crate::layers::controller(state, source)
+            // CR 603.3a — a trigger of something that just left the battlefield ("when this
+            // creature dies") is controlled by whoever controlled it there.
+            let left = match &stamped.event {
+                Event::ZoneChange {
+                    object,
+                    new_object,
+                    from,
+                    ..
+                } if *new_object == source && from.zone == Zone::Battlefield => {
+                    state.last_known.get(object).map(|o| o.controller)
+                }
+                _ => None,
+            };
+            let controller = left
+                .or_else(|| crate::layers::controller(state, source))
                 .or_else(|| lookup(state, source).map(|o| o.controller))
                 .unwrap_or(state.active_player);
 
@@ -174,14 +187,9 @@ pub fn detect(
                 continue;
             }
 
-            let Some(bindings) = pattern_matches(
-                state,
-                cards,
-                &trigger.on,
-                &stamped.event,
-                controller,
-                source,
-            ) else {
+            let Some(bindings) =
+                pattern_matches(state, cards, &trigger.on, stamped, controller, source)
+            else {
                 continue;
             };
 
@@ -278,14 +286,9 @@ fn looking_back(
             {
                 continue;
             }
-            let Some(bindings) = pattern_matches(
-                state,
-                cards,
-                &trigger.on,
-                &stamped.event,
-                old.controller,
-                *object,
-            ) else {
+            let Some(bindings) =
+                pattern_matches(state, cards, &trigger.on, stamped, old.controller, *object)
+            else {
                 continue;
             };
             out.push(build(
@@ -628,10 +631,11 @@ fn pattern_matches(
     state: &GameState,
     cards: &dyn PrintedCards,
     pattern: &EventPattern,
-    event: &Event,
+    stamped: &mtg_core::StampedEvent,
     controller: PlayerId,
     source: ObjectId,
 ) -> Option<Bindings> {
+    let event = &stamped.event;
     // "This" across a zone change: a creature that dies is a new object in the graveyard
     // (CR 400.7), and that new object is the one carrying the trigger — but the event
     // names the old one. For this event, the old identity counts as the source too.
@@ -1002,13 +1006,21 @@ fn pattern_matches(
         ) => (*l == *level && subject_ok(&ObjectFilter::IsSelf, *object))
             .then(|| bind(Some(Target::Object(*object)), None)),
         (
-            EventPattern::NthSpellCast { n },
+            EventPattern::NthSpellCast { n, by, noncreature },
             Event::SpellCast {
                 object,
-                controller: by,
+                controller: caster,
             },
-        ) if *by == controller => (state.spells_by_player.get(by).copied().unwrap_or(0) == *n)
-            .then(|| bind(Some(Target::Object(*object)), None)),
+        ) if player_ok(by, *caster) => {
+            let nth = if *noncreature {
+                crate::layers::compute(state, cards, *object)
+                    .is_some_and(|c| !c.has_type(mtg_core::CardType::Creature))
+                    && state.noncreature_spells_by_player.get(caster).copied() == Some(*n)
+            } else {
+                state.spells_by_player.get(caster).copied().unwrap_or(0) == *n
+            };
+            nth.then(|| bind(Some(Target::Object(*object)), Some(Target::Player(*caster))))
+        }
         (
             EventPattern::TurnedFaceUp { who },
             Event::FaceDownChanged {
@@ -1077,13 +1089,36 @@ fn pattern_matches(
             subject_ok(from, *object).then(|| bind(Some(Target::Object(*object)), None))
         }
 
+        (EventPattern::SearchesLibrary { who }, Event::LibrarySearched { player }) => {
+            player_ok(who, *player).then(|| bind(Some(Target::Player(*player)), None))
+        }
+        // "Whenever you play a land", "when you play another land" (City of Traitors): a
+        // land put onto the battlefield by its player's own action is one played.
+        (EventPattern::PlaysLand { who, another }, Event::ZoneChange { new_object, to, .. })
+            if to.zone == Zone::Battlefield =>
+        {
+            let mtg_core::Cause::PlayerAction(player) = stamped.cause else {
+                return None;
+            };
+            let land = state.objects.get(new_object).is_some_and(|_| {
+                crate::layers::compute(state, cards, *new_object)
+                    .is_some_and(|c| c.has_type(mtg_core::CardType::Land))
+            });
+            (land && player_ok(who, player) && !(*another && *new_object == source)).then(|| {
+                bind(
+                    Some(Target::Object(*new_object)),
+                    Some(Target::Player(player)),
+                )
+            })
+        }
+
         // ---- composition -------------------------------------------------
         //
         // Fires once per event even when several arms match, which is what
         // "whenever X or Y" means.
         (EventPattern::AnyOf(arms), _) => arms
             .iter()
-            .find_map(|arm| pattern_matches(state, cards, arm, event, controller, source)),
+            .find_map(|arm| pattern_matches(state, cards, arm, stamped, controller, source)),
 
         // A state trigger is not an event pattern; it is polled separately.
         (EventPattern::StateIs(_), _) => None,
@@ -1107,6 +1142,7 @@ fn selector_covers_player(
         Selector::Opponents => who != controller,
         Selector::EachPlayer => true,
         Selector::ActivePlayer => who == state.active_player,
+        Selector::Player(p) => who == *p,
         Selector::DefendingPlayer => state.combat.defending_player == Some(who),
         // Needs the source; `pattern_matches` answers it before getting here.
         Selector::EnchantedPlayer => false,
@@ -1276,6 +1312,9 @@ fn eval_filter(
                 == Some(*zone)
         }
         ObjectFilter::Kicked => obj.cast_context.as_ref().is_some_and(|c| c.kicked),
+        ObjectFilter::IsCommander => state.commander.is_commander(obj.owner, obj.card),
+        ObjectFilter::InZone(zone) => obj.zone.zone == *zone,
+        ObjectFilter::SingleTarget => crate::eval::single_target(obj),
         ObjectFilter::HasXInCost => chars
             .mana_cost
             .symbols

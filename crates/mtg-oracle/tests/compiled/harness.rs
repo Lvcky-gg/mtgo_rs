@@ -420,6 +420,34 @@ impl Game {
         panic!("combat never finished");
     }
 
+    /// Drive the game, letting `decide` answer any choice it wants to (else the default),
+    /// until `done` holds at a priority prompt, which is left pending.
+    pub fn drive(
+        &mut self,
+        mut decide: impl FnMut(&Game, &Choice) -> Option<Answer>,
+        done: impl Fn(&Game) -> bool,
+    ) {
+        for _ in 0..10_000 {
+            match self.engine.advance(&self.table) {
+                Progress::Continue => {}
+                Progress::GameOver { .. } => panic!("game ended"),
+                Progress::NeedsChoice(c) => {
+                    if matches!(c.kind, ChoiceKind::Priority { .. }) && done(self) {
+                        self.pending = Some(c);
+                        return;
+                    }
+                    let answer = decide(self, &c)
+                        .or_else(|| c.default.clone())
+                        .unwrap_or(Answer::Pass);
+                    self.engine
+                        .answer(&self.table, c.id, answer)
+                        .unwrap_or_else(|e| panic!("{:?}: {e:?}", c.kind));
+                }
+            }
+        }
+        panic!("never done");
+    }
+
     pub fn cast(&mut self, object: ObjectId, targets: &[Target]) {
         self.act(Action::Cast { object }, targets, &[]);
     }

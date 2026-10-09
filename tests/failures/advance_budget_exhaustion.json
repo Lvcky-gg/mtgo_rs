@@ -1,0 +1,62 @@
+{
+  "format_version": 1,
+  "rules_version": "mtgo-supported-rules-v1",
+  "engine_version": "0.1.0",
+  "card_db_hash": "643d5437104296e21d906ecb15b2c96ad278f20cfc4af53b12bb6069bd853726",
+  "seed": 42,
+  "metadata": {
+    "issue": "local-advance-failure-evidence",
+    "description": "Deliberately bounded legal automatic transition: replay must emit structured failure evidence instead of returning an uncapturable error. This is a harness regression, not an engine infinite-loop claim.",
+    "rules": [],
+    "first_affected": null,
+    "fixed_in": "working-tree"
+  },
+  "cards": [],
+  "subtypes": [],
+  "initial_state": {
+    "players": [
+      {
+        "id": 0,
+        "life": 20,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "id": 1,
+        "life": 20,
+        "poison": 0,
+        "mana": {
+          "amounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    ],
+    "active_player": 0,
+    "turn": 2,
+    "step": "PrecombatMain",
+    "objects": [],
+    "commanders": {}
+  },
+  "actions": [],
+  "expected": {
+    "life": {},
+    "final_digest": null,
+    "final_state": null
+  },
+  "advance_budget": 1
+}

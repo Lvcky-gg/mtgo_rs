@@ -142,6 +142,8 @@ struct Announcing {
     slot: usize,
     /// Targets chosen so far, one per slot.
     chosen: Vec<Target>,
+    chosen_specs: Vec<mtg_ir::selector::TargetSpec>,
+    chosen_groups: Vec<usize>,
     /// Positions in `chosen` holding a placeholder for a slot left empty — an "up to one"
     /// slot with nothing chosen. Keeping a placeholder keeps later slots at their own
     /// index, so `Target { index }` still names the right one.
@@ -203,6 +205,8 @@ impl Announcing {
         // The placeholder points at the object being announced, which is never a legal
         // target of itself; it is marked illegal on resolution and so selects nothing.
         self.chosen.push(Target::Object(self.object));
+        self.chosen_specs.push(self.specs[self.slot].clone());
+        self.chosen_groups.push(self.slot);
         self.slot += 1;
     }
 }
@@ -212,6 +216,8 @@ impl Announcing {
 #[derive(Clone, Debug, Default)]
 struct Announced {
     targets: Vec<Target>,
+    target_specs: Vec<mtg_ir::selector::TargetSpec>,
+    target_groups: Vec<usize>,
     empty: Vec<u8>,
     modes: Vec<u8>,
     x: u32,
@@ -274,6 +280,7 @@ struct Resolving {
     log_len: usize,
     /// Answers gathered so far, in the order asked.
     answers: Vec<Answer>,
+    retargeting: Option<resolve::Retargeting>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -402,6 +409,7 @@ impl Engine {
 
         if let Some(winners) = self.game_over() {
             self.undo.clear();
+            self.state.priority = None;
             self.phase = Phase::Over;
             return Progress::GameOver { winners };
         }
@@ -723,7 +731,9 @@ impl Engine {
                 self.announcement_choice = None;
                 return Ok(());
             }
-            if let (Some(a), Answer::Number(n)) = (self.announcing.as_mut(), &answer) {
+            if let (Some(a), Answer::Number(n)) = (self.announcing.as_mut(), &answer)
+                && a.awaiting() == Awaiting::X
+            {
                 if *n > a.max_x.unwrap_or(0) {
                     self.pending = Some(choice);
                     return Err(Illegal::WrongAnswerKind);
@@ -732,49 +742,56 @@ impl Engine {
                 self.announcement_choice = None;
                 return Ok(());
             }
-            self.announcement_choice = None;
-            if let (Some(a), Answer::Targets(slots)) = (self.announcing.as_mut(), &answer) {
-                let spec = a.specs.get(a.slot).cloned();
-                let picked: Vec<Target> = slots.iter().flatten().copied().collect();
-                // Only legal targets count; an answer that under-delivers on a required
-                // slot is topped up from the legal set, so a malformed answer cannot
-                // sneak a spell onto the stack with no targets.
-                if let Some(spec) = spec {
+            // Validate the submitted target instance before mutating its continuation.
+            // A malformed answer must not silently pick targets on the player's behalf.
+            let valid = match (&choice.kind, &answer, self.announcing.as_ref()) {
+                (
+                    ChoiceKind::ChooseTargets { slots: offered, .. },
+                    Answer::Targets(picked),
+                    Some(a),
+                ) => a.specs.get(a.slot).is_some_and(|spec| {
+                    if picked.len() != offered.len() {
+                        return false;
+                    }
+                    let flat: Vec<_> = picked.iter().flatten().copied().collect();
+                    let minimum = crate::targeting::required(
+                        spec,
+                        &self.state,
+                        cards,
+                        a.object,
+                        a.controller,
+                    );
+                    let maximum =
+                        crate::targeting::maximum(spec, &self.state, cards, a.object, a.controller);
                     let legal = crate::targeting::legal_targets(
                         &self.state,
                         cards,
-                        &spec,
+                        spec,
                         a.object,
                         a.controller,
                         &a.chosen,
                     );
-                    let need = crate::targeting::required(
-                        &spec,
-                        &self.state,
-                        cards,
-                        a.object,
-                        a.controller,
-                    );
-                    let mut keep: Vec<Target> =
-                        picked.into_iter().filter(|t| legal.contains(t)).collect();
-                    keep.dedup();
-                    for t in &legal {
-                        if keep.len() as u32 >= need {
-                            break;
-                        }
-                        if !keep.contains(t) {
-                            keep.push(*t);
-                        }
-                    }
-                    // Strive: no more targets than the cost can pay for, so the
-                    // announcement can't dead-end (CR 702.103a, 601.2h).
-                    if a.pay_cost {
-                        while keep.len() as u32 > need.max(1)
-                            && !Self::strive_affordable(&self.state, cards, a, &keep)
-                        {
-                            keep.pop();
-                        }
-                    }
+                    flat.iter().all(|target| legal.contains(target))
+                        && (minimum..=maximum).contains(&(flat.len() as u32))
+                        && picked
+                            .iter()
+                            .zip(offered)
+                            .all(|(picked, offered)| picked.iter().all(|t| offered.contains(t)))
+                        && flat.iter().enumerate().all(|(i, t)| !flat[..i].contains(t))
+                        && (!a.pay_cost || Self::strive_affordable(&self.state, cards, a, &flat))
+                }),
+                _ => false,
+            };
+            if !valid {
+                self.pending = Some(choice);
+                return Err(Illegal::WrongAnswerKind);
+            }
+            self.announcement_choice = None;
+            if let (Some(a), Answer::Targets(slots)) = (self.announcing.as_mut(), &answer) {
+                let spec = a.specs.get(a.slot).cloned();
+                let picked: Vec<Target> = slots.iter().flatten().copied().collect();
+                if let Some(spec) = spec {
+                    let keep = picked;
                     if keep.is_empty() {
                         // "Up to one" and none chosen: the slot stays empty. Declining one
                         // of a run of like slots ("any number of target creatures") ends
@@ -784,6 +801,9 @@ impl Engine {
                             a.skip_slot();
                         }
                     } else {
+                        a.chosen_groups
+                            .extend(std::iter::repeat_n(a.slot, keep.len()));
+                        a.chosen_specs.extend(std::iter::repeat_n(spec, keep.len()));
                         a.chosen.extend(keep);
                         a.slot += 1;
                     }
@@ -797,6 +817,12 @@ impl Engine {
         // An answer that belongs to an in-flight resolution is appended to its answer
         // list; the resolution then runs again from the start with it in hand.
         if self.resolution_choice == Some(id) {
+            if let Some(check) = self.resolving.as_ref().and_then(|r| r.retargeting.as_ref())
+                && !check.accepts(&choice.kind, &answer)
+            {
+                self.pending = Some(choice);
+                return Err(Illegal::WrongAnswerKind);
+            }
             self.resolution_choice = None;
             if let Some(r) = self.resolving.as_mut() {
                 r.answers.push(answer);
@@ -1261,6 +1287,21 @@ impl Engine {
         );
         self.refresh_no_life_gain(cards);
         self.refresh_exile_if_dies(cards);
+        // A player who lost to an effect ("you lose the game") left as it resolved; their
+        // objects leave with them now (CR 800.4a). Losing to a state-based action or by
+        // conceding is handled where that happens; this finds what remains.
+        let departed: Vec<PlayerId> = self
+            .state
+            .turn_order
+            .iter()
+            .copied()
+            .filter(|p| {
+                self.state.player(*p).has_lost && self.state.objects.values().any(|o| o.owner == *p)
+            })
+            .collect();
+        for player in departed {
+            self.leave_game(player);
+        }
         // 0. Notice what just happened (CR 603.2). Scanning here rather than inside
         //    `apply` keeps event application free of card data, and means a replayed
         //    log detects exactly the same triggers. Because settle loops, events
@@ -1385,6 +1426,8 @@ impl Engine {
         // 3. With state-based actions quiet, waiting triggers go on the stack.
         if !self.state.pending_triggers.is_empty() {
             let apnap = self.state.apnap();
+            // CR 800.4d — APNAP order has only players still in the game, so a departed
+            // player's triggers are dropped here rather than put on the stack.
             let batches = self.state.pending_triggers.drain_apnap(&apnap);
             self.to_order.extend(batches);
         }
@@ -1792,6 +1835,13 @@ impl Engine {
                 }
             }
         }
+        let departed: Vec<PlayerId> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Lost { player, .. } => Some(*player),
+                _ => None,
+            })
+            .collect();
         // CR 704.3 — all of them at once, sharing one timestamp.
         apply::apply_simultaneous(
             &mut self.state,
@@ -1799,6 +1849,110 @@ impl Engine {
             events,
             &mut self.log,
         );
+        for player in departed {
+            self.leave_game(player);
+        }
+    }
+
+    /// CR 800.4a — a player leaving a multiplayer game takes their objects with them.
+    /// Not a state-based action: it happens as they leave. Two-player games simply end.
+    fn leave_game(&mut self, player: PlayerId) {
+        let remaining = self
+            .state
+            .turn_order
+            .iter()
+            .filter(|p| !self.state.player(**p).has_lost)
+            .count();
+        if remaining < 2 {
+            return;
+        }
+        let cause = Cause::PlayerAction(player);
+
+        // Effects that give them control of anything end, and everything they own
+        // leaves the game.
+        let ended: Vec<ObjectId> = self
+            .state
+            .continuous
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.modification,
+                    mtg_ir::effect::Modification::Control(mtg_ir::Selector::You)
+                ) && e
+                    .controller
+                    .or_else(|| self.state.objects.get(&e.source).map(|s| s.controller))
+                    == Some(player)
+            })
+            .map(|e| e.id)
+            .collect();
+        let mut events: Vec<Event> = ended
+            .into_iter()
+            .map(|effect| Event::ContinuousEffectEnded { effect })
+            .collect();
+        // An ability on the stack is no one's property, whatever its source's owner
+        // (CR 113.7a): it stays until its controller leaves.
+        let is_ability = |o: &crate::state::GameObject| {
+            o.cast_context.as_ref().is_some_and(|c| c.source.is_some())
+        };
+        events.extend(
+            self.state
+                .objects
+                .values()
+                .filter(|o| o.owner == player && !is_ability(o))
+                .map(|o| Event::CeasedToExist { object: o.id }),
+        );
+        if !events.is_empty() {
+            apply::apply_simultaneous(&mut self.state, cause, events, &mut self.log);
+            self.cache.invalidate();
+        }
+
+        // Then their abilities on the stack cease to exist, and anything still under
+        // their control is exiled.
+        let mut gone = Vec::new();
+        let mut exiled = Vec::new();
+        for (id, o) in &self.state.objects {
+            if o.zone.zone == Zone::Stack {
+                if o.controller != player {
+                    continue;
+                }
+                if !is_ability(o) && !o.is_spell_copy {
+                    exiled.push(*id);
+                } else {
+                    gone.push(*id);
+                }
+            } else if o.zone.zone == Zone::Battlefield
+                && crate::layers::controller(&self.state, *id) == Some(player)
+            {
+                exiled.push(*id);
+            }
+        }
+        let mut events: Vec<Event> = gone
+            .into_iter()
+            .map(|object| Event::CeasedToExist { object })
+            .collect();
+        for object in exiled {
+            let from = self.state.objects[&object].zone;
+            let new_object = self.state.new_object_id();
+            events.push(Event::ZoneChange {
+                object,
+                new_object,
+                from,
+                to: ZoneRef::shared(Zone::Exile),
+                index: None,
+            });
+        }
+        if !events.is_empty() {
+            apply::apply_simultaneous(&mut self.state, cause, events, &mut self.log);
+            self.cache.invalidate();
+        }
+
+        // CR 800.4d — nothing of theirs waiting to be put on the stack ever is.
+        self.state
+            .pending_triggers
+            .pending
+            .retain(|t| t.controller != player);
+        self.to_order.retain(|(who, _)| *who != player);
+        self.to_place.retain(|(who, _)| *who != player);
     }
 
     /// Put an ability on the stack as an object in its own right (CR 113.7).
@@ -2069,6 +2223,7 @@ impl Engine {
                     },
                     &mut self.log,
                 );
+                self.leave_game(who);
                 self.phase = Phase::Settle;
             }
             Action::PlayLand { object } | Action::PlayLandFace { object, .. } => {
@@ -2877,6 +3032,8 @@ impl Engine {
                     )
                 })
                 || crate::cost::flash_permitted(&self.state, cards, id, who);
+            let instant_speed =
+                instant_speed && !crate::cost::sorcery_speed_only(&self.state, cards, who);
             if !(instant_speed || sorcery_time)
                 || !crate::cost::cast_conditions_met(&self.state, cards, id, who)
             {
@@ -2889,7 +3046,9 @@ impl Engine {
                     && (cost.additional.is_empty()
                         || (matches!(
                             kind,
-                            mtg_ir::ability::AltCost::Pay | mtg_ir::ability::AltCost::Emerge
+                            mtg_ir::ability::AltCost::Pay
+                                | mtg_ir::ability::AltCost::Emerge
+                                | mtg_ir::ability::AltCost::Evoke
                         )
                             && crate::cost::additional_payable(
                                 &self.state,
@@ -3334,6 +3493,27 @@ impl Engine {
             &mut self.log,
         );
 
+        // "Exile this card from your hand": the card is exiled as the cost is paid.
+        if crate::mana::exiles_self_from_hand(&cost)
+            && let Some(o) = self.state.objects.get(&object)
+            && o.zone.zone == Zone::Hand
+        {
+            let from = o.zone;
+            let new_object = self.state.new_object_id();
+            apply::apply(
+                &mut self.state,
+                Cause::CostPayment(object),
+                Event::ZoneChange {
+                    object,
+                    new_object,
+                    from,
+                    to: ZoneRef::shared(Zone::Exile),
+                    index: None,
+                },
+                &mut self.log,
+            );
+        }
+
         // The ability's own cost: tapping the permanent.
         if cost
             .additional
@@ -3349,6 +3529,35 @@ impl Engine {
                 },
                 &mut self.log,
             );
+            // "Whenever enchanted land is tapped for mana, its controller adds an
+            // additional {G}" (CR 605.1b): resolved with the ability.
+            for extra in crate::mana::additional_mana(&self.state, cards, object) {
+                let (color, amount) = match extra {
+                    mtg_ir::effect::ManaOutput::Colored(c) => (Some(c), 1),
+                    mtg_ir::effect::ManaOutput::Colorless => (None, 1),
+                    mtg_ir::effect::ManaOutput::Repeated {
+                        amount: mtg_ir::Value::Fixed(n),
+                        output,
+                    } => match *output {
+                        mtg_ir::effect::ManaOutput::Colored(c) => (Some(c), n.max(0) as u16),
+                        mtg_ir::effect::ManaOutput::Colorless => (None, n.max(0) as u16),
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if amount > 0 {
+                    apply::apply(
+                        &mut self.state,
+                        Cause::CostPayment(object),
+                        Event::ManaAdded {
+                            player: who,
+                            color,
+                            amount,
+                        },
+                        &mut self.log,
+                    );
+                }
+            }
         }
 
         resolve::sacrifice_for_mana(&mut self.state, cards, &mut self.log, object, ability);
@@ -3362,6 +3571,7 @@ impl Engine {
     /// Take a planned payment out of the pool, and any life it calls for.
     fn spend(&mut self, who: PlayerId, plan: &crate::mana::Payment) {
         // Spend the mana.
+        crate::mana::consume_restricted(&mut self.state, who, plan);
         for (slot, amount) in plan.spend.iter().enumerate() {
             if *amount == 0 {
                 continue;
@@ -3498,6 +3708,8 @@ impl Engine {
             specs,
             slot: 0,
             chosen: Vec::new(),
+            chosen_specs: Vec::new(),
+            chosen_groups: Vec::new(),
             empty: Vec::new(),
             pay_cost,
             snapshot,
@@ -3750,6 +3962,25 @@ impl Engine {
             None => crate::cost::total_cost(&self.state, cards, object, who)?,
         };
         if !cost.symbols.contains(&mtg_core::ManaSymbol::Variable) {
+            // "As an additional cost to cast this spell, pay X life." (Toxic Deluge): no more
+            // than the caster's life (CR 119.4).
+            let life_x = obj
+                .cast_context
+                .as_ref()
+                .is_none_or(|c| c.ability.is_none())
+                && crate::cost::spell_extra_cost(&self.state, cards, object).is_some_and(|c| {
+                    c.additional.iter().any(|p| {
+                        matches!(
+                            p,
+                            mtg_ir::AdditionalCost::PayLife {
+                                amount: mtg_ir::Value::X
+                            }
+                        )
+                    })
+                });
+            if life_x {
+                return Some(self.state.player(who).life.max(0) as u32);
+            }
             return counters;
         }
         let spell = obj
@@ -4086,6 +4317,8 @@ impl Engine {
         let (object, controller, pay_cost) = (a.object, a.controller, a.pay_cost);
         let done = Announced {
             targets: a.chosen.clone(),
+            target_specs: a.chosen_specs.clone(),
+            target_groups: a.chosen_groups.clone(),
             empty: a.empty.clone(),
             modes: a.modes.clone().unwrap_or_default(),
             x: a.x.unwrap_or(0),
@@ -4189,6 +4422,8 @@ impl Engine {
             if let Some(o) = self.state.objects.get_mut(&object) {
                 let cc = o.cast_context.get_or_insert_with(Default::default);
                 cc.targets = done.targets.clone();
+                cc.target_specs = Some(done.target_specs.clone());
+                cc.target_groups = Some(done.target_groups.clone());
                 cc.empty_slots = done.empty.clone();
                 cc.kicked = done.kicked;
                 cc.kicks = done.kicks;
@@ -4239,6 +4474,10 @@ impl Engine {
                             mtg_ir::AdditionalCost::PayLife {
                                 amount: mtg_ir::Value::Fixed(n),
                             } => Some(i64::from(*n)),
+                            // "Pay X life" (Toxic Deluge): the X announced.
+                            mtg_ir::AdditionalCost::PayLife {
+                                amount: mtg_ir::Value::X,
+                            } => Some(i64::from(done.x)),
                             _ => None,
                         })
                         .sum::<i64>()
@@ -4275,6 +4514,8 @@ impl Engine {
         if let Some(o) = self.state.objects.get_mut(&object) {
             let cc = o.cast_context.get_or_insert_with(Default::default);
             cc.targets = done.targets.clone();
+            cc.target_specs = Some(done.target_specs.clone());
+            cc.target_groups = Some(done.target_groups.clone());
             cc.empty_slots = done.empty.clone();
             cc.modes = done.modes.clone();
             // A triggered ability announces no X: its X slot already holds the
@@ -4478,16 +4719,22 @@ impl Engine {
         // A spell's additional casting cost in life (CR 119.4).
         if pay_cost && let Some(extra) = crate::cost::spell_extra_cost(&self.state, cards, object) {
             for part in &extra.additional {
-                if let mtg_ir::AdditionalCost::PayLife {
-                    amount: mtg_ir::Value::Fixed(n),
-                } = part
-                {
+                let n = match part {
+                    mtg_ir::AdditionalCost::PayLife {
+                        amount: mtg_ir::Value::Fixed(n),
+                    } => *n,
+                    mtg_ir::AdditionalCost::PayLife {
+                        amount: mtg_ir::Value::X,
+                    } => done.x as i32,
+                    _ => continue,
+                };
+                if n > 0 {
                     apply::apply(
                         &mut self.state,
                         Cause::CostPayment(object),
                         Event::LifeChanged {
                             player: controller,
-                            delta: -*n,
+                            delta: -n,
                         },
                         &mut self.log,
                     );
@@ -4522,6 +4769,7 @@ impl Engine {
                     &mut self.log,
                 );
             }
+            crate::resolve::count_noncreature_spell(&mut self.state, cards, object, controller);
             apply::apply(
                 &mut self.state,
                 Cause::PlayerAction(controller),
@@ -4773,6 +5021,13 @@ impl Engine {
             }
         }
 
+        // "Discard your hand" (Lion's Eye Diamond): every card in it, whatever it holds.
+        if cost.additional.contains(&A::DiscardHand) {
+            for card in self.state.objects_in(ZoneRef::of(Zone::Hand, who)) {
+                resolve::discard(&mut self.state, cards, &mut self.log, card, cause);
+            }
+        }
+
         // Discarding the source from hand (cycling).
         if cost.additional.iter().any(|c| {
             matches!(
@@ -4901,7 +5156,11 @@ impl Engine {
             .as_ref()
             .map(|c| c.targets.clone())
             .unwrap_or_default();
-        let specs = crate::targeting::specs_of(&self.state, cards, top);
+        let specs = obj
+            .cast_context
+            .as_ref()
+            .and_then(|cc| cc.target_specs.clone())
+            .unwrap_or_else(|| crate::targeting::specs_of(&self.state, cards, top));
         let mut check =
             crate::targeting::recheck(&self.state, cards, &specs, &chosen, top, controller);
         // Placeholders for empty slots select nothing, and a spell whose only chosen
@@ -5025,7 +5284,12 @@ impl Engine {
                 Ok(()) => {}
 
                 // A decision is needed. Roll back and ask.
-                Err(resolve::ResolveError::Ask { who, kind, because }) => {
+                Err(resolve::ResolveError::Ask {
+                    who,
+                    kind,
+                    because,
+                    retargeting,
+                }) => {
                     let choice_view =
                         crate::view::project_showing(&self.state, who, choice_candidates(&kind));
                     self.state = *snapshot.clone();
@@ -5036,6 +5300,7 @@ impl Engine {
                         snapshot,
                         log_len,
                         answers,
+                        retargeting,
                     });
                     let c = self.new_choice(who, *kind, because, None);
                     self.resolution_view = Some((c.id, choice_view));
@@ -5060,7 +5325,12 @@ impl Engine {
         let enter = if ctx_ability.is_none() {
             match resolve::enter_choice(&self.state, cards, &mut rc, top) {
                 Ok(answer) => answer,
-                Err(resolve::ResolveError::Ask { who, kind, because }) => {
+                Err(resolve::ResolveError::Ask {
+                    who,
+                    kind,
+                    because,
+                    retargeting,
+                }) => {
                     let choice_view =
                         crate::view::project_showing(&self.state, who, choice_candidates(&kind));
                     self.state = *snapshot.clone();
@@ -5071,6 +5341,7 @@ impl Engine {
                         snapshot,
                         log_len,
                         answers,
+                        retargeting,
                     });
                     let c = self.new_choice(who, *kind, because, None);
                     self.resolution_view = Some((c.id, choice_view));
@@ -5195,6 +5466,34 @@ impl Engine {
                     )
                 })
             });
+        // Mox Diamond: it enters only if a card was discarded instead (CR 614.12); the
+        // discard happens first, and without it the spell goes to the graveyard.
+        let mut is_permanent = is_permanent;
+        if is_permanent
+            && let Some(filter) = cards
+                .face(obj.card, obj.face)
+                .and_then(|f| resolve::enters_if_discards(cards, f))
+        {
+            let options = resolve::discard_options(&self.state, cards, top, &filter);
+            let chosen = match &enter {
+                Some(Answer::Objects(picked)) => {
+                    picked.first().copied().filter(|p| options.contains(p))
+                }
+                _ => None,
+            };
+            match chosen {
+                Some(card) => {
+                    resolve::discard(
+                        &mut self.state,
+                        cards,
+                        &mut self.log,
+                        card,
+                        Cause::Resolution(top),
+                    );
+                }
+                None => is_permanent = false,
+            }
+        }
         let to = if is_permanent {
             ZoneRef::shared(Zone::Battlefield)
         } else if rebound {
@@ -5597,7 +5896,9 @@ impl Engine {
             },
             &mut rc,
         ) {
-            Err(resolve::ResolveError::Ask { who, kind, because }) => {
+            Err(resolve::ResolveError::Ask {
+                who, kind, because, ..
+            }) => {
                 self.state = snapshot;
                 self.log.truncate(log_len);
                 self.cache.invalidate();
@@ -5786,6 +6087,34 @@ impl Engine {
             Target::Player(p) => Some(*p),
             _ => None,
         });
+
+        // Propaganda: {2} for each creature attacking its controller, paid as attackers
+        // are declared (CR 508.1h); unaffordable, the declaration is illegal.
+        let mut tax = mtg_core::ManaCost::FREE;
+        for e in crate::layers::effects(&self.state, cards) {
+            let mtg_ir::effect::Modification::Restriction(mtg_ir::effect::Restriction::AttackTax {
+                per,
+            }) = &e.modification
+            else {
+                continue;
+            };
+            let Some(you) = crate::layers::controller(&self.state, e.source) else {
+                continue;
+            };
+            let attacking = attackers
+                .iter()
+                .filter(|(_, d)| *d == Target::Player(you))
+                .count();
+            for _ in 0..attacking {
+                tax.symbols.extend(per.symbols.iter().cloned());
+            }
+        }
+        if !tax.symbols.is_empty() {
+            let Some(plan) = crate::mana::plan(&self.state, cards, who, &tax, 0) else {
+                return false;
+            };
+            self.pay(cards, who, &plan);
+        }
 
         // Declaring attackers and tapping them are one turn-based action, so they
         // share a timestamp and no trigger sees a half-declared combat.
@@ -6167,6 +6496,41 @@ impl Engine {
 
         match tba {
             T::UntapAll => {
+                // CR 502.1 — first, the active player's phased-out permanents phase in.
+                let phasing_in: Vec<Event> = self
+                    .state
+                    .battlefield_with_phased_out()
+                    .into_iter()
+                    .filter(|id| {
+                        self.state
+                            .objects
+                            .get(id)
+                            .is_some_and(|o| o.phased_out && o.controller == active)
+                    })
+                    .map(|object| Event::PhasedOut { object, out: false })
+                    .collect();
+                if !phasing_in.is_empty() {
+                    apply::apply_simultaneous(
+                        &mut self.state,
+                        Cause::TurnStructure,
+                        phasing_in,
+                        &mut self.log,
+                    );
+                    self.cache.invalidate();
+                }
+                // Seedborn Muse: these players untap in every player's untap step.
+                let also: Vec<PlayerId> = crate::layers::effects(&self.state, cards)
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e.modification,
+                            mtg_ir::effect::Modification::Restriction(
+                                mtg_ir::effect::Restriction::UntapDuringOthersUntap
+                            )
+                        )
+                    })
+                    .filter_map(|e| crate::layers::controller(&self.state, e.source))
+                    .collect();
                 let mine: Vec<ObjectId> = self
                     .state
                     .battlefield()
@@ -6174,7 +6538,8 @@ impl Engine {
                     .filter(|id| {
                         self.state.objects.get(id).is_some_and(|o| o.tapped)
                             && !self.keep_tapped.contains(id)
-                            && crate::layers::controller(&self.state, *id) == Some(active)
+                            && crate::layers::controller(&self.state, *id)
+                                .is_some_and(|c| c == active || also.contains(&c))
                             // "Doesn't untap during its controller's untap step."
                             && !crate::layers::restricted(&self.state, cards, *id, |r| {
                                 matches!(
@@ -6248,6 +6613,7 @@ impl Engine {
                 self.state.spells_cast_this_turn = 0;
                 self.state.spells_by_player_last_turn =
                     std::mem::take(&mut self.state.spells_by_player);
+                self.state.noncreature_spells_by_player.clear();
                 self.state.draws_this_turn.clear();
                 self.state.died_this_turn.clear();
                 // CR 726.3a — as a turn begins, day becomes night if the previous turn's
@@ -6472,6 +6838,13 @@ impl Engine {
             }
         }
 
+        // CR 800.4e — combat damage isn't assigned to a player who has left the game.
+        for a in &mut assignments {
+            a.to.retain(
+                |(to, _)| !matches!(to, Target::Player(p) if self.state.player(*p).has_lost),
+            );
+        }
+
         // Wither and infect change what damage does (CR 702.80, 702.90), per source.
         let kinds: Vec<(bool, bool)> = assignments
             .iter()
@@ -6483,7 +6856,7 @@ impl Engine {
             })
             .collect();
         // Damage that will actually be dealt: to an object still there and still in this
-        // fight, and not prevented by protection (CR 702.16e).
+        // fight. Prevention, including protection, is handled by the shared path.
         let still_hit = |source: ObjectId, target: Target| match target {
             Target::Player(_) => true,
             Target::Object(object) => {
@@ -6499,7 +6872,6 @@ impl Engine {
                         .objects
                         .get(&object)
                         .is_some_and(|o| o.zone.zone == Zone::Battlefield)
-                    && !crate::eval::protected_from(&self.state, cards, object, source)
             }
         };
         let mut events: Vec<Event> = Vec::new();

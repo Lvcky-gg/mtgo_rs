@@ -352,7 +352,7 @@ mod tests {
             ConfidenceRegistry::parse(include_bytes!("../../../verification/primitives.json"))
                 .unwrap();
         let report = registry.report().unwrap();
-        assert_eq!(report.primitives.len(), 10);
+        assert_eq!(report.primitives.len(), 13);
         assert!(
             report
                 .primitives

@@ -21,6 +21,7 @@ impl Subtypes for NoSubtypes {
 pub struct StructuralObservation {
     pub input_rejected_by_size: bool,
     pub scenario_accepted: bool,
+    pub replay_report_accepted: bool,
     pub card_face_deserialized: bool,
     pub guest_message_deserialized: bool,
     pub host_message_deserialized: bool,
@@ -42,6 +43,7 @@ pub fn exercise(bytes: &[u8]) -> StructuralObservation {
     }
     let mut out = StructuralObservation {
         scenario_accepted: crate::scenario::GameScenario::parse(bytes).is_ok(),
+        replay_report_accepted: crate::bug_report::ReplayReport::parse(bytes).is_ok(),
         card_face_deserialized: serde_json::from_slice::<mtg_ir::CardFace>(bytes).is_ok(),
         guest_message_deserialized: serde_json::from_slice::<GuestMessage>(bytes).is_ok(),
         host_message_deserialized: serde_json::from_slice::<HostMessage>(bytes).is_ok(),

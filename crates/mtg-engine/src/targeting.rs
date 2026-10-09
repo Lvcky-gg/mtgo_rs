@@ -100,6 +100,7 @@ pub fn legal_targets(
             if !state.player(*p).has_lost
                 && allowed.as_ref().is_none_or(|a| a.contains(p))
                 && !player_hexproof_from(state, cards, *p, controller)
+                && !player_protected(state, cards, *p)
             {
                 out.push(Target::Player(*p));
             }
@@ -138,6 +139,17 @@ pub fn required(
     if spec.up_to {
         return 0;
     }
+    maximum(spec, state, cards, source, controller)
+}
+
+/// The greatest number this target instance may select, including optional slots.
+pub fn maximum(
+    spec: &TargetSpec,
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    controller: PlayerId,
+) -> u32 {
     let chars = ComputedChars(cards);
     let c = ctx(state, cards, &chars, source, controller);
     eval::value(&c, &spec.count).unwrap_or(1).max(0) as u32
@@ -155,20 +167,103 @@ pub fn can_be_announced(
     source: ObjectId,
     controller: PlayerId,
 ) -> bool {
-    let mut taken: Vec<Target> = Vec::new();
-
-    for spec in specs {
-        let need = required(spec, state, cards, source, controller);
-        let available = legal_targets(state, cards, spec, source, controller, &taken);
-        if (available.len() as u32) < need {
-            return false;
-        }
-        // Reserve what this slot would consume, so a later distinct slot is judged
-        // against a realistic remainder rather than the full board.
-        taken.extend(available.into_iter().take(need as usize));
+    // A modal spell needs only its chosen modes' targets (CR 700.2b): it can be cast when
+    // enough modes could each be announced on their own — one without targets always can
+    // ("each creature deals 1 damage to its controller" beside "destroy target artifact").
+    if specs.iter().any(|s| s.mode.is_some())
+        && let Some((labels, _, min)) = modes_of(state, cards, source)
+    {
+        let possible = (0..labels.len() as u8)
+            .filter(|m| {
+                let these: Vec<TargetSpec> = specs
+                    .iter()
+                    .filter(|s| s.mode.is_none_or(|sm| sm == *m))
+                    .cloned()
+                    .collect();
+                all_announceable(state, cards, &these, source, controller)
+            })
+            .count();
+        return possible >= usize::from(min.max(1));
     }
+    all_announceable(state, cards, specs, source, controller)
+}
 
-    true
+/// Whether every one of these target slots can be filled at once.
+fn all_announceable(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    specs: &[TargetSpec],
+    source: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    struct Search<'a> {
+        state: &'a GameState,
+        cards: &'a dyn PrintedCards,
+        specs: &'a [TargetSpec],
+        source: ObjectId,
+        controller: PlayerId,
+    }
+    impl Search<'_> {
+        fn slots(&self, index: usize, taken: &mut Vec<Target>) -> bool {
+            let Some(spec) = self.specs.get(index) else {
+                return true;
+            };
+            let available = legal_targets(
+                self.state,
+                self.cards,
+                spec,
+                self.source,
+                self.controller,
+                taken,
+            );
+            let need =
+                required(spec, self.state, self.cards, self.source, self.controller) as usize;
+            let most = maximum(spec, self.state, self.cards, self.source, self.controller) as usize;
+            if index + 1 == self.specs.len() {
+                return need <= most && need <= available.len();
+            }
+            (need..=most.min(available.len()))
+                .any(|count| self.group(index, &available, 0, count, taken))
+        }
+        fn group(
+            &self,
+            slot: usize,
+            available: &[Target],
+            start: usize,
+            remaining: usize,
+            taken: &mut Vec<Target>,
+        ) -> bool {
+            if remaining == 0 {
+                return self.slots(slot + 1, taken);
+            }
+            if available.len() - start < remaining {
+                return false;
+            }
+            if available.len() - start == remaining {
+                let previous = taken.len();
+                taken.extend_from_slice(&available[start..]);
+                let valid = self.slots(slot + 1, taken);
+                taken.truncate(previous);
+                return valid;
+            }
+            for index in start..=available.len() - remaining {
+                taken.push(available[index]);
+                if self.group(slot, available, index + 1, remaining - 1, taken) {
+                    return true;
+                }
+                taken.pop();
+            }
+            false
+        }
+    }
+    Search {
+        state,
+        cards,
+        specs,
+        source,
+        controller,
+    }
+    .slots(0, &mut Vec::new())
 }
 
 /// The result of re-checking targets on resolution (CR 608.2b).
@@ -223,7 +318,10 @@ pub fn recheck(
                 }
                 Target::Player(p) => {
                     spec.allows_players
-                        && !state.player(*p).has_lost
+                        && state.players.get(p).is_some_and(|player| !player.has_lost)
+                        && spec.players.as_ref().is_none_or(|selector| {
+                            eval::players(&c, selector).is_ok_and(|players| players.contains(p))
+                        })
                         && !player_hexproof_from(state, cards, *p, controller)
                 }
             }
@@ -265,14 +363,34 @@ pub fn modes_of(
         _ => return None,
     };
     let mtg_ir::Effect::Modal {
-        choose: mtg_ir::Value::Fixed(n),
+        choose,
         modes,
         at_least,
     } = effect
     else {
         return None;
     };
-    let most = (*n).clamp(0, modes.len() as i32) as u8;
+    // A count that depends on the game ("choose both instead" with a commander) is read
+    // as the modes are chosen, for the caster.
+    let n = match choose {
+        mtg_ir::Value::Fixed(n) => *n,
+        other => {
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source: object,
+                controller: obj.controller,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            crate::eval::value(&ctx, other).ok()?
+        }
+    };
+    let most = n.clamp(0, modes.len() as i32) as u8;
     Some((
         modes.iter().map(|(label, _)| label.clone()).collect(),
         most,
@@ -370,6 +488,22 @@ pub fn player_hexproof_from(
                 )
             ) && crate::layers::controller(state, e.source) == Some(player)
         })
+}
+
+/// Whether `player` has protection from everything (Teferi's Protection): nothing can
+/// target them and damage to them is prevented (CR 702.16j).
+pub fn player_protected(state: &GameState, cards: &dyn PrintedCards, player: PlayerId) -> bool {
+    crate::layers::effects(state, cards).iter().any(|e| {
+        matches!(
+            e.modification,
+            mtg_ir::effect::Modification::Restriction(
+                mtg_ir::effect::Restriction::PlayerProtectionFromEverything
+            )
+        ) && e
+            .controller
+            .or_else(|| crate::layers::controller(state, e.source))
+            == Some(player)
+    })
 }
 
 /// The target slots of "deals X damage divided as you choose …" in what `object` is

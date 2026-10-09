@@ -43,3 +43,15 @@ Start with canonical serialization/determinism and strict fixture round trips, t
 Campaign reports and private reproductions are archived for failed runs as well as successful runs. Structural fuzzing does not yet exercise SQLite saves, encrypted transport framing or packet-loss/reconnect campaigns. Real-deck and independent external-engine campaigns remain explicitly unavailable; nightly/weekly budgets are bounded experiments, not a claim of millions of completed games.
 
 Repository administrators must mark the `Verification / verify` check required in branch protection (or a ruleset) to prohibit merges after failed checks. Adding a workflow does not itself configure GitHub merge protection.
+
+## Independent leave-game review
+
+The independent reviewer read [the official CR effective September 25, 2026](https://media.wizards.com/2026/downloads/MagicCompRules%2020260925.txt), especially 800.4a/d and 113.7a. `crates/mtg-engine/tests/leave_game_review.rs` now supplies seven behavioral checks: removal across zones and views, surviving activated abilities, simultaneous elimination with layered control, restoration to a surviving controller, residual foreign-owned permanent exile, delayed-trigger controller handling, and survival of resolved noncontrol effects. Control fixtures use `layers::layer::CONTROL` and assert the intended controller before elimination, preventing a fixture with an inactive layer from passing accidentally.
+
+The surviving-ability case independently reproduced a genuine defect: removing the source owner's objects also removed another player's activated ability. The Builder corrected it; all seven independent checks pass afterward. These are bounded acceptance checks, not comprehensive verification of multiplayer rules or a VERIFIED confidence promotion.
+
+## Independent targeting review
+
+The reviewer independently read 601.2c, 608.2b and 115.5 in the [official June 19, 2026 rules PDF](https://media.wizards.com/2026/downloads/MagicCompRules%2020260619.pdf); the September TXT endpoint was unavailable during this review. `crates/mtg-engine/tests/targeting_review.rs` contains ten acceptance cases. Five initially failed: valid distinct-target assignments hidden by greedy selection, player qualifiers ignored during resolution, nonadjacent duplicate targets accepted within one occurrence, nonexistent targets silently replaced, and a multi-object group's second target checked against a subsequent player's specification. The Builder corrected these defects; all ten checks pass.
+
+The other checks protect source-versus-stack identity, self-targeting prohibition, leave/reenter identities, departed players, and legal reuse across separate target occurrences. Invalid-answer checks also require retaining the original question and accepting a subsequent valid answer. This establishes bounded independent acceptance, not complete targeting verification or VERIFIED status.

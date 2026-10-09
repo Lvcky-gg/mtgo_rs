@@ -48,6 +48,18 @@
     {
       "primitive": "commander.return_choice",
       "evidence": []
+    },
+    {
+      "primitive": "mana.payment_scoped",
+      "evidence": []
+    },
+    {
+      "primitive": "targeting.selection_scoped",
+      "evidence": []
+    },
+    {
+      "primitive": "mana.restriction_scoped",
+      "evidence": []
     }
   ],
   "cards": {
@@ -73,6 +85,21 @@
     "fixture.commander_return": [
       "commander.return_choice",
       "zone_transition",
+      "priority"
+    ],
+    "fixture.colored_generic_payment": [
+      "mana.payment_scoped"
+    ],
+    "fixture.phased_out_targeting": [
+      "targeting.selection_scoped",
+      "casting",
+      "zone_transition",
+      "priority",
+      "damage"
+    ],
+    "fixture.restricted_mana_source": [
+      "mana.restriction_scoped",
+      "mana.payment_scoped",
       "priority"
     ]
   }

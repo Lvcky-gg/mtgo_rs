@@ -318,7 +318,17 @@ pub fn cast_forbidden(
             .contains(&who)
             && eval::matches(&ctx, spells, object).unwrap_or(false)
             && beyond.is_none_or(|n| {
-                state.spells_by_player.get(&who).copied().unwrap_or(0) >= u32::from(n)
+                // "More than one noncreature spell each turn" counts only those.
+                let noncreature = *spells
+                    == mtg_ir::ObjectFilter::Not(Box::new(mtg_ir::ObjectFilter::HasType(
+                        mtg_core::CardType::Creature,
+                    )));
+                let cast = if noncreature {
+                    &state.noncreature_spells_by_player
+                } else {
+                    &state.spells_by_player
+                };
+                cast.get(&who).copied().unwrap_or(0) >= u32::from(n)
             })
     })
 }
@@ -355,11 +365,43 @@ pub fn timing_allows(
 
     // Instants and anything with flash may be cast whenever its controller has
     // priority; everything else needs sorcery timing (CR 302.6, CR 307.5).
-    let instant_speed = ch.has_type(mtg_core::CardType::Instant)
+    let instant_speed = (ch.has_type(mtg_core::CardType::Instant)
         || has_flash(state, cards, object)
-        || flash_permitted(state, cards, object, controller);
+        || flash_permitted(state, cards, object, controller))
+        && !sorcery_speed_only(state, cards, controller);
 
     (instant_speed || sorcery_time) && cast_conditions_met(state, cards, object, controller)
+}
+
+/// Whether "can cast spells only any time they could cast a sorcery" binds this player.
+pub fn sorcery_speed_only(state: &GameState, cards: &dyn PrintedCards, player: PlayerId) -> bool {
+    let chars = ComputedChars(cards);
+    crate::layers::effects(state, cards).iter().any(|e| {
+        let Modification::Restriction(Restriction::CastOnlyAsSorcery { who }) = &e.modification
+        else {
+            return false;
+        };
+        let Some(controller) = e
+            .controller
+            .or_else(|| crate::layers::controller(state, e.source))
+        else {
+            return false;
+        };
+        let ctx = Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        eval::players(&ctx, who)
+            .unwrap_or_default()
+            .contains(&player)
+    })
 }
 
 /// "You may cast creature spells as though they had flash" from a permanent its caster
@@ -383,8 +425,11 @@ pub(crate) fn flash_permitted(
         bindings: crate::empty_bindings(),
     };
     let granted = crate::layers::effects(state, cards).iter().any(|e| {
+        // A resolved spell's effect ("you may cast spells this turn as though they had
+        // flash") belongs to whoever cast it, its source long gone.
         matches!(&e.modification, Modification::Restriction(Restriction::FlashFor(f))
-            if crate::layers::controller(state, e.source) == Some(controller)
+            if e.controller.or_else(|| crate::layers::controller(state, e.source))
+                == Some(controller)
                 && eval::matches(&ctx_for(e.source), f, object).unwrap_or(false))
     });
     if granted {
@@ -554,6 +599,8 @@ pub fn additional_payable(
         A::PayLife {
             amount: Value::Fixed(n),
         } => state.player(who).life >= *n,
+        // "Pay X life": X can be 0.
+        A::PayLife { amount: Value::X } => true,
         A::PayEnergy {
             amount: Value::Fixed(n),
         } => i64::from(state.player(who).energy) >= i64::from(*n),
@@ -601,6 +648,8 @@ pub fn additional_payable(
             filter: mtg_ir::ObjectFilter::IsSelf,
             ..
         } => obj.zone.zone == mtg_core::Zone::Battlefield,
+        // "Discard your hand": always possible.
+        A::DiscardHand => true,
         // "Discard this card" — cycling and friends, from the hand.
         A::Discard {
             count: Value::Fixed(1),
@@ -793,8 +842,11 @@ pub fn spell_extra_cost(
     if cc.and_then(|c| c.cast_from) == Some(mtg_core::Zone::Graveyard) {
         extend(cast_from_additional(face, mtg_core::Zone::Graveyard).additional);
     }
-    if let Some(alt @ (mtg_ir::ability::AltCost::Pay | mtg_ir::ability::AltCost::Emerge)) =
-        cc.and_then(|c| c.alt_cost)
+    if let Some(
+        alt @ (mtg_ir::ability::AltCost::Pay
+        | mtg_ir::ability::AltCost::Emerge
+        | mtg_ir::ability::AltCost::Evoke),
+    ) = cc.and_then(|c| c.alt_cost)
     {
         extend(
             face.abilities

@@ -55,6 +55,8 @@ pub enum AdditionalCost {
         what: Selector,
         count: Value,
     },
+    /// "Discard your hand" (Lion's Eye Diamond): payable with any hand, even none.
+    DiscardHand,
     Discard {
         count: Value,
         filter: ObjectFilter,

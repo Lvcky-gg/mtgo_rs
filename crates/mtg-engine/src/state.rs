@@ -21,6 +21,16 @@ use mtg_ir::effect::{Duration, Modification};
 use crate::triggers::TriggerQueue;
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
+pub struct RestrictedMana {
+    pub player: PlayerId,
+    pub source: ObjectId,
+    pub amounts: [u16; 6],
+    /// Every restriction must hold; nesting intersects permissions.
+    pub restrictions: Vec<(mtg_ir::ObjectFilter, bool)>,
+}
+
+#[derive(Clone, Debug)]
 pub struct GameState {
     /// Every object in every zone, including the stack.
     pub objects: BTreeMap<ObjectId, GameObject>,
@@ -28,6 +38,8 @@ pub struct GameState {
     /// unordered and derive membership from `GameObject::zone`.
     pub zone_order: BTreeMap<ZoneRef, Vec<ObjectId>>,
     pub players: BTreeMap<PlayerId, PlayerState>,
+    /// Restricted units are a subset of the ordinary mana pool counts.
+    pub restricted_mana: Vec<RestrictedMana>,
     /// Seating order. Turn order and APNAP order both derive from this.
     pub turn_order: Vec<PlayerId>,
 
@@ -89,6 +101,9 @@ pub struct GameState {
     /// Spells each player cast this turn and last turn (werewolves, CR 702.145).
     pub spells_by_player: BTreeMap<PlayerId, u32>,
     pub spells_by_player_last_turn: BTreeMap<PlayerId, u32>,
+    /// Noncreature spells each player cast this turn ("their first noncreature spell
+    /// each turn").
+    pub noncreature_spells_by_player: BTreeMap<PlayerId, u32>,
     /// Cards each player drew this turn ("your second card each turn").
     pub draws_this_turn: BTreeMap<PlayerId, u32>,
     /// Permanents put into a graveyard from the battlefield this turn, by the id they had
@@ -459,6 +474,11 @@ impl CommanderState {
 pub struct CastContext {
     /// One per target slot, in slot order.
     pub targets: Vec<mtg_core::Target>,
+    /// One frozen specification per chosen target (or empty-slot placeholder).
+    /// Target counts may change later; group membership must not change with them.
+    pub target_specs: Option<Vec<mtg_ir::selector::TargetSpec>>,
+    /// Announcement occurrence for each target; distinctness within a group survives copying.
+    pub target_groups: Option<Vec<usize>>,
     /// Indices into `targets` that are placeholders for a slot left empty — an "up to"
     /// slot with nothing chosen, or a slot of a mode that was not chosen. They select
     /// nothing and do not count towards a spell's targets when it resolves (CR 608.2b).
@@ -648,6 +668,7 @@ impl GameState {
         Self {
             objects: BTreeMap::new(),
             zone_order: BTreeMap::new(),
+            restricted_mana: Vec::new(),
             players: seats
                 .iter()
                 .map(|p| (*p, PlayerState::new(*p, starting_life)))
@@ -669,6 +690,7 @@ impl GameState {
             spells_cast_this_turn: 0,
             spells_by_player: BTreeMap::new(),
             spells_by_player_last_turn: BTreeMap::new(),
+            noncreature_spells_by_player: BTreeMap::new(),
             draws_this_turn: BTreeMap::new(),
             died_this_turn: Vec::new(),
             monarch: None,
@@ -729,7 +751,8 @@ impl GameState {
 
     /// Players in APNAP order starting from the active player (CR 101.4). This is
     /// the order triggers go on the stack and the order simultaneous choices are
-    /// made in.
+    /// made in. Only players still in the game (CR 800.4a); the active player's seat
+    /// still starts the order after they have left (CR 800.4j).
     pub fn apnap(&self) -> Vec<PlayerId> {
         let n = self.turn_order.len();
         let start = self
@@ -737,7 +760,10 @@ impl GameState {
             .iter()
             .position(|p| *p == self.active_player)
             .unwrap_or(0);
-        (0..n).map(|i| self.turn_order[(start + i) % n]).collect()
+        (0..n)
+            .map(|i| self.turn_order[(start + i) % n])
+            .filter(|p| self.players.get(p).is_some_and(|s| !s.has_lost))
+            .collect()
     }
 
     pub fn objects_in(&self, zone: ZoneRef) -> Vec<ObjectId> {
@@ -752,7 +778,17 @@ impl GameState {
         }
     }
 
+    /// The permanents on the battlefield — not those phased out, which are treated as
+    /// though they don't exist (CR 702.26b).
     pub fn battlefield(&self) -> Vec<ObjectId> {
+        self.objects_in(ZoneRef::shared(Zone::Battlefield))
+            .into_iter()
+            .filter(|id| self.objects.get(id).is_none_or(|o| !o.phased_out))
+            .collect()
+    }
+
+    /// Everything on the battlefield, phased out or not.
+    pub fn battlefield_with_phased_out(&self) -> Vec<ObjectId> {
         self.objects_in(ZoneRef::shared(Zone::Battlefield))
     }
 
@@ -773,6 +809,7 @@ impl serde::Serialize for DiagnosticState<'_> {
             objects: _,
             zone_order: _,
             players: _,
+            restricted_mana: _,
             turn_order: _,
             turn: _,
             active_player: _,
@@ -801,6 +838,7 @@ impl serde::Serialize for DiagnosticState<'_> {
             spells_cast_this_turn: _,
             spells_by_player: _,
             spells_by_player_last_turn: _,
+            noncreature_spells_by_player: _,
             draws_this_turn: _,
             died_this_turn: _,
             monarch: _,
@@ -835,7 +873,10 @@ impl serde::Serialize for DiagnosticState<'_> {
             next_event: _,
             next_object: _,
         } = self.0;
-        let mut out = serializer.serialize_struct("GameStateDiagnostic", 63)?;
+        let mut out = serializer.serialize_struct(
+            "GameStateDiagnostic",
+            63 + usize::from(!self.0.restricted_mana.is_empty()),
+        )?;
         out.serialize_field("objects", &self.0.objects)?;
         out.serialize_field("zone_order", &self.0.zone_order)?;
         out.serialize_field("players", &self.0.players)?;
@@ -847,6 +888,9 @@ impl serde::Serialize for DiagnosticState<'_> {
         out.serialize_field("consecutive_passes", &self.0.consecutive_passes)?;
         out.serialize_field("continuous", &self.0.continuous)?;
         out.serialize_field("prevent_combat_damage", &self.0.prevent_combat_damage)?;
+        if !self.0.restricted_mana.is_empty() {
+            out.serialize_field("restricted_mana", &self.0.restricted_mana)?;
+        }
         out.serialize_field("damage_unpreventable", &self.0.damage_unpreventable)?;
         out.serialize_field("prevent_damage_to", &self.0.prevent_damage_to)?;
         out.serialize_field("upkeeps", &self.0.upkeeps)?;
@@ -876,6 +920,16 @@ impl serde::Serialize for DiagnosticState<'_> {
             "spells_by_player_last_turn",
             &self.0.spells_by_player_last_turn,
         )?;
+        // Omitted while empty, so snapshots of games without noncreature spells keep the
+        // digests they had before this field existed.
+        if self.0.noncreature_spells_by_player.is_empty() {
+            out.skip_field("noncreature_spells_by_player")?;
+        } else {
+            out.serialize_field(
+                "noncreature_spells_by_player",
+                &self.0.noncreature_spells_by_player,
+            )?;
+        }
         out.serialize_field("draws_this_turn", &self.0.draws_this_turn)?;
         out.serialize_field("died_this_turn", &self.0.died_this_turn)?;
         out.serialize_field("monarch", &self.0.monarch)?;

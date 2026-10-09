@@ -77,6 +77,45 @@ use crate::{
     state::{AffectedSet, ContinuousEffect, GameState},
 };
 
+/// Frozen target occurrences for a copy's pending retargeting decision.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "verification", derive(serde::Serialize))]
+pub struct Retargeting {
+    specs: Vec<mtg_ir::selector::TargetSpec>,
+    groups: Vec<usize>,
+    current: Vec<Target>,
+}
+impl Retargeting {
+    pub(crate) fn accepts(&self, kind: &ChoiceKind, answer: &Answer) -> bool {
+        let (ChoiceKind::ChooseTargets { slots, .. }, Answer::Targets(picked)) = (kind, answer)
+        else {
+            return false;
+        };
+        if picked.len() != slots.len() || picked.len() != self.current.len() {
+            return false;
+        }
+        let mut chosen = Vec::with_capacity(picked.len());
+        for (group, offered) in picked.iter().zip(slots) {
+            if group.len() != 1 || !offered.contains(&group[0]) {
+                return false;
+            }
+            chosen.push(group[0]);
+        }
+        for i in 0..chosen.len() {
+            for j in 0..i {
+                if chosen[i] == chosen[j]
+                    && (chosen[i] != self.current[i] || chosen[j] != self.current[j])
+                    && (self.groups[i] == self.groups[j]
+                        || self.specs[i].distinct_from_other_targets)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ResolveError {
     Eval(EvalError),
@@ -88,6 +127,7 @@ pub enum ResolveError {
         who: PlayerId,
         kind: Box<crate::choice::ChoiceKind>,
         because: Box<str>,
+        retargeting: Option<Retargeting>,
     },
     /// A primitive not yet implemented. Named so the gap is legible in a failure.
     Unsupported(&'static str),
@@ -134,6 +174,7 @@ pub struct ResolveCtx {
     pub modes: Option<Vec<u8>>,
     /// How many answers this run has consumed. Reset on every attempt.
     consumed: usize,
+    mana_restrictions: Vec<(mtg_ir::ObjectFilter, bool)>,
 }
 
 impl ResolveCtx {
@@ -149,6 +190,7 @@ impl ResolveCtx {
             answers: Vec::new(),
             modes: None,
             consumed: 0,
+            mana_restrictions: Vec::new(),
         }
     }
 
@@ -170,6 +212,7 @@ impl ResolveCtx {
             who,
             kind: Box::new(kind),
             because: because.into(),
+            retargeting: None,
         })
     }
 }
@@ -396,21 +439,44 @@ fn resolve_inner(
             Ok(())
         }
 
-        // Restricted mana is only ever made by the payment planner, for a spell it may pay
-        // for, and spent at once (see `mana::plan_spell`); the pool doesn't track
-        // restrictions, so it is never offered for tapping by hand.
-        Effect::SpendOnly { effect, .. } => resolve(state, cards, log, effect, rc),
+        Effect::SpendOnly {
+            only,
+            spells_only,
+            effect,
+        } => {
+            rc.mana_restrictions.push((only.clone(), *spells_only));
+            let result = resolve(state, cards, log, effect, rc);
+            rc.mana_restrictions.pop();
+            result
+        }
         Effect::AddMana { who, produces } => {
             let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
-            let chosen = state.objects.get(&rc.source).and_then(|o| o.chosen_color);
             for p in players {
-                for out in produces {
-                    let out = crate::mana::with_chosen_color(out, chosen);
-                    // "Add {G} for each creature you control": counted now.
-                    let out =
-                        &crate::mana::counted(state, cards, rc.source, rc.controller, rc.x, out);
+                // Made concrete by the source, "one mana of each color among …" expanded.
+                let made: Vec<ManaOutput> = produces
+                    .iter()
+                    .flat_map(|o| {
+                        crate::mana::concrete_outputs(state, cards, rc.source, rc.controller, o)
+                    })
+                    .collect();
+                for out in made {
+                    // "Add {G} for each creature you control": counted now — with this
+                    // resolution's targets ("for each card in target opponent's hand").
+                    let out = &match out {
+                        ManaOutput::Repeated { amount, output }
+                            if !matches!(amount, mtg_ir::Value::Fixed(_)) =>
+                        {
+                            let n = with_ctx(state, cards, rc, |ctx| eval::value(ctx, &amount))?;
+                            ManaOutput::Repeated {
+                                amount: mtg_ir::Value::Fixed(n.max(0)),
+                                output,
+                            }
+                        }
+                        other => other,
+                    };
                     let (color, amount) = resolve_output(out, rc);
                     if amount > 0 {
+                        let before = state.player(p).mana.amounts;
                         apply::apply(
                             state,
                             cause,
@@ -421,6 +487,19 @@ fn resolve_inner(
                             },
                             log,
                         );
+                        if !rc.mana_restrictions.is_empty() {
+                            let amounts = std::array::from_fn(|slot| {
+                                state.player(p).mana.amounts[slot].saturating_sub(before[slot])
+                            });
+                            if amounts.iter().any(|n| *n > 0) {
+                                state.restricted_mana.push(crate::state::RestrictedMana {
+                                    player: p,
+                                    source: rc.source,
+                                    amounts,
+                                    restrictions: rc.mana_restrictions.clone(),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -792,10 +871,24 @@ fn resolve_inner(
                 None => None,
             };
             let mut ids = objects_asking(state, cards, rc, what)?;
+            // "Search your library for …" (CR 701.19): searched, found or not.
+            if let Selector::ChosenBy {
+                chooser,
+                zone: Zone::Library,
+                ..
+            } = what
+                && let Some(player) = with_ctx(state, cards, rc, |ctx| eval::players(ctx, chooser))?
+                    .first()
+                    .copied()
+            {
+                apply::apply(state, cause, Event::LibrarySearched { player }, log);
+            }
             if *to == Zone::Library
                 && matches!(
                     position,
-                    mtg_ir::effect::ZonePosition::Top | mtg_ir::effect::ZonePosition::Bottom
+                    mtg_ir::effect::ZonePosition::Top
+                        | mtg_ir::effect::ZonePosition::Bottom
+                        | mtg_ir::effect::ZonePosition::BottomRandom
                 )
             {
                 let mut by_owner = std::collections::BTreeMap::<PlayerId, Vec<ObjectId>>::new();
@@ -805,7 +898,13 @@ fn resolve_inner(
                     }
                 }
                 ids = Vec::new();
-                for (owner, group) in by_owner {
+                for (owner, mut group) in by_owner {
+                    // A random order is the game's, from its seeded generator.
+                    if matches!(position, mtg_ir::effect::ZonePosition::BottomRandom) {
+                        state.rng.shuffle(&mut group);
+                        ids.extend(group);
+                        continue;
+                    }
                     let mut ordered =
                         ask_order(rc, owner, group, "order for your library, first is highest")?;
                     // Each top insertion goes above the previous one.
@@ -832,7 +931,8 @@ fn resolve_inner(
                     continue;
                 }
                 let index = match position {
-                    mtg_ir::effect::ZonePosition::Bottom => Some(u32::MAX),
+                    mtg_ir::effect::ZonePosition::Bottom
+                    | mtg_ir::effect::ZonePosition::BottomRandom => Some(u32::MAX),
                     mtg_ir::effect::ZonePosition::FromTop(n) => Some(u32::from(*n)),
                     // "its owner's choice of the top or bottom of their library"
                     mtg_ir::effect::ZonePosition::OwnerChooses => {
@@ -942,6 +1042,20 @@ fn resolve_inner(
                 };
                 *from = mtg_ir::ObjectFilter::HasColor(COLORS[i.min(4)]);
                 *chosen = false;
+            }
+            // "Target player can't cast spells this turn": that player, fixed now.
+            if let mtg_ir::effect::Modification::Restriction(
+                mtg_ir::effect::Restriction::CantCast { who, .. },
+            ) = &mut modification
+                && matches!(who, Selector::Target { .. } | Selector::Bound(_))
+            {
+                let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+                *who = match players.as_slice() {
+                    [one] => Selector::Player(*one),
+                    several => {
+                        Selector::Union(several.iter().map(|p| Selector::Player(*p)).collect())
+                    }
+                };
             }
             // "Becomes the chosen color/type": the source's choice, fixed now.
             if let mtg_ir::effect::Modification::BecomesChosen(choice) = &modification {
@@ -1111,10 +1225,16 @@ fn resolve_inner(
         }
 
         Effect::UnlessPays {
+            payer,
             cost,
             times,
             otherwise,
         } => {
+            // "… unless that player pays {1}": the first player named; nobody to pay
+            // means nothing is paid.
+            let who = with_ctx(state, cards, rc, |ctx| eval::players(ctx, payer))?
+                .into_iter()
+                .find(|p| state.players.get(p).is_some_and(|s| !s.has_lost));
             // Mana and life ("cumulative upkeep—pay 1 life") are understood.
             let mut life_each = 0;
             for part in &cost.additional {
@@ -1135,18 +1255,19 @@ fn resolve_inner(
             };
             let life = life_each * n;
             // Life can be paid only from a life total at least that large (CR 119.4).
-            if state.player(rc.controller).life >= life
-                && crate::mana::can_pay(state, cards, rc.controller, &mana, rc.x)
-                && ask_confirm(rc, rc.controller, "pay the cost?")?
-                && let Some(plan) = crate::mana::plan(state, cards, rc.controller, &mana, rc.x)
+            if let Some(who) = who
+                && state.player(who).life >= life
+                && crate::mana::can_pay(state, cards, who, &mana, rc.x)
+                && ask_confirm(rc, who, "pay the cost?")?
+                && let Some(plan) = crate::mana::plan(state, cards, who, &mana, rc.x)
             {
-                pay_plan(state, cards, log, rc.controller, &plan);
+                pay_plan(state, cards, log, who, &plan);
                 if life > 0 {
                     apply::apply(
                         state,
                         cause,
                         Event::LifeChanged {
-                            player: rc.controller,
+                            player: who,
                             delta: -life,
                         },
                         log,
@@ -1477,7 +1598,7 @@ fn resolve_inner(
         }
 
         Effect::ExileLinked { what } => {
-            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            let ids = objects_asking(state, cards, rc, what)?;
             let mut moved = Vec::new();
             for id in ids {
                 if let Some(new_id) = move_to_at(state, log, id, Zone::Exile, None, cause) {
@@ -2520,6 +2641,115 @@ fn resolve_inner(
             }
             Ok(())
         }
+        Effect::PhaseOut { what } => {
+            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            let mut out = Vec::new();
+            for id in ids {
+                if state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|o| o.zone.zone == Zone::Battlefield && !o.phased_out)
+                {
+                    out.push(id);
+                }
+            }
+            // Attached Auras and Equipment phase out with it, indirectly (CR 702.26g).
+            let attached: Vec<ObjectId> = state
+                .battlefield()
+                .into_iter()
+                .filter(|a| {
+                    state
+                        .objects
+                        .get(a)
+                        .and_then(|o| o.attached_to)
+                        .is_some_and(|host| out.contains(&host))
+                })
+                .collect();
+            out.extend(
+                attached
+                    .into_iter()
+                    .filter(|a| !out.contains(a))
+                    .collect::<Vec<_>>(),
+            );
+            let events: Vec<Event> = out
+                .into_iter()
+                .map(|object| Event::PhasedOut { object, out: true })
+                .collect();
+            if !events.is_empty() {
+                apply::apply_simultaneous(state, cause, events, log);
+            }
+            Ok(())
+        }
+        Effect::LoseGame { who } | Effect::WinGame { who } => {
+            let named = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+            let win = matches!(effect, Effect::WinGame { .. });
+            let losers: Vec<PlayerId> = state
+                .apnap()
+                .into_iter()
+                .filter(|p| named.contains(p) != win)
+                .collect();
+            let events: Vec<Event> = losers
+                .into_iter()
+                .map(|player| Event::Lost {
+                    player,
+                    reason: mtg_core::LossReason::Effect,
+                })
+                .collect();
+            if !events.is_empty() {
+                apply::apply_simultaneous(state, cause, events, log);
+            }
+            Ok(())
+        }
+        // CR 115.7d — the targets stay unless the controller picks others; a target that
+        // becomes the target anew is targeted again (CR 115.7).
+        Effect::ChangeTargets { what, must } => {
+            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            for id in ids {
+                let Some(obj) = state.objects.get(&id) else {
+                    continue;
+                };
+                if obj.zone.zone != Zone::Stack {
+                    continue;
+                }
+                let (before, owner) = match obj.cast_context.as_ref() {
+                    Some(c) => (c.targets.clone(), obj.controller),
+                    None => continue,
+                };
+                let Some(chosen) = targets_again(
+                    state,
+                    state,
+                    cards,
+                    rc,
+                    id,
+                    (id, owner),
+                    ("choose new targets", *must),
+                )?
+                else {
+                    continue;
+                };
+                if chosen == before {
+                    continue;
+                }
+                let mut events = vec![Event::TargetsChanged {
+                    object: id,
+                    targets: chosen.clone(),
+                }];
+                events.extend(
+                    chosen
+                        .iter()
+                        .zip(&before)
+                        .filter(|(new, old)| new != old)
+                        .map(|(new, _)| Event::Targeted {
+                            object: id,
+                            target: *new,
+                        }),
+                );
+                for e in events {
+                    apply::apply(state, cause, e, log);
+                }
+            }
+            Ok(())
+        }
         Effect::CopySpell {
             what,
             may_change_targets,
@@ -2534,12 +2764,12 @@ fn resolve_inner(
                 if !spell {
                     continue;
                 }
+                let copy = state.new_object_id();
                 let targets = if *may_change_targets {
-                    new_targets(state, cards, rc, original)?
+                    new_targets(state, cards, rc, original, copy)?
                 } else {
                     None
                 };
-                let copy = state.new_object_id();
                 apply::apply(
                     state,
                     cause,
@@ -2883,6 +3113,7 @@ fn cast_during_resolution(
     if !targeted.is_empty() {
         apply::apply_simultaneous(state, Cause::PlayerAction(who), targeted, log);
     }
+    count_noncreature_spell(state, cards, on_stack, who);
     apply::apply(
         state,
         Cause::PlayerAction(who),
@@ -2895,6 +3126,24 @@ fn cast_during_resolution(
     Ok(true)
 }
 
+/// Count a spell being cast toward "their first noncreature spell each turn". Counted
+/// just before the cast event, so a trigger on that event sees the spell included.
+pub(crate) fn count_noncreature_spell(
+    state: &mut GameState,
+    cards: &dyn PrintedCards,
+    spell: ObjectId,
+    caster: PlayerId,
+) {
+    if crate::layers::compute(state, cards, spell)
+        .is_some_and(|c| !c.has_type(mtg_core::CardType::Creature))
+    {
+        *state
+            .noncreature_spells_by_player
+            .entry(caster)
+            .or_insert(0) += 1;
+    }
+}
+
 /// CR 707.10c — "you may choose new targets for the copy": the copier picks, slot by slot,
 /// among what is legal now, the original's targets included. `None` keeps them.
 fn new_targets(
@@ -2902,55 +3151,137 @@ fn new_targets(
     cards: &dyn PrintedCards,
     rc: &mut ResolveCtx,
     original: ObjectId,
+    copy: ObjectId,
 ) -> Result<Option<Vec<Target>>, ResolveError> {
-    let specs = crate::targeting::specs_of(state, cards, original);
-    let current: Vec<Target> = state
+    // Evaluate the copy's prospective identity and ownership without putting it on
+    // the real stack before targets have been decided (CR 707.10c, 115.5).
+    let mut preview = state.clone();
+    apply::apply(
+        &mut preview,
+        Cause::Resolution(rc.source),
+        Event::SpellCopied {
+            original,
+            copy,
+            controller: rc.controller,
+            targets: None,
+        },
+        &mut Vec::new(),
+    );
+    let controller = rc.controller;
+    targets_again(
+        state,
+        &preview,
+        cards,
+        rc,
+        original,
+        (copy, controller),
+        ("choose new targets for the copy", false),
+    )
+}
+
+/// Let the resolving ability's controller choose new targets for `original`'s announced
+/// target slots (each may keep its current target). Legality is judged in `judge` for
+/// `subject` controlled by its controller: a copy not yet on the stack, or the spell
+/// itself. `None` when it has no targets.
+fn targets_again(
+    state: &GameState,
+    judge: &GameState,
+    cards: &dyn PrintedCards,
+    rc: &mut ResolveCtx,
+    original: ObjectId,
+    (subject, subject_controller): (ObjectId, PlayerId),
+    (because, must_change): (&str, bool),
+) -> Result<Option<Vec<Target>>, ResolveError> {
+    let Some(cast) = state
         .objects
         .get(&original)
         .and_then(|o| o.cast_context.as_ref())
-        .map(|c| c.targets.clone())
-        .unwrap_or_default();
-    if specs.is_empty() || current.is_empty() {
+    else {
+        return Ok(None);
+    };
+    let frozen = cast.target_specs.clone().unwrap_or_else(|| {
+        let specs = crate::targeting::specs_of(state, cards, original);
+        (0..cast.targets.len())
+            .filter_map(|i| specs.get(i).or_else(|| specs.last()).cloned())
+            .collect()
+    });
+    if frozen.len() != cast.targets.len() {
+        return Err(ResolveError::Unsupported(
+            "missing copied target specifications",
+        ));
+    }
+    let active: Vec<_> = (0..cast.targets.len())
+        .filter(|i| !cast.empty_slots.contains(&(*i as u8)))
+        .collect();
+    if active.is_empty() {
         return Ok(None);
     }
+    let current: Vec<_> = active.iter().map(|i| cast.targets[*i]).collect();
+    let specs: Vec<_> = active.iter().map(|i| frozen[*i].clone()).collect();
+    let groups = active
+        .iter()
+        .map(|i| {
+            cast.target_groups
+                .as_ref()
+                .and_then(|g| g.get(*i))
+                .copied()
+                .unwrap_or(*i)
+        })
+        .collect();
     let slots: Vec<Vec<Target>> = specs
         .iter()
-        .enumerate()
-        .map(|(i, spec)| {
-            let mut legal =
-                crate::targeting::legal_targets(state, cards, spec, original, rc.controller, &[]);
-            if let Some(t) = current.get(i)
-                && !legal.contains(t)
-            {
-                legal.insert(0, *t);
+        .zip(&current)
+        .map(|(spec, keep)| {
+            let mut legal = crate::targeting::legal_targets(
+                judge,
+                cards,
+                spec,
+                subject,
+                subject_controller,
+                &[],
+            );
+            if !legal.contains(keep) {
+                legal.insert(0, *keep);
+            }
+            // CR 115.7a — "change the target": to another one, when there is one.
+            if must_change && legal.len() > 1 {
+                legal.retain(|t| t != keep);
             }
             legal
         })
         .collect();
-    let answer = rc.need(
-        rc.controller,
-        crate::choice::ChoiceKind::ChooseTargets {
-            // Retargeting a copy preserves the number of existing targets.
-            optional: vec![false; slots.len()],
-            slots: slots.clone(),
-        },
-        "choose new targets for the copy",
-    )?;
-    let Answer::Targets(picked) = answer else {
-        return Ok(None);
+    let check = Retargeting {
+        specs,
+        groups,
+        current,
     };
-    let chosen: Vec<Target> = current
-        .iter()
-        .enumerate()
-        .map(|(i, keep)| {
-            picked
-                .get(i)
-                .and_then(|p| p.first())
-                .filter(|t| slots.get(i).is_some_and(|s| s.contains(t)))
-                .copied()
-                .unwrap_or(*keep)
-        })
-        .collect();
+    let kind = ChoiceKind::ChooseTargets {
+        optional: vec![false; slots.len()],
+        slots,
+    };
+    let answer = rc
+        .need(rc.controller, kind.clone(), because)
+        .map_err(|error| match error {
+            ResolveError::Ask {
+                who, kind, because, ..
+            } => ResolveError::Ask {
+                who,
+                kind,
+                because,
+                retargeting: Some(check.clone()),
+            },
+            other => other,
+        })?;
+    if !check.accepts(&kind, &answer) {
+        return Err(ResolveError::Unsupported("invalid copied target answer"));
+    }
+    let Answer::Targets(picked) = answer else {
+        unreachable!()
+    };
+    let mut chosen = cast.targets.clone();
+    for (index, picked) in active.iter().zip(picked) {
+        chosen[*index] = picked[0];
+    }
     Ok(Some(chosen))
 }
 
@@ -2963,7 +3294,14 @@ fn resolve_output(out: &ManaOutput, rc: &ResolveCtx) -> (Option<mtg_core::Color>
         // missing choice produces *some* mana rather than silently none.
         // Replaced by the source's chosen color before this is reached; none chosen,
         // none made.
-        ManaOutput::ChosenColor => (None, 0),
+        ManaOutput::ChosenColor
+        | ManaOutput::CommanderIdentity
+        | ManaOutput::ExiledCardColors
+        | ManaOutput::ColorsAmong(_)
+        | ManaOutput::LandColors(_)
+        | ManaOutput::EachColorAmong(_) => (None, 0),
+        // Made concrete by its source first; unchosen, its own color.
+        ManaOutput::OrChosen(c) => (Some(*c), 1),
         ManaOutput::AnyOf(cs) => {
             let picked = rc
                 .mana_choice
@@ -3287,6 +3625,7 @@ fn pay_plan(
         }
     }
 
+    crate::mana::consume_restricted(state, who, plan);
     for (slot, amount) in plan.spend.iter().enumerate() {
         if *amount == 0 {
             continue;
@@ -3468,12 +3807,6 @@ fn deal_damage(
     for (t, n) in shares {
         let t = *t;
         if *n == 0 {
-            continue;
-        }
-        // Protection prevents damage from sources with the quality.
-        if let Target::Object(o) = t
-            && crate::eval::protected_from(state, cards, o, src)
-        {
             continue;
         }
         let amount = crate::prevention::prevent(state, cards, src, t, *n, false, &mut events);
@@ -3905,9 +4238,9 @@ pub(crate) fn entered(
                         delta: 1,
                     });
                 }
-                R::EntersChoosing(choice) => {
+                R::EntersChoosing(_) | R::EntersChoosingColorExcept(_) => {
                     // The answer picks one of the options; none given, the first.
-                    let options = entry_options(cards, *choice);
+                    let options = entry_options_of(cards, &r.kind);
                     let picked = match &answer {
                         Some(Answer::Modes(m)) => m.first().copied().unwrap_or(0) as usize,
                         _ => 0,
@@ -3996,6 +4329,24 @@ pub(crate) fn entered(
         });
         if tapped {
             events.push(Event::EnteredTapped { object: id });
+        }
+    }
+    // Riot from another permanent, answered when the permanent's own abilities asked
+    // nothing (see `enter_question`).
+    let asked_own = !obj.face_down
+        && face.abilities.iter().any(|a| {
+            matches!(&a.kind, mtg_ir::AbilityKind::ReplacementEffect(r)
+                if matches!(r.matches, mtg_ir::EventPattern::Enters { who: mtg_ir::ObjectFilter::IsSelf }))
+        });
+    if !asked_own && granted_riot(state, cards, id) {
+        if yes {
+            events.push(Event::CountersChanged {
+                object: id,
+                kind: mtg_core::CounterKind::PlusOnePlusOne,
+                delta: 1,
+            });
+        } else {
+            haste = true;
         }
     }
     // Devour: the chosen creatures are sacrificed as it enters, and it gets its counters.
@@ -4164,6 +4515,24 @@ pub(crate) fn discard(
     Some(new_object)
 }
 
+/// The options of an "as it enters, choose …" replacement.
+fn entry_options_of(
+    cards: &dyn PrintedCards,
+    kind: &mtg_ir::effect::ReplacementKind,
+) -> Vec<(Box<str>, Option<mtg_core::Color>, Option<mtg_core::Subtype>)> {
+    use mtg_ir::effect::ReplacementKind as R;
+    match kind {
+        R::EntersChoosing(choice) => entry_options(cards, *choice),
+        R::EntersChoosingColorExcept(except) => {
+            entry_options(cards, mtg_ir::effect::EntryChoice::Color)
+                .into_iter()
+                .filter(|(_, c, _)| *c != Some(*except))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// What a permanent may choose as it enters, with the label each choice is shown as.
 fn entry_options(
     cards: &dyn PrintedCards,
@@ -4209,11 +4578,16 @@ pub(crate) fn enter_question(
     use crate::choice::ChoiceKind;
     use mtg_ir::effect::ReplacementKind as R;
     let obj = state.objects.get(&id)?;
-    if obj.face_down {
-        return None;
-    }
     let confirm = |q: String| Some((ChoiceKind::Confirm, q, Answer::Bool(false)));
-    cards
+    let riot = || {
+        granted_riot(state, cards, id)
+            .then(|| confirm("have it enter with a +1/+1 counter? If not, it has haste".into()))
+            .flatten()
+    };
+    if obj.face_down {
+        return riot();
+    }
+    let own = cards
         .face(obj.card, obj.face)?
         .abilities
         .iter()
@@ -4251,14 +4625,32 @@ pub(crate) fn enter_question(
                         Answer::Objects(Vec::new()),
                     ))
                 }
-                R::EntersChoosing(choice) => {
-                    let options = entry_options(cards, *choice);
+                // Mox Diamond: which card to discard, if any; none means the graveyard.
+                R::EntersIfDiscards(filter) => {
+                    let from = discard_options(state, cards, id, filter);
+                    if from.is_empty() {
+                        return None;
+                    }
+                    Some((
+                        ChoiceKind::ChooseObjects {
+                            from,
+                            min: 0,
+                            max: 1,
+                        },
+                        "discard a card? If you don't, it goes to the graveyard instead".into(),
+                        Answer::Objects(Vec::new()),
+                    ))
+                }
+                R::EntersChoosing(_) | R::EntersChoosingColorExcept(_) => {
+                    let options = entry_options_of(cards, kind);
                     if options.is_empty() {
                         return None;
                     }
-                    let what = match choice {
-                        mtg_ir::effect::EntryChoice::Color => "choose a color",
-                        mtg_ir::effect::EntryChoice::CreatureType => "choose a creature type",
+                    let what = match kind {
+                        R::EntersChoosing(mtg_ir::effect::EntryChoice::CreatureType) => {
+                            "choose a creature type"
+                        }
+                        _ => "choose a color",
                     };
                     Some((
                         ChoiceKind::ChooseModes {
@@ -4273,7 +4665,76 @@ pub(crate) fn enter_question(
                 _ => None,
             },
             _ => None,
+        });
+    own.or_else(riot)
+}
+
+/// Whether another permanent gives this one riot as it enters ("nontoken creatures you
+/// control have riot"). It asks only when the permanent's own abilities ask nothing.
+fn granted_riot(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) -> bool {
+    use mtg_ir::effect::ReplacementKind as R;
+    state.battlefield().into_iter().any(|other| {
+        let Some(o) = state
+            .objects
+            .get(&other)
+            .filter(|o| other != id && !o.face_down)
+        else {
+            return false;
+        };
+        let Some(f) = cards.face(o.card, o.face) else {
+            return false;
+        };
+        f.abilities.iter().any(|a| match &a.kind {
+            mtg_ir::AbilityKind::ReplacementEffect(mtg_ir::effect::Replacement {
+                matches: mtg_ir::EventPattern::Enters { who },
+                kind: R::EntersWithCounterOrHaste,
+            }) if *who != mtg_ir::ObjectFilter::IsSelf => {
+                with_ctx(state, cards, &ResolveCtx::new(other, o.controller), |ctx| {
+                    eval::matches(ctx, who, id)
+                })
+                .unwrap_or(false)
+            }
+            _ => false,
         })
+    })
+}
+
+/// The cards in the controller's hand that may be discarded for `EntersIfDiscards`.
+pub(crate) fn discard_options(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    id: ObjectId,
+    filter: &mtg_ir::ObjectFilter,
+) -> Vec<ObjectId> {
+    let Some(controller) = state.objects.get(&id).map(|o| o.controller) else {
+        return Vec::new();
+    };
+    let hand = state.objects_in(ZoneRef::of(Zone::Hand, controller));
+    with_ctx(state, cards, &ResolveCtx::new(id, controller), |ctx| {
+        let mut out = Vec::new();
+        for card in &hand {
+            if *card != id && eval::matches(ctx, filter, *card)? {
+                out.push(*card);
+            }
+        }
+        Ok(out)
+    })
+    .unwrap_or_default()
+}
+
+/// Mox Diamond's replacement, if the face has one: the filter for the discarded card.
+pub(crate) fn enters_if_discards(
+    cards: &dyn PrintedCards,
+    face: &mtg_ir::CardFace,
+) -> Option<mtg_ir::ObjectFilter> {
+    let _ = cards;
+    face.abilities.iter().find_map(|a| match &a.kind {
+        mtg_ir::AbilityKind::ReplacementEffect(mtg_ir::effect::Replacement {
+            kind: mtg_ir::effect::ReplacementKind::EntersIfDiscards(f),
+            ..
+        }) => Some(f.clone()),
+        _ => None,
+    })
 }
 
 /// Ask, during a resolution, a permanent's enter question.

@@ -11,6 +11,7 @@ mod announced_mana;
 mod announced_mana_view;
 mod any_number;
 mod any_player_activates;
+mod arcane_denial;
 mod audit;
 mod aura_protection;
 mod backup;
@@ -3720,3 +3721,75 @@ mod remove_all_counters;
 mod next_turn_pumps;
 
 mod untap_goad;
+
+mod unless_player_pays;
+
+mod conditional_free_casts;
+
+mod change_targets;
+
+mod spirit_guides;
+
+mod pacts;
+
+mod uncounterable;
+
+mod abolisher;
+
+mod rituals;
+
+mod flash_this_turn;
+
+mod command_tower;
+
+mod orims_chant;
+
+mod cyclonic_rift;
+
+mod drannith;
+
+mod seedborn;
+
+mod teferi_raveler;
+
+mod thassas_oracle;
+
+mod moxen;
+
+mod fellwar;
+
+mod toxic_deluge;
+
+mod deafening_silence;
+
+mod grove;
+
+mod city_of_traitors;
+
+mod thriving_lands;
+
+mod enters_tapped_if;
+
+mod choose_both;
+
+mod thrasios;
+
+mod bloom_tender;
+
+mod extra_mana;
+
+mod archivist;
+
+mod endurance;
+
+mod mox_diamond;
+
+mod ragavan;
+
+mod edh_staples;
+
+mod propaganda;
+
+mod chaos_warp;
+
+mod teferis_protection;

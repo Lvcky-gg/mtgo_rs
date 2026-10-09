@@ -87,6 +87,16 @@ pub enum Value {
     BasicLandTypesAmong(Box<Selector>),
     /// How many spells these players have cast this turn.
     SpellsCastThisTurn(Box<Selector>),
+    /// One value or another, as a condition holds: "choose one; with a commander, both"
+    /// is `If { you control a commander, 2, 1 }`.
+    If {
+        cond: Box<crate::trigger::Condition>,
+        then: Box<Value>,
+        otherwise: Box<Value>,
+    },
+    /// The most spells any one of these players has cast this turn ("if an opponent cast
+    /// three or more spells this turn").
+    MostSpellsCastThisTurn(Box<Selector>),
     /// How many cards these players have drawn this turn.
     CardsDrawnThisTurn(Box<Selector>),
     /// A number the controller announces on resolution, within bounds.

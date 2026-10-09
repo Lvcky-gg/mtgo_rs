@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::value::Value;
 
+/// `Selector::You`, for serde defaults.
+pub fn you() -> Selector {
+    Selector::You
+}
+
+/// Whether a selector is `You`, to leave a default out when serializing.
+pub fn is_you(s: &Selector) -> bool {
+    *s == Selector::You
+}
+
 /// Which set of objects or players an effect acts on.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Selector {
@@ -27,6 +37,9 @@ pub enum Selector {
     DefendingPlayer,
     /// The player this Aura is attached to (a Curse: "enchant player").
     EnchantedPlayer,
+    /// One particular player, fixed as an effect began: "target player can't cast spells
+    /// this turn" still means that player after the spell has left the stack.
+    Player(mtg_core::PlayerId),
     /// A target chosen on announcement. `index` selects which of the ability's
     /// targets, so "destroy target creature, then target player draws" is
     /// unambiguous.
@@ -172,6 +185,13 @@ pub enum ObjectFilter {
     Kicked,
     /// "With {X} in its mana cost".
     HasXInCost,
+    /// Some player's commander (CR 903.3) — "if you control a commander".
+    IsCommander,
+    /// In this zone now: a card about to be cast "from anywhere other than their hands".
+    InZone(mtg_core::Zone),
+    /// A spell or ability on the stack with exactly one target ("target spell with a
+    /// single target").
+    SingleTarget,
     /// A spell or ability with a target this matches: "spell that targets a creature".
     TargetsObject(Box<ObjectFilter>),
     /// An ability on the stack, the complement of [`ObjectFilter::IsSpell`].

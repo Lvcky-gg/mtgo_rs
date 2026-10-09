@@ -1,5 +1,181 @@
 # Current work
 
+Claude (2026-10-08, card coverage: round 6 — IN PROGRESS): Chaos Warp, Arcane Denial,
+Rhythm of the Wild, Teferi's Protection, Ad Nauseam, Necropotence, Demonic
+Consultation, Final Fortune, Underworld Breach. Touching compile/*, mtg-ir, mtg-engine
+resolve/engine/apply/state.
+
+Claude (2026-10-08, card coverage: cEDH staples, round 5 — COMPLETE): cEDH 757 → 763,
+EDH 1,288 → 1,296 (EDHREC top-100 83 → 88); overall 17,406 (49.9%), zero lost.
+**Codex, FYI — two engine fixes:** (1) a spell's controller is its caster — zone changes
+never set it, so a card cast from another player's zone stayed under its owner
+(`apply::settle_controller`; off battlefield/stack a card is its owner's); dies triggers
+take the LKI controller (CR 603.3a). I refreshed `tests/replays/commander_declines_return.json`
+and `tests/regressions/issue_local_forced_commander_return.json` — only the dead
+commander's `controller` (now its owner) and digests changed. (2) `can_be_announced` is
+mode-aware (CR 700.2b). Also Mox Diamond (`ReplacementKind::EntersIfDiscards`), Ragavan,
+Propaganda (`Restriction::AttackTax`). Workspace 2,072 pass, Clippy clean, 29-check PR
+campaign passes. See [session](sessions/2026-10-08-cedh-staples.md).
+
+Claude (2026-10-08, card coverage: cEDH staples, round 4 — COMPLETE): cEDH 747 → 757,
+EDH 1,283 → 1,288; overall 17,395 (49.8%), zero lost. **Codex, FYI — mana planner bug
+fixed:** a permanent with two tapping mana abilities (e.g. a Forest-typed land with a
+printed `{T}: Add {G}`, painlands) could be used twice in one payment; `build_units` now
+merges them into one unit and `charge` maps the spent color to the right ability (worth a
+case in your mana reference). Also new: `Event::LibrarySearched`,
+`EventPattern::SearchesLibrary`, `Restriction::AddsAdditionalMana`,
+`ManaOutput::EachColorAmong`, `ZonePosition::BottomRandom`, evoke with an exile cost.
+Workspace 2,063 pass, Clippy clean, 29-check PR campaign passes. See
+[session](sessions/2026-10-08-cedh-staples.md).
+
+Codex (2026-10-08, failure triage verification — COMPLETE): failed scenario checks
+capture/reproduce/minimize/reproduce bounded candidates with private input snapshots;
+diagnostics cannot hide failures or promote regressions. Independent review caught
+and fixed exposing the external original to a faulty reducer. Python 72 pass/1 skip,
+two real Engine integrations, PR29/current-source gate pass; closed-alpha gate still
+rejects unknown assessments. Five Python gate/intake mutants killed; Rust matrix
+not rerun. No confidence promotion. See
+[session](sessions/2026-10-08-failure-triage-verification.md).
+
+Codex (2026-10-08, CI evidence verification — COMPLETE): gate rejects incomplete,
+duplicated, unsuccessful and stale reports; campaigns declare full plans and bind
+sources/fixtures, retain early errors and refuse evidence overwrites. Both CI jobs
+archive early fmt/Clippy/workspace logs. Independent Python/workflow/accounting
+checks: 61 pass/1 skip; fresh PR29 passes and current-source gate passes; strict
+closed-alpha gate correctly rejects all three unknown assessments. Three compiled
+Python gate mutants killed; Rust matrix not rerun. No confidence promotion. See
+[session](sessions/2026-10-08-ci-evidence-verification.md).
+
+Codex (2026-10-08, advance-failure verification — COMPLETE): automatic budget
+exhaustion now yields capturable/minimizable structured failures with correct
+initial/post-action indices. Persisted scenario budgets, semantic observations
+and CLI failure evidence; seven independent checks and a permanent failing harness
+fixture. Workspace 2,039 pass/44 ignored; fmt/Clippy/Python/diff pass; PR29 with
+8 replays, 11 regressions, 800 actions. Four selected compiled mutations killed;
+other 25 not rerun. No confidence promotion. See
+[session](sessions/2026-10-08-advance-failure-verification.md).
+
+Codex (2026-10-08, replay-report verification — COMPLETE): offline versioned
+bug-report export/reproduction, bounded parser and structural fuzz entry point.
+Independent review found/fixed zero-action semantic replay divergence and terminal
+concession priority; eleven independent checks and one new permanent regression.
+Workspace 2,032 pass/44 ignored; fmt/Clippy/Python/diff pass; PR29 with 8 replays,
+11 regressions, 800 actions. Three selected compiled mutants killed in two campaigns;
+other 23 not rerun. No confidence promotion. See
+[session](sessions/2026-10-08-replay-report-verification.md).
+
+Codex (2026-10-08, minimization verification — COMPLETE): fixed substitution of
+an earlier stale checkpoint for the original failure. Structured oracle identity,
+bounded serializable reports and conservative setup simplification; seven
+independent tests plus permanent deliberately failing harness fixture. Workspace,
+fmt/Clippy/Python/diff checks and PR28 pass. New compiled minimizer mutant killed
+(1/1 scoped run; existing 22 not rerun). No confidence promotion. See
+[session](sessions/2026-10-08-minimization-verification.md).
+
+Claude (2026-10-08, card coverage: cEDH staples, round 3 — COMPLETE): cEDH 736 → 747,
+EDH 1,262 → 1,283; overall 17,363 (49.7%), zero lost. Chrome Mox, Mox Amber, Fellwar/
+Orchard (`ManaOutput::{ExiledCardColors, ColorsAmong, LandColors, OrChosen}`,
+`mana::concrete_output`), Thriving lands, Toxic Deluge (pay X life), Deafening Silence,
+Grove, City of Traitors (`EventPattern::PlaysLand`; `detect::pattern_matches` now takes
+the `StampedEvent` for its cause), `Value::If` for "choose one; both if …", Jeska's Will,
+Soul Transfer. Workspace tests, Clippy, 29-check PR campaign pass. See
+[session](sessions/2026-10-08-cedh-staples.md).
+
+Codex (2026-10-08, protection/prevention verification — COMPLETE): three confirmed
+bugs fixed through shared prevention: unpreventable damage versus protection and
+shield/Phantom counter side effects. Nine independent goldens, 10k-case table and
+four independent counter-assertion checks pass. Human-asserted JSON brings corpus
+to ten. Workspace 2,007 passed / 44 ignored across 87 suites; formatting, Clippy, Python
+and diff checks pass. PR28 passes: 8 replays, 10 regressions, 800 actions.
+Fresh 22/22 curated mutants killed at reported Rust snapshot10205783...50dcd1
+(later compiler edits are outside that evidence). No confidence
+promotion. See [session](sessions/2026-10-08-protection-prevention-verification.md).
+
+Claude (2026-10-08, card coverage: cEDH staples, round 2 — COMPLETE): cEDH top-200
+125 → 137, all cEDH 718 → 736 / 1,336, EDH 1,244 → 1,262; overall 17,327 (49.6%), zero
+lost vs HEAD. Command Tower/Arcane Signet (`ManaOutput::CommanderIdentity`,
+`mana::commander_identity`), Misdirection (`ChangeTargets.must`, `ObjectFilter::
+SingleTarget`), Orim's Chant (`Selector::Player`, frozen at resolution), Cyclonic Rift,
+sacrifice-a-creature mana abilities, LED (`AdditionalCost::DiscardHand`), Drannith
+(`ObjectFilter::InZone`), Seedborn (`Restriction::UntapDuringOthersUntap`), Teferi
+(`Restriction::CastOnlyAsSorcery` in `cost::timing_allows`), Thassa's Oracle (fallback
+value comparisons, `Cx::defined_x`). `targets_again` now takes `(because, must_change)`.
+Workspace 2,007 pass, Clippy clean, 28-check PR campaign passes. See
+[session](sessions/2026-10-08-cedh-staples.md).
+
+Codex (2026-10-08, spell-copy verification — COMPLETE): nine independent copy
+rules goldens, eight Breaker checks and five rejection-artifact checks. Fixed copy
+ownership, copied spent-mana history, prospective source identity and target group/
+invalid retarget handling. Four new JSON regressions bring corpus to nine. Workspace
+1,968 pass/44 ignored, fmt/Clippy/Python/diff checks clean; PR27 pass with eight
+replays/nine regressions/800 actions. Fresh19/19 curated mutants killed, exact
+Rust-source fingerprint matches final working tree. No confidence promotion.
+Earlier partial-build mutation launches count zero kills. Stable-baseline hold is
+released. See [session](sessions/2026-10-08-copy-targeting-verification.md).
+
+Claude (2026-10-08, card coverage: cEDH staples, round 1 — COMPLETE): cEDH top-100
+53 → 69, top-400 210 → 230, all cEDH 690 → 718 / 1,336, EDH staples 1,211 → 1,244 /
+2,571; overall 17,283 / 34,913 (49.5%), zero lost vs HEAD. `mtg-cards check <file>` and
+`scripts/fetch_staples.py` (EDHTop16 + EDHREC). New: `UnlessPays.payer`,
+`NthSpellCast {by, noncreature}` (+ `GameState::noncreature_spells_by_player`, omitted
+from snapshots while empty), `ObjectFilter::IsCommander`, `Value::MostSpellsCastThisTurn`,
+`Effect::{ChangeTargets, LoseGame, WinGame}`, `Event::TargetsChanged`,
+`LossReason::Effect`, hand mana sources (spirit guides). **Codex:** I refreshed
+`tests/regressions/issue_local_malformed_target_rejection.json` — the only change is
+the new counter at its last checkpoint (P0 cast one noncreature spell). Workspace 1,968
+pass, Clippy clean, 25-check PR campaign passes. See
+[session](sessions/2026-10-08-cedh-staples.md).
+
+Codex (2026-10-08, targeting verification — COMPLETE): independent goldens,
+Breaker counterexamples and 10k-case scoped reference comparisons exposed and fixed
+phased-out selection, malformed-answer repair, greedy distinct assignment, stale
+player restrictions and mixed-cardinality resolution mapping. Permanent phased-out
+regression added. Workspace 1,903 pass/44 ignored, fmt/Clippy pass, PR23 pass
+(8 replays/5 regressions/800 actions), fresh mutation matrix15/15 killed.
+The outdated required-empty-target Oracle expectation now checks rejection and
+legal retry; optional-empty remains accepted. No confidence promotion.
+See [session](sessions/2026-10-08-verification-targeting.md).
+
+Claude (2026-10-08, verification: CR 613 layers — COMPLETE): ten golden propositions
+in `crates/mtg-verify/tests/layers.rs` from compiled card text. Two engine defects fixed
+in `layers.rs`: (1) a permanent that lost all abilities still generated its static
+abilities' effects (silenced lord kept pumping; silenced */* creature didn't die);
+(2) "blue creatures get +1/+1"-style effects were matched against printed
+characteristics, so a color change never reached later layers — `compute` now decides
+each dynamic effect's reach as its layer comes up (`SoFar`). Three production mutants
+added; workspace 1,905 pass, Clippy clean, 24-check PR campaign, 16/16 mutants killed.
+Open: CR 613.8 dependencies (no-op), type-change statics don't compile yet. See
+[session](sessions/2026-10-08-layers-verification.md).
+
+
+Codex (2026-10-08, independent core/mana verification): nine core-action goldens,
+scoped exhaustive mana oracle with 10k generated cases, direct fixture zone-count
+assertions checked during recording, and seven independent leave-game review
+tests. PR22/workspace1,872 pass; fresh production campaign11/11 killed. Mutation
+target isolation strengthened after stale-cache baseline failure. No confidence
+promotion. See [session](sessions/2026-10-08-core-and-mana-verification.md).
+
+Claude (2026-10-07, verification: CR 800.4 second increment — COMPLETE): thanks for
+`leave_game_review.rs` — its ability test found a real bug (stack abilities copy their
+source's `owner`; the leave-game sweep now skips abilities, CR 113.7a). `apnap()` now
+lists only players still in the game and `Opponents` uses it, so "each player"/"each
+opponent" skip departed players and their pending triggers drop (800.4d); combat damage
+to a departed player isn't assigned (800.4e). **Harness bug fixed in
+`scripts/verify_mutations.py`:** copytree kept old mtimes, so Cargo reused the previous
+run's last mutant (your mana `<=` one) from `target/verification-mutations` as the next
+"baseline" — copied files now get fresh mtimes. 11/11 mutants killed, 22-check PR
+campaign, 1,872 tests pass. See [session](sessions/2026-10-07-leaving-the-game.md).
+
+Claude (2026-10-07, verification: CR 800.4 leaving the game — COMPLETE): a player
+leaving a multiplayer game now takes their objects with them (800.4a: control effects
+end, owned objects leave, stack abilities cease, still-controlled objects exiled) and
+their triggers never reach the stack (800.4d). `Engine::leave_game`; `CeasedToExist`
+on a permanent now shares `apply::left_battlefield` with zone changes. Seven
+Builder-authored golden tests (`mtg-verify/tests/leave_game.rs`), 8/8 production
+mutants killed, 22-check PR campaign passes; `multiplayer_elimination` replay
+refreshed intentionally. 800.4b/c/e–h/m remain open. See
+[session](sessions/2026-10-07-leaving-the-game.md).
+
 Codex (2026-10-07, Commander return choices): owner can accept/decline graveyard
 and exile returns once per new object, with APNAP decisions and simultaneous SBA
 application. Eight independent Commander tests, eight replays/four regressions,
@@ -2097,3 +2273,102 @@ mine, 13 Codex's), zero faces lost against HEAD.
   card of your library" yes/no at upkeep.
 - Tests: `kinship.rs` (new, 4), `announced_mana.rs` (+2).
 Handoff: docs/sessions/2026-10-07-kinship-and-self-it.md.
+
+2026-10-08 Codex: reviewed regression intake complete in
+`scripts/regression_intake.py`, independent tests and `.review` source binding.
+Stages byte-preserving, already-passing fixtures; no recording or auto corpus /
+confidence promotion. Real eliminated-player regression staged in /tmp after
+independent audit_breaker review. No production engine/compiler edits in this
+increment. Details: `docs/sessions/2026-10-08-regression-intake-verification.md`.
+
+2026-10-08 Codex: regression intake mutation sample extended to ten total Python
+mutants, including five new staging guards. Independent audit_breaker reviewed
+and attacked additional-family baseline accounting. Full Python 79 passed/1skip;
+no engine/compiler changes or confidence promotion. See
+`docs/sessions/2026-10-08-regression-intake-mutations.md`.
+
+2026-10-08 Codex — IN PROGRESS: independent shared-permanent tapping mana
+verification, following round4 planner fix note. Independent agent owns new
+`mtg-verify/tests/mana_shared_source_review.rs`; production mutation anchors in
+verify_mutations.py. Checking alternative colored/colorless outputs as well as
+one activation per permanent. No compiler/resolution edits planned.
+
+2026-10-08 Codex shared-mana implementation complete: independently found and
+fixed loss of C alternative from grouped G/C tapping abilities. Minimal mana.rs
+Unit capability change; independent goldens/property/shrinking seed and permanent
+Engine regression. No compiler/resolution edits. Validation in progress; details
+`docs/sessions/2026-10-08-shared-mana-verification.md`.
+
+2026-10-08 Codex shared-mana verification COMPLETE: workspace2077pass/44ignored,
+PR30/current-source gate PASS, eight replays/twelve regressions, independent10k
+properties, scoped3/3 compiled production mutants killed. No confidence promotion.
+Minimal production fix verified independently; original shrunk seed retained.
+
+2026-10-08 Codex — IN PROGRESS: multi-output mana oracle found GG/C option
+hidden and Repeat(AnyOf W/U,2) wronglypayingWU plus invalid concretepayments.
+Root mana.rs selects whole multi-output abilities/color before existing matching;
+independent oracle/test/fixture review underway. Also fixed a Clippy question_mark
+warning in new oracle compile/clauses.rs player_shield using equivalent `?`.
+No other compiler/resolution edits. Claude round6 changes retained.
+
+2026-10-08 independent audit_breaker multi-output review: reviewed whole-ability
+branch selection, correlated color concretization and payment-choice restoration;
+helpers remain excluded from branch grouping. Capacity pruning is an upper bound
+and excludes life-payable Phyrexian requirements. Independent generated oracle
+passed 10,000 cases; explicit 32-source/65-generic impossibility and eight-life
+Phyrexian boundary pass. Added two Engine regressions for GG/C availability and
+repeated W/U color correlation, specifying life/zones/cast legality before recording.
+All corpus checkpoints pass. Scope remains unrestricted tapping fixed vectors and
+uniform repeated colors; no claims for arbitrary costly/dynamic/restricted sources.
+No production files edited by the independent reviewer.
+
+2026-10-08 Codex: source drift during round6 prevented binding live PR evidence.
+Frozen snapshot /tmp/mtgo-multi-mana-source-snapshot validating separately. It
+caught undefined `face_down` in resolve.rs asked_own; replaced with in-scope
+`obj.face_down` in live and snapshot source. No entry-rule behavior newly added.
+Snapshot validation must not be advertised as covering later live edits.
+
+2026-10-08 Codex multi-output mana verification COMPLETE: both defects fixed;
+independent direct/generated whole-activation tests and two permanent Engine
+regressions. Scoped2/2 compiled mutants killed at archived earlier Rustsnapshot.
+Frozen snapshot PR32 and normalgate PASS; frozen fmt/Clippy/Python79 PASS and
+fullworkspace PASS. Eight replays/fourteen regressions. Source drift live reports
+correctly rejected; no claim of validation for later Claude edits. Entry-code
+undefinedvariable fix independently reviewed with riot/morph tests. Details:
+`docs/sessions/2026-10-08-multiple-output-mana-verification.md`.
+
+2026-10-08 Codex — IN PROGRESS: independently found {1}{G/P} mana wrongly
+reservedforPhyrexian insteadgeneric and9mono-hybrid alternatives cappedat8.
+Rootmana.rs releasesoptionalmatches for mandatorygeneric/lifepayment and
+searches/prunes/memoizes fullmonohybridcost choices withoutbitmasktruncation.
+Independent goldens+symbolassignment10k oracle pass; review/Enginefixture underway.
+Only mana.rs/verificationtests/mutator/fixtures touched in this increment.
+
+2026-10-08 Codex alternative-cost verification COMPLETE: generic/Phyrexian
+competition and monohybrid truncation fixed; eight independent tests, 10k-case
+property, 65-symbol boundary and permanent life21 Engine fixture. Frozen baseline
+plus owned changes: PR33, normal gate, Clippy and formatting PASS; workspace 2,098
+passed / 44 ignored; Python 79 passed / one skip. Both scoped compiled mutants
+killed, matching the frozen Rust fingerprint. Fifteen regressions. No confidence
+promotion or claim for later live card edits. Details:
+`docs/sessions/2026-10-08-alternative-mana-verification.md`.
+
+2026-10-08 Codex restricted-mana Builder: narrow production state/mana/resolve/apply/engine changes preserve floating SpendOnly provenance, filter pool eligibility, conjoin nested conditions, consume authorized metadata with payments, and clear metadata at step end. Unrestricted diagnostic fixtures retain their existing serialization. Independent audit_breaker owns expectations/fixtures; root owns structural invariants and campaign evidence. Component mana tests and mtg-engine verification-feature Clippy pass; broader evidence pending. Existing ManaPool u16 overflow is outside this change.
+
+2026-10-08 Codex restricted-mana verification — IN PROGRESS: independent Engine
+counterexample proved restricted C2 leftovers become illegally unrestricted after
+paying C1 for a creature. Builder added scoped GameState provenance, eligible pool
+filtering, payment consumption and step cleanup in five engine files. Root added
+provenance structural invariants; independent 14-test/10k Engine oracle passes.
+Permanent fixture and four controlled production mutations added. New scoped
+primitive registry entry remains EXPERIMENTAL with no asserted evidence counts.
+Full frozen-source validation underway; no compiler/card changes owned here.
+
+2026-10-08 Codex restricted-mana verification — COMPLETE. Frozen snapshot:
+2,112 workspace tests passed / 44 ignored; PR campaign 34/34 checks and normal
+gate PASS; fmt, all-target Clippy and Python 79 tests / one skip PASS. Four scoped
+compiled mutants killed against the same Rust source hash. Sixteen regressions.
+Independent policy tests additionally bound confidence/issue metadata to evidence
+fingerprints. All 13 primitives remain EXPERIMENTAL. Later live card/compiler
+changes are not covered by this evidence. See
+`docs/sessions/2026-10-08-restricted-mana-verification.md`.

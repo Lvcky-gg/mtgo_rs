@@ -427,6 +427,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -983,12 +985,23 @@
           ]
         }
       },
-      "expected_digest": "01e8ac40d48e748629fc45e898fb487a9760e009d80ce49a75ab2427ad3ecbd1"
+      "expected_digest": "1bed98021d4bdfaa4dc1193f7b315f76017244ce792d58cdfb7e1527d8a82a63"
     }
   ],
   "expected": {
     "life": {},
-    "final_digest": "01e8ac40d48e748629fc45e898fb487a9760e009d80ce49a75ab2427ad3ecbd1",
+    "zones": [
+      {
+        "zone": {
+          "zone": "Stack",
+          "player": null
+        },
+        "card": 1,
+        "owner": 0,
+        "count": 1
+      }
+    ],
+    "final_digest": "1bed98021d4bdfaa4dc1193f7b315f76017244ce792d58cdfb7e1527d8a82a63",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -1255,6 +1268,8 @@
                     "mana_spent": [],
                     "modes": [],
                     "source": null,
+                    "target_groups": [],
+                    "target_specs": [],
                     "targets": [],
                     "x": 0
                   },

@@ -1042,6 +1042,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -2954,7 +2956,7 @@
           ]
         }
       },
-      "expected_digest": "67a5736e35883f7781e9704161a49fb9b8ac04efc082bcb4b9d1c0330b6e5417"
+      "expected_digest": "0a7e34f5bab5c39991baf48f2681a11be627614e4ded9e6b6d8bee71ab75807e"
     },
     {
       "who": 0,
@@ -3669,6 +3671,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -4353,7 +4357,7 @@
           "undo": []
         }
       },
-      "expected_digest": "d5518918ad1fb084e57ce566e27c439ea743e5f39a9a372da90b1635114149a7"
+      "expected_digest": "a447ade70169ff0c9ee14e2ac0330e918fc686f0d162d1c061b32b7cabcc7a65"
     },
     {
       "who": 1,
@@ -4670,6 +4674,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -5287,6 +5293,8 @@
                       "source": {
                         "$ObjectId": 19
                       },
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -5981,7 +5989,7 @@
           "undo": []
         }
       },
-      "expected_digest": "91fb6e55ce197265a66f3ca675d53f381ff16ffd9f08909ff64ff00caf8ba455"
+      "expected_digest": "072b1f99897c897a6e6582b43c22510096f6939ec1b39e5bb41685f7934e5d74"
     },
     {
       "who": 0,
@@ -6298,6 +6306,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -6915,6 +6925,8 @@
                       "source": {
                         "$ObjectId": 19
                       },
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -7609,7 +7621,7 @@
           "undo": []
         }
       },
-      "expected_digest": "0bdb535133b2ae2ad776a552726e275a1f0528ca44b5e79a196b07ac0cddda76"
+      "expected_digest": "ec81c93d7c68e2473bcdef6f72eec7df13c3a5ac9858af02aa3df558e141f332"
     },
     {
       "who": 1,
@@ -7978,6 +7990,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -9196,14 +9210,25 @@
           "undo": []
         }
       },
-      "expected_digest": "262c21299767213c4f2eee204c601102ec49917d100195bc983d052852ecd8e5"
+      "expected_digest": "bc4eea2da2fa4586a2050be4ecd29b0ca1ad476ead140dc57f7d74ec6cadeead"
     }
   ],
   "expected": {
     "life": {
       "0": 23
     },
-    "final_digest": "262c21299767213c4f2eee204c601102ec49917d100195bc983d052852ecd8e5",
+    "zones": [
+      {
+        "zone": {
+          "zone": "Battlefield",
+          "player": null
+        },
+        "card": 1,
+        "owner": 0,
+        "count": 1
+      }
+    ],
+    "final_digest": "bc4eea2da2fa4586a2050be4ecd29b0ca1ad476ead140dc57f7d74ec6cadeead",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -9555,6 +9580,8 @@
                     "mana_spent": [],
                     "modes": [],
                     "source": null,
+                    "target_groups": [],
+                    "target_specs": [],
                     "targets": [],
                     "x": 0
                   },

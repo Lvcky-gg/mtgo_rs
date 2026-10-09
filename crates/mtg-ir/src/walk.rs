@@ -98,7 +98,7 @@ impl Visitor<'_> {
     fn cost(&mut self, c: &mut Cost) {
         for a in &mut c.additional {
             match a {
-                AdditionalCost::Cycling => {}
+                AdditionalCost::Cycling | AdditionalCost::DiscardHand => {}
                 AdditionalCost::Tap { what } | AdditionalCost::Untap { what } => {
                     self.selector(what)
                 }
@@ -171,9 +171,12 @@ impl Visitor<'_> {
             }
             EventPattern::ChapterReached { .. }
             | EventPattern::BecomesClassLevel { .. }
-            | EventPattern::NthSpellCast { .. }
             | EventPattern::Reflexive => {}
             EventPattern::NthDraw { whose, .. } => self.selector(whose),
+            EventPattern::NthSpellCast { by, .. } => self.selector(by),
+            EventPattern::PlaysLand { who, .. } | EventPattern::SearchesLibrary { who } => {
+                self.selector(who)
+            }
             EventPattern::CastTargeting { by, target, spell } => {
                 self.selector(by);
                 self.filter(target);
@@ -227,7 +230,9 @@ impl Visitor<'_> {
             | ReplacementKind::EntersWithCounterIfChosen
             | ReplacementKind::EntersWithCounterOrHaste
             | ReplacementKind::Devour(_)
-            | ReplacementKind::EntersChoosing(_) => {}
+            | ReplacementKind::EntersChoosing(_)
+            | ReplacementKind::EntersChoosingColorExcept(_) => {}
+            ReplacementKind::EntersIfDiscards(f) => self.filter(f),
             ReplacementKind::EntersTappedUnless { condition } => self.condition(condition),
             ReplacementKind::Reduce { amount } => self.value(amount),
             ReplacementKind::Redirect { to } => self.selector(to),
@@ -299,6 +304,12 @@ impl Visitor<'_> {
                 | Restriction::Saddled
                 | Restriction::TopOfLibraryRevealed
                 | Restriction::NoMaximumHandSize
+                | Restriction::UntapDuringOthersUntap
+                | Restriction::CastOnlyAsSorcery { .. }
+                | Restriction::AddsAdditionalMana { .. }
+                | Restriction::AttackTax { .. }
+                | Restriction::PlayerProtectionFromEverything
+                | Restriction::LifeCantChange
                 | Restriction::CantBeBlockedByMoreThanOne
                 | Restriction::MinimumBlockers(_)
                 | Restriction::CantAttackAlone
@@ -379,10 +390,12 @@ impl Visitor<'_> {
                 self.effect(body);
             }
             Effect::UnlessPays {
+                payer,
                 cost,
                 times,
                 otherwise,
             } => {
+                self.selector(payer);
                 self.cost(cost);
                 self.value(times);
                 self.effect(otherwise);
@@ -449,6 +462,10 @@ impl Visitor<'_> {
             | Effect::Untap { what }
             | Effect::CounterSpell { what, .. }
             | Effect::CopySpell { what, .. }
+            | Effect::ChangeTargets { what, .. }
+            | Effect::LoseGame { who: what }
+            | Effect::PhaseOut { what }
+            | Effect::WinGame { who: what }
             | Effect::CastWithoutPaying { what, .. } => self.selector(what),
             Effect::CounterUnlessPays { what, times, .. } => {
                 self.selector(what);
@@ -618,6 +635,7 @@ impl Visitor<'_> {
             | Selector::ActivePlayer
             | Selector::DefendingPlayer
             | Selector::EnchantedPlayer
+            | Selector::Player(_)
             | Selector::Target { .. }
             | Selector::Bound(_) => {}
             Selector::All { filter, .. } => self.filter(filter),
@@ -700,6 +718,9 @@ impl Visitor<'_> {
             | ObjectFilter::CastFromZone(_)
             | ObjectFilter::Kicked
             | ObjectFilter::HasXInCost
+            | ObjectFilter::IsCommander
+            | ObjectFilter::InZone(_)
+            | ObjectFilter::SingleTarget
             | ObjectFilter::IsAbility => {}
         }
     }
@@ -739,6 +760,7 @@ impl Visitor<'_> {
             | Value::PartySize(s)
             | Value::BasicLandTypesAmong(s)
             | Value::SpellsCastThisTurn(s)
+            | Value::MostSpellsCastThisTurn(s)
             | Value::CardsDrawnThisTurn(s) => self.selector(s),
             Value::Sum(vs) | Value::Product(vs) => {
                 for v in vs {
@@ -753,6 +775,15 @@ impl Visitor<'_> {
             Value::ChosenByController { min, max } => {
                 self.value(min);
                 self.value(max);
+            }
+            Value::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                self.condition(cond);
+                self.value(then);
+                self.value(otherwise);
             }
         }
     }

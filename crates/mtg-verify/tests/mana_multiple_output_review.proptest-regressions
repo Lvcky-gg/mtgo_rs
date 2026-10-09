@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc defb86304610a72d1126ca78e376a15ee00334cfd5d65e801b1cbb51d6e1ada0 # shrinks to groups = [[Fixed([2]), Uniform(12, 2)], [Uniform(9, 1)], [Uniform(1, 1)]], pool = [1, 1, 0, 0, 0, 1], required = [0, 0, 1, 1, 0, 0], generic = 0

@@ -16,6 +16,70 @@ fn your_graveyard() -> Selector {
 
 /// A condition, and the rest of the input.
 pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    condition_shapes(s, cx)
+        .filter(|(_, r)| !r.starts_with(" and a"))
+        .or_else(|| control_both(s, cx))
+        .or_else(|| condition_shapes(s, cx))
+        .or_else(|| comparison(s, cx))
+}
+
+/// "you control an artifact and an enchantment" (Soul Transfer): both.
+fn control_both<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    let r = s.strip_prefix("you control ")?;
+    for (at, _) in r.match_indices(" and a") {
+        let (first, second) = (&r[..at], &r[at + " and ".len()..]);
+        let Some((a, "")) = condition_shapes(&format!("you control {first}"), cx) else {
+            continue;
+        };
+        let owned = format!("you control {second}");
+        let Some((b, rest)) = condition_shapes(&owned, cx) else {
+            continue;
+        };
+        let consumed = owned.len() - rest.len() - "you control ".len();
+        return Some((Condition::And(vec![a, b]), &second[consumed..]));
+    }
+    None
+}
+
+/// "X is greater than or equal to the number of cards in your library" (Thassa's Oracle),
+/// "your devotion to blue is less than …": two numbers compared, when nothing more
+/// particular reads the condition.
+fn comparison<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    let number = |s: &'s str| -> Option<(Value, &'s str)> {
+        super::clauses::value_phrase(s, cx)
+            .or_else(|| words::number(s).map(|(n, r)| (Value::Fixed(n), r)))
+    };
+    let (lhs, r) = number(s)?;
+    let r = r.strip_prefix(" is ")?;
+    for (op, at_least, strictly) in [
+        ("greater than or equal to ", true, false),
+        ("less than or equal to ", false, false),
+        ("greater than ", true, true),
+        ("less than ", false, true),
+    ] {
+        let Some(r) = r.strip_prefix(op) else {
+            continue;
+        };
+        let (rhs, r) = number(r)?;
+        let plus_one = |v: Value| Value::Sum(vec![v, Value::ONE]);
+        let cond = match (at_least, strictly) {
+            (true, false) => Condition::ValueAtLeast { lhs, rhs },
+            (false, false) => Condition::ValueAtLeast { lhs: rhs, rhs: lhs },
+            (true, true) => Condition::ValueAtLeast {
+                lhs,
+                rhs: plus_one(rhs),
+            },
+            (false, true) => Condition::ValueAtLeast {
+                lhs: rhs,
+                rhs: plus_one(lhs),
+            },
+        };
+        return Some((cond, r));
+    }
+    None
+}
+
+fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     if let Some(rest) = s.strip_prefix("you have the city's blessing") {
         return Some((Condition::HasCityBlessing, rest));
     }
@@ -421,6 +485,37 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
             r,
         ));
     }
+    // "if you control a commander" (Fierce Guardianship): a commander permanent, anyone's.
+    if let Some(r) = s.strip_prefix("you control a commander") {
+        return Some((
+            Condition::CountAtLeast {
+                what: Selector::All {
+                    zone: Zone::Battlefield,
+                    filter: ObjectFilter::And(vec![
+                        ObjectFilter::ControlledBy(Box::new(Selector::You)),
+                        ObjectFilter::IsCommander,
+                    ]),
+                },
+                at_least: Value::ONE,
+            },
+            r,
+        ));
+    }
+    // "if an opponent cast three or more spells this turn": one opponent, not their total.
+    if let Some(r) = s
+        .strip_prefix("an opponent cast ")
+        .or_else(|| s.strip_prefix("an opponent has cast "))
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more spells this turn")
+    {
+        return Some((
+            at_least(
+                Value::MostSpellsCastThisTurn(Box::new(Selector::Opponents)),
+                n,
+            ),
+            r,
+        ));
+    }
     // "an opponent has eight or more cards in their graveyard" (two players: the one).
     if let Some(r) = s.strip_prefix("an opponent has ")
         && let Some((n, r)) = words::number(r)
@@ -723,7 +818,10 @@ pub fn counted<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, &'s str)> {
         _ => r,
     };
     // "creature cards in all graveyards": every graveyard, not just yours.
-    let r = match r.strip_prefix(" in all graveyards") {
+    let r = match r
+        .strip_prefix(" in all graveyards")
+        .or_else(|| r.strip_prefix(" in each graveyard"))
+    {
         Some(r) if noun.zone == Zone::Graveyard => r,
         _ => r,
     };

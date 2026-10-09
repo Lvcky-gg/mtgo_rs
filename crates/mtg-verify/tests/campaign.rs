@@ -36,6 +36,9 @@ fn minimizer_retains_failure_class_and_rejects_passing_input() {
     let base = basic();
     assert!(campaign::minimize(&base, 16).is_err());
     let mut failing = base;
+    // Isolate the artificial life-only failure. Independent zone propositions
+    // constrain valid action removal and deliberately must not be overwritten.
+    failing.expected.zones.clear();
     failing.expected.life.insert(PlayerId(0), 999);
     let (before, _) = run(&failing, false).unwrap();
     assert!(!before.pass);

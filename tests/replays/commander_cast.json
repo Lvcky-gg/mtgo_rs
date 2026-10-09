@@ -2211,6 +2211,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -5208,7 +5210,7 @@
           ]
         }
       },
-      "expected_digest": "04c964d8c44cf70063dcc037073667225aeb1d0d5752a6bccd45e2169c45a26f"
+      "expected_digest": "9efdf11cbda23cdf42bd349f87a9bff45982ac87003453d60b6f909a1e78c0f8"
     },
     {
       "who": 0,
@@ -6892,6 +6894,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -7640,7 +7644,7 @@
           "undo": []
         }
       },
-      "expected_digest": "1175d1f00c5aac7f34372c0943ba6bd336a12e68f762a7434ddeb5285a87d1b7"
+      "expected_digest": "5bb1ec63a9850084b6d945343ed0b0401f3158384419626294560c14a054edb6"
     },
     {
       "who": 1,
@@ -9324,6 +9328,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -10072,7 +10078,7 @@
           "undo": []
         }
       },
-      "expected_digest": "df9c865e776a9484b132f089dea921772535771005ce7e356605ce78b5479a53"
+      "expected_digest": "7e0235601f24ee103b33c8c0692d76b8f639c3f0c07cf8b74e780eeade128910"
     },
     {
       "who": 2,
@@ -11756,6 +11762,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -12504,7 +12512,7 @@
           "undo": []
         }
       },
-      "expected_digest": "facfee074b7aad994055c3c846ad915a6bb2341df712973294084be66d3db23a"
+      "expected_digest": "f7f99caadbb59e23daaeccac407deee0456b83bf69db295fdb731f671676e2b4"
     },
     {
       "who": 3,
@@ -12816,6 +12824,8 @@
                       "mana_spent": [],
                       "modes": [],
                       "source": null,
+                      "target_groups": [],
+                      "target_specs": [],
                       "targets": [],
                       "x": 0
                     },
@@ -15035,14 +15045,25 @@
           "undo": []
         }
       },
-      "expected_digest": "1a19c35979f1fc16f203e5cd5c5d4ecfd2db506227bd4b972b0b22a133288e8a"
+      "expected_digest": "d8dee132b7a697843531cbfcc56853b114856975cba515947a5c1913b738b077"
     }
   ],
   "expected": {
     "life": {
       "0": 40
     },
-    "final_digest": "1a19c35979f1fc16f203e5cd5c5d4ecfd2db506227bd4b972b0b22a133288e8a",
+    "zones": [
+      {
+        "zone": {
+          "zone": "Battlefield",
+          "player": null
+        },
+        "card": 1,
+        "owner": 0,
+        "count": 1
+      }
+    ],
+    "final_digest": "d8dee132b7a697843531cbfcc56853b114856975cba515947a5c1913b738b077",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -15337,6 +15358,8 @@
                     "mana_spent": [],
                     "modes": [],
                     "source": null,
+                    "target_groups": [],
+                    "target_specs": [],
                     "targets": [],
                     "x": 0
                   },

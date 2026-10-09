@@ -145,6 +145,7 @@ fn unscanned_event_history_changes_next_transition_and_digest() {
 fn scenario() -> mtg_verify::scenario::GameScenario {
     use mtg_verify::scenario::*;
     let mut fixture = GameScenario {
+        advance_budget: mtg_verify::scenario::MAX_ADVANCE_BUDGET,
         format_version: FORMAT_VERSION,
         rules_version: RULES_VERSION.into(),
         engine_version: "independent-review".into(),
@@ -188,6 +189,7 @@ fn scenario_object(zone: ZoneRef) -> mtg_verify::scenario::ScenarioObject {
         controller: None,
         zone,
         tapped: false,
+        phased_out: false,
         damage: 0,
         counters: Default::default(),
     }
@@ -233,6 +235,7 @@ fn replay_reports_first_divergent_checkpoint_after_mutated_life() {
     fixture.actions.push(ScenarioAction {
         who: P0,
         answer: mtg_engine::Answer::Pass,
+        expected_rejection: false,
         expected_choice: None,
         expected_state: None,
         expected_digest: None,

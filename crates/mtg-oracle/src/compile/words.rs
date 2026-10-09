@@ -368,6 +368,7 @@ pub fn strip_ability_word(line: &str) -> &str {
         "rally",
         "revolt",
         "secret council",
+        "vivid",
         "beacon of hope",
         "keen senses",
         "blood chalice",

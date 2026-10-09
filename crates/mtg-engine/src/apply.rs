@@ -23,6 +23,7 @@ pub fn apply(state: &mut GameState, cause: Cause, event: Event, log: &mut Vec<St
     let at = state.bump();
     let id = state.next_event.advance();
     perform(state, &event);
+    settle_controller(state, cause, &event);
     record_commander_damage(state, cause, &event);
     log.push(StampedEvent {
         id,
@@ -35,6 +36,24 @@ pub fn apply(state: &mut GameState, cause: Cause, event: Event, log: &mut Vec<St
     }
 }
 
+/// Who controls an object that just changed zones: the player casting it, for a card put
+/// on the stack by their action (CR 601.2a — Ragavan casting another player's card); its
+/// owner anywhere but the battlefield and the stack, where cards have no controller of
+/// their own (CR 108.4a). A permanent keeps the controller it entered under.
+fn settle_controller(state: &mut GameState, cause: Cause, event: &Event) {
+    let Event::ZoneChange { new_object, to, .. } = event else {
+        return;
+    };
+    let Some(obj) = state.objects.get_mut(new_object) else {
+        return;
+    };
+    match (to.zone, cause) {
+        (Zone::Stack, Cause::PlayerAction(caster)) => obj.controller = caster,
+        (Zone::Stack | Zone::Battlefield, _) => {}
+        _ => obj.controller = obj.owner,
+    }
+}
+
 /// The owner whose library a card is shuffled into instead of going to a graveyard
 /// ("reveal ~ and shuffle it into its owner's library instead"), if this is that event.
 fn shuffled_instead(state: &GameState, event: &Event) -> Option<PlayerId> {
@@ -44,6 +63,16 @@ fn shuffled_instead(state: &GameState, event: &Event) -> Option<PlayerId> {
     let o = state.objects.get(object)?;
     (to.zone == Zone::Graveyard && state.shuffled_instead_of_graveyard.contains(&o.card))
         .then_some(o.owner)
+}
+
+/// Whether a resolved "your life total can't change" holds for this player.
+fn life_locked(state: &GameState, player: PlayerId) -> bool {
+    state.continuous.iter().any(|e| {
+        matches!(
+            e.modification,
+            mtg_ir::effect::Modification::Restriction(mtg_ir::effect::Restriction::LifeCantChange)
+        ) && e.controller == Some(player)
+    })
 }
 
 /// Apply a whole batch as one simultaneous happening.
@@ -64,6 +93,7 @@ pub fn apply_simultaneous(
         let event = replace(state, event);
         let id = state.next_event.advance();
         perform(state, &event);
+        settle_controller(state, cause, &event);
         record_commander_damage(state, cause, &event);
         log.push(StampedEvent {
             id,
@@ -111,6 +141,13 @@ fn replace(state: &GameState, event: Event) -> Event {
     if let Event::LifeChanged { player, delta } = event
         && delta > 0
         && state.no_life_gain.contains(&player)
+    {
+        return Event::LifeChanged { player, delta: 0 };
+    }
+    // "Your life total can't change" (Teferi's Protection, CR 119.10).
+    if let Event::LifeChanged { player, delta } = event
+        && delta != 0
+        && life_locked(state, player)
     {
         return Event::LifeChanged { player, delta: 0 };
     }
@@ -315,10 +352,15 @@ fn perform(state: &mut GameState, event: &Event) {
         }
 
         Event::CeasedToExist { object } => {
-            if let Some(o) = state.objects.remove(object)
-                && let Some(order) = state.zone_order.get_mut(&o.zone)
-            {
-                order.retain(|x| x != object);
+            if let Some(o) = state.objects.remove(object) {
+                if let Some(order) = state.zone_order.get_mut(&o.zone) {
+                    order.retain(|x| x != object);
+                }
+                // Leaving the game (CR 800.4a) takes permanents with it.
+                if o.zone.zone == Zone::Battlefield {
+                    state.last_known.insert(*object, o);
+                    left_battlefield(state, *object);
+                }
             }
         }
 
@@ -374,9 +416,31 @@ fn perform(state: &mut GameState, event: &Event) {
             color,
             amount,
         } => {
+            let slot = color.map_or(mtg_core::ManaPool::COLORLESS_SLOT, |c| c as usize);
             if let Some(p) = state.players.get_mut(player) {
-                let slot = color.map_or(mtg_core::ManaPool::COLORLESS_SLOT, |c| c as usize);
+                // Planned payments already remove their authorized provenance.
+                // Direct event application consumes unrestricted units first too.
+                let restricted: u32 = state
+                    .restricted_mana
+                    .iter()
+                    .filter(|bucket| bucket.player == *player)
+                    .map(|bucket| u32::from(bucket.amounts[slot]))
+                    .sum();
+                let unrestricted = u32::from(p.mana.amounts[slot]).saturating_sub(restricted);
+                let mut remaining = u32::from(*amount).saturating_sub(unrestricted);
+                for bucket in state
+                    .restricted_mana
+                    .iter_mut()
+                    .filter(|bucket| bucket.player == *player)
+                {
+                    let used = remaining.min(u32::from(bucket.amounts[slot]));
+                    bucket.amounts[slot] -= used as u16;
+                    remaining -= used;
+                }
                 p.mana.amounts[slot] = p.mana.amounts[slot].saturating_sub(*amount);
+                state
+                    .restricted_mana
+                    .retain(|bucket| bucket.amounts.iter().any(|amount| *amount > 0));
             }
         }
 
@@ -440,10 +504,11 @@ fn perform(state: &mut GameState, event: &Event) {
             counters,
             ..
         } => {
+            let locked = life_locked(state, *player);
             if let Some(p) = state.players.get_mut(player) {
                 if *counters {
                     p.poison += amount;
-                } else {
+                } else if !locked {
                     p.life -= *amount as i32;
                 }
             }
@@ -541,7 +606,15 @@ fn perform(state: &mut GameState, event: &Event) {
             if let Some(mut obj) = state.objects.get(original).cloned() {
                 obj.id = *copy;
                 obj.controller = *controller;
+                // CR 112.2: the player under whose control a copy enters the stack owns it.
+                obj.owner = *controller;
                 obj.is_spell_copy = true;
+                // CR 707.10: casting decisions are copied; mana is not an object
+                // used to pay a cost and was not spent to cast the copy.
+                obj.mana_spent.clear();
+                if let Some(cc) = obj.cast_context.as_mut() {
+                    cc.mana_spent.clear();
+                }
                 obj.timestamp = state.bump();
                 if let (Some(t), Some(cc)) = (targets, obj.cast_context.as_mut()) {
                     cc.targets = t.clone();
@@ -552,6 +625,18 @@ fn perform(state: &mut GameState, event: &Event) {
                     .entry(ZoneRef::shared(Zone::Stack))
                     .or_default()
                     .insert(0, *copy);
+            }
+        }
+
+        Event::LibrarySearched { .. } => {}
+
+        Event::TargetsChanged { object, targets } => {
+            if let Some(c) = state
+                .objects
+                .get_mut(object)
+                .and_then(|o| o.cast_context.as_mut())
+            {
+                c.targets = targets.clone();
             }
         }
 
@@ -581,6 +666,7 @@ fn perform(state: &mut GameState, event: &Event) {
         }
 
         Event::StepEnded { .. } => {
+            state.restricted_mana.clear();
             // CR 500.4: mana pools empty as a step or phase ends.
             for p in state.players.values_mut() {
                 p.mana.clear();
@@ -964,32 +1050,37 @@ fn zone_change(
         order.insert(at, new_object);
     }
 
-    // A permanent leaving the battlefield takes anything attached to it with it,
-    // in the sense that those attachments become unattached.
     if from.zone == Zone::Battlefield {
-        for o in state.objects.values_mut() {
-            if o.attached_to == Some(object) {
-                o.attached_to = None;
-                o.was_attached_to = Some(object);
-            }
-        }
-        state.combat.attackers.remove(&object);
-        state.combat.blocks.remove(&object);
-        for bs in state.combat.blocks.values_mut() {
-            bs.retain(|b| *b != object);
-        }
-        // Continuous effects that exist only while their source is on the
-        // battlefield end now.
-        state.continuous.retain(|e| {
-            e.source != object
-                || !matches!(
-                    e.duration,
-                    mtg_ir::effect::Duration::WhileSourcePresent
-                        | mtg_ir::effect::Duration::UntilSourceLeaves
-                        | mtg_ir::effect::Duration::WhileSourceTapped
-                )
-        });
+        left_battlefield(state, object);
     }
 
     state.objects.insert(new_object, obj);
+}
+
+/// What a permanent's leaving the battlefield undoes, however it left.
+fn left_battlefield(state: &mut GameState, object: ObjectId) {
+    // A permanent leaving the battlefield takes anything attached to it with it,
+    // in the sense that those attachments become unattached.
+    for o in state.objects.values_mut() {
+        if o.attached_to == Some(object) {
+            o.attached_to = None;
+            o.was_attached_to = Some(object);
+        }
+    }
+    state.combat.attackers.remove(&object);
+    state.combat.blocks.remove(&object);
+    for bs in state.combat.blocks.values_mut() {
+        bs.retain(|b| *b != object);
+    }
+    // Continuous effects that exist only while their source is on the
+    // battlefield end now.
+    state.continuous.retain(|e| {
+        e.source != object
+            || !matches!(
+                e.duration,
+                mtg_ir::effect::Duration::WhileSourcePresent
+                    | mtg_ir::effect::Duration::UntilSourceLeaves
+                    | mtg_ir::effect::Duration::WhileSourceTapped
+            )
+    });
 }

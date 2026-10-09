@@ -12,7 +12,7 @@ use mtg_verify::{
     campaign,
     scenario::{
         self, GameScenario, Metadata, ScenarioAction, ScenarioAssertions, ScenarioObject,
-        ScenarioPlayer, ScenarioState,
+        ScenarioPlayer, ScenarioState, ZoneAssertion,
     },
 };
 use std::{collections::BTreeMap, fs, path::Path};
@@ -58,8 +58,18 @@ fn object(card: u32, owner: u8, zone: Zone) -> ScenarioObject {
             ZoneRef::of(zone, player)
         },
         tapped: false,
+        phased_out: false,
         damage: 0,
         counters: BTreeMap::new(),
+    }
+}
+fn zone_assertion(card: u32, owner: u8, zone: Zone, count: usize) -> ZoneAssertion {
+    ZoneAssertion {
+        zone: object(card, owner, zone).zone,
+        card: Some(CardId(card)),
+        owner: Some(PlayerId(owner)),
+        counters: Default::default(),
+        count,
     }
 }
 fn base(players: u8, cards: Vec<CardFace>, mut objects: Vec<ScenarioObject>) -> GameScenario {
@@ -69,6 +79,7 @@ fn base(players: u8, cards: Vec<CardFace>, mut objects: Vec<ScenarioObject>) -> 
         }
     }
     let mut result = GameScenario {
+        advance_budget: scenario::MAX_ADVANCE_BUDGET,
         format_version: scenario::FORMAT_VERSION,
         rules_version: scenario::RULES_VERSION.into(),
         engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -139,6 +150,7 @@ fn scripted(mut artifact: GameScenario, casts: usize, expected_life: i32) -> Gam
         artifact.actions.push(ScenarioAction {
             who: choice.who,
             answer: answer.clone(),
+            expected_rejection: false,
             expected_choice: Some(choice.kind),
             expected_state: None,
             expected_digest: None,
@@ -162,6 +174,7 @@ fn combat_recording(mut artifact: GameScenario) -> GameScenario {
         artifact.actions.push(ScenarioAction {
             who: choice.who,
             answer: answer.clone(),
+            expected_rejection: false,
             expected_choice: Some(choice.kind),
             expected_state: None,
             expected_digest: None,
@@ -193,6 +206,7 @@ fn main() {
     );
     basic.metadata.description = "Synthetic scripted casting: one free gain-three spell; independently expected life 20+3=23".into();
     basic.metadata.rules = vec!["601".into(), "608".into(), "119.3".into()];
+    basic.expected.zones = vec![zone_assertion(1, 0, Zone::Graveyard, 1)];
     write("basic_casting.json", &basic);
     let mut stack = scripted(
         base(
@@ -204,6 +218,7 @@ fn main() {
         26,
     );
     stack.metadata.description = "Synthetic scripted stack: two free instants announced before either resolves; independent total life 26".into();
+    stack.expected.zones = vec![zone_assertion(1, 0, Zone::Graveyard, 2)];
     write("stack_interaction.json", &stack);
     let mut triggered = creature.clone();
     triggered.abilities.push(Ability {
@@ -235,6 +250,7 @@ fn main() {
     );
     trigger.metadata.description =
         "Synthetic creature casting and enters trigger; independently expected life 23".into();
+    trigger.expected.zones = vec![zone_assertion(1, 0, Zone::Battlefield, 1)];
     write("enters_trigger.json", &trigger);
     for (name, players, objects, description) in [
         (
@@ -270,7 +286,8 @@ fn main() {
     let campaign = campaign::semantic(&elimination, 7045, 12).unwrap();
     assert!(campaign.failure.is_none(), "{:?}", campaign.failure);
     let mut replay = campaign.reproduction;
-    replay.metadata.description = "Synthetic four-player game: zero-life fourth player is eliminated before priority rotation".into();
+    replay.metadata.description = "Synthetic four-player game: zero-life fourth player is eliminated before priority rotation; their library leaves the game with them (CR 800.4a)".into();
+    replay.metadata.rules = vec!["800.4a".into()];
     write("multiplayer_elimination.json", &replay);
 
     let source = base(2, vec![creature], vec![]);
@@ -306,6 +323,7 @@ fn main() {
         .map(|who| ScenarioAction {
             who,
             answer: Answer::Pass,
+            expected_rejection: false,
             expected_choice: None,
             expected_state: None,
             expected_digest: None,
@@ -345,6 +363,7 @@ fn main() {
     let mut replay = scripted(source, 1, 40);
     replay.metadata.description = "Synthetic four-player Commander setup: legendary commander cast from shared command zone at 40 life; not a full Commander game".into();
     replay.metadata.rules = vec!["400.1".into(), "903.8".into()];
+    replay.expected.zones = vec![zone_assertion(1, 0, Zone::Battlefield, 1)];
     write("commander_cast.json", &replay);
     replay
         .initial_state
@@ -352,6 +371,7 @@ fn main() {
         .retain(|object| object.zone.zone == Zone::Command);
     replay.actions.truncate(1);
     replay.expected = ScenarioAssertions::default();
+    replay.expected.zones = vec![zone_assertion(1, 0, Zone::Stack, 1)];
     replay.metadata = Metadata {
         issue: Some("local_shared_command_zone_casting".into()),
         description: "Confirmed engine representation bug: shared Command objects were uncastable because legal-action lookup used player-private Command instances. Independent golden tests failed before the engine normalized casting and return destinations to shared Command.".into(),
@@ -386,6 +406,7 @@ fn main() {
     .map(|(who, answer)| ScenarioAction {
         who,
         answer,
+        expected_rejection: false,
         expected_choice: None,
         expected_state: None,
         expected_digest: None,
@@ -393,6 +414,7 @@ fn main() {
     .collect();
     source.metadata.description = "Synthetic four-player Commander game: opponent-controlled commander dies, its owner declines command-zone return, priority proceeds without repeating the option".into();
     source.metadata.rules = vec!["903.9a".into(), "704.3".into()];
+    source.expected.zones = vec![zone_assertion(1, 1, Zone::Graveyard, 1)];
     write("commander_declines_return.json", &source);
     source
         .initial_state

@@ -195,13 +195,31 @@ pub enum EventPattern {
     BecomesMonstrous {
         who: ObjectFilter,
     },
-    /// "Whenever you cast your second spell each turn": the controller's `n`th spell this
-    /// turn.
+    /// "Whenever you cast your second spell each turn": a player's `n`th spell this turn
+    /// ("whenever a player casts their second spell each turn"), or their `n`th
+    /// noncreature spell ("an opponent casts their first noncreature spell each turn").
     NthSpellCast {
         n: u32,
+        #[serde(
+            default = "crate::selector::you",
+            skip_serializing_if = "crate::selector::is_you"
+        )]
+        by: Selector,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        noncreature: bool,
     },
     /// A reflexive trigger's own moment (see `Effect::Reflexive`).
     Reflexive,
+    /// "Whenever an opponent searches their library" (Archivist of Oghma).
+    SearchesLibrary {
+        who: Selector,
+    },
+    /// "Whenever you play a land", "when you play another land": played, not put onto the
+    /// battlefield by an effect.
+    PlaysLand {
+        who: Selector,
+        another: bool,
+    },
     /// "Whenever a creature attacks you [or a planeswalker you control]": an attacker
     /// matching `who` attacking one of `player`, or a planeswalker they control.
     AttacksPlayer {

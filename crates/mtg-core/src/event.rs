@@ -244,6 +244,15 @@ pub enum Event {
         object: ObjectId,
         controller: PlayerId,
     },
+    /// CR 701.19 — a player searched their library, whatever they found.
+    LibrarySearched {
+        player: PlayerId,
+    },
+    /// CR 115.7 — a spell or ability on the stack has new targets.
+    TargetsChanged {
+        object: ObjectId,
+        targets: Vec<Target>,
+    },
     /// CR 707.10 — a copy of a spell is put on the stack (not cast). It has the original's
     /// announced choices, and `targets` when new ones were chosen for it.
     SpellCopied {
@@ -518,6 +527,8 @@ pub enum LossReason {
     CommanderDamage,
     StateBasedEffect,
     Concede,
+    /// "You lose the game", or another player's "you win the game" (CR 104.3e, 104.2a).
+    Effect,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]

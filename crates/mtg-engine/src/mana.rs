@@ -74,8 +74,10 @@ pub const DELVE: AbilityId = AbilityId(u16::MAX - 1);
 struct Unit {
     /// `None` for mana already floating in the pool.
     source: Option<usize>,
-    /// Empty means this unit can only be colorless.
+    /// Colored alternatives this unit can produce.
     colors: Vec<Color>,
+    /// Colorless may be an alternative to a colored tapping ability.
+    colorless: bool,
     /// A convoking or improvising permanent with no colour to give: it pays generic
     /// only, never `{C}`.
     generic_only: bool,
@@ -88,9 +90,9 @@ impl Unit {
         }
         match req {
             ColorRequirement::OneOf(want) => self.colors.iter().any(|c| want.contains(c)),
-            // {C} specifically requires colorless mana, which a coloured source
-            // cannot produce.
-            ColorRequirement::Colorless => self.colors.is_empty(),
+            // {C} requires a colorless output, including an alternative ability
+            // on a permanent that can also produce colored mana.
+            ColorRequirement::Colorless => self.colorless,
         }
     }
 }
@@ -153,6 +155,9 @@ pub struct Payment {
     pub spend: [u16; 6],
     /// Life paid for phyrexian symbols.
     pub life: u32,
+    eligible_restricted: Vec<usize>,
+    prior_restricted: usize,
+    eligible_sources: Vec<ObjectId>,
 }
 
 impl Payment {
@@ -192,10 +197,15 @@ pub fn plan(
     // Restricted mana pays only for the spells it names (`plan_spell`) — unless only
     // spells are restricted, and this is not one.
     sources.retain(|s| s.only.is_none() || s.spells_only);
-    let pool = state.player(player).mana.amounts;
+    let (pool, eligible) = eligible_pool(state, cards, player, None);
     let life = state.player(player).life;
     let req = requirements(cost, x);
-    plan_with(&req, &sources, pool, life)
+    annotate_payment(
+        plan_with(&req, &sources, pool, life)?,
+        state,
+        &sources,
+        eligible,
+    )
 }
 
 /// [`plan`] for casting a particular spell: with convoke or improvise, untapped creatures
@@ -318,9 +328,98 @@ pub fn plan_spell(
             });
         }
     }
-    let pool = state.player(player).mana.amounts;
+    let (pool, eligible) = eligible_pool(state, cards, player, (!is_ability).then_some(spell));
     let life = state.player(player).life;
-    plan_with(&requirements(cost, x), &sources, pool, life)
+    annotate_payment(
+        plan_with(&requirements(cost, x), &sources, pool, life)?,
+        state,
+        &sources,
+        eligible,
+    )
+}
+
+fn eligible_pool(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    player: PlayerId,
+    spell: Option<ObjectId>,
+) -> ([u16; 6], Vec<usize>) {
+    let mut pool = state.player(player).mana.amounts;
+    let mut eligible = Vec::new();
+    for (index, bucket) in state.restricted_mana.iter().enumerate() {
+        if bucket.player != player {
+            continue;
+        }
+        let allowed = bucket.restrictions.iter().all(|(filter, spells_only)| {
+            let Some(spell) = spell else {
+                return *spells_only;
+            };
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source: bucket.source,
+                controller: player,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            crate::eval::matches(&ctx, filter, spell).unwrap_or(false)
+        });
+        if allowed {
+            eligible.push(index);
+        } else {
+            for (slot, amount) in bucket.amounts.iter().enumerate() {
+                pool[slot] = pool[slot].saturating_sub(*amount);
+            }
+        }
+    }
+    (pool, eligible)
+}
+
+fn annotate_payment(
+    mut payment: Payment,
+    state: &GameState,
+    sources: &[ManaSource],
+    eligible: Vec<usize>,
+) -> Option<Payment> {
+    payment.eligible_restricted = eligible;
+    payment.prior_restricted = state.restricted_mana.len();
+    payment.eligible_sources = sources.iter().map(|source| source.object).collect();
+    Some(payment)
+}
+
+/// Remove only provenance for units authorized by this payment. Aggregate counts
+/// still flow through ManaSpent events, so the event log remains unchanged.
+pub(crate) fn consume_restricted(state: &mut GameState, player: PlayerId, payment: &Payment) {
+    let pool = state.player(player).mana.amounts;
+    for (slot, total) in pool.iter().enumerate() {
+        let restricted: u32 = state
+            .restricted_mana
+            .iter()
+            .filter(|bucket| bucket.player == player)
+            .map(|bucket| u32::from(bucket.amounts[slot]))
+            .sum();
+        let unrestricted = u32::from(*total).saturating_sub(restricted);
+        let mut remaining = u32::from(payment.spend[slot]).saturating_sub(unrestricted);
+        for (index, bucket) in state.restricted_mana.iter_mut().enumerate() {
+            if bucket.player != player
+                || !(payment.eligible_restricted.contains(&index)
+                    || (index >= payment.prior_restricted
+                        && payment.eligible_sources.contains(&bucket.source)))
+            {
+                continue;
+            }
+            let used = remaining.min(u32::from(bucket.amounts[slot]));
+            bucket.amounts[slot] -= used as u16;
+            remaining -= used;
+        }
+    }
+    state
+        .restricted_mana
+        .retain(|bucket| bucket.amounts.iter().any(|amount| *amount > 0));
 }
 
 /// The algorithm proper, separated from state so it can be tested directly.
@@ -330,26 +429,204 @@ pub fn plan_with(
     pool: [u16; 6],
     life: i32,
 ) -> Option<Payment> {
-    // A `{2/W}` symbol is a fork: pay the colour or pay the generic. Try every
-    // combination, cheapest-in-mana first. The count is tiny in practice — a card
-    // with more than two such symbols does not exist — so brute force is honest and
-    // simpler than a smarter search that could be wrong.
-    let forks = 1usize << req.mono_hybrid.len().min(8);
-    for mask in 0..forks {
-        let mut trial = req.clone();
-        trial.mono_hybrid.clear();
-        for (i, (n, c)) in req.mono_hybrid.iter().enumerate() {
-            if mask & (1 << i) == 0 {
-                trial.colored.push(ColorRequirement::OneOf(vec![*c]));
-            } else {
-                trial.generic += u32::from(*n);
+    // Each mono-hybrid symbol offers color or generic payment. Reject infeasible
+    // prefixes and remember equivalent failed allocations instead of truncating
+    // the cost or relying on a machine-sized bit mask.
+    fn alternatives(
+        index: usize,
+        symbols: &[(u8, Color)],
+        trial: &mut Requirements,
+        sources: &[ManaSource],
+        pool: [u16; 6],
+        life: i32,
+        failed: &mut std::collections::BTreeSet<(usize, u32, [usize; 5])>,
+    ) -> Option<Payment> {
+        let mut counts = [0; 5];
+        for requirement in &trial.colored {
+            if let ColorRequirement::OneOf(colors) = requirement
+                && colors.len() == 1
+            {
+                counts[colors[0] as usize] += 1;
             }
         }
-        if let Some(p) = solve(&trial, sources, pool, life) {
-            return Some(p);
+        let key = (index, trial.generic, counts);
+        if failed.contains(&key) {
+            return None;
+        }
+        let Some(payment) = solve_source_choices(trial, sources, pool, life) else {
+            failed.insert(key);
+            return None;
+        };
+        let Some((amount, color)) = symbols.get(index) else {
+            return Some(payment);
+        };
+        trial.colored.push(ColorRequirement::OneOf(vec![*color]));
+        let colored = alternatives(index + 1, symbols, trial, sources, pool, life, failed);
+        trial.colored.pop();
+        if colored.is_some() {
+            return colored;
+        }
+        let original_generic = trial.generic;
+        trial.generic = trial.generic.checked_add(u32::from(*amount))?;
+        let generic = alternatives(index + 1, symbols, trial, sources, pool, life, failed);
+        trial.generic = original_generic;
+        if generic.is_none() {
+            failed.insert(key);
+        }
+        generic
+    }
+    if req.mono_hybrid.is_empty() {
+        return solve_source_choices(req, sources, pool, life);
+    }
+    let mut trial = req.clone();
+    trial.mono_hybrid.clear();
+    alternatives(
+        0,
+        &req.mono_hybrid,
+        &mut trial,
+        sources,
+        pool,
+        life,
+        &mut Default::default(),
+    )
+}
+
+fn source_units(source: &ManaSource) -> usize {
+    source
+        .outputs
+        .iter()
+        .map(|output| match output {
+            ManaOutput::Repeated {
+                amount: mtg_ir::Value::Fixed(n),
+                ..
+            } => (*n).max(0) as usize,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// Multi-mana outputs are correlated by one activation. Select a whole ability
+/// and its color before matching units; ordinary one-mana sources keep the fast
+/// matching path, including their shared-permanent alternatives.
+fn solve_source_choices(
+    req: &Requirements,
+    sources: &[ManaSource],
+    pool: [u16; 6],
+    life: i32,
+) -> Option<Payment> {
+    fn concrete(output: &ManaOutput, color: Option<Color>) -> ManaOutput {
+        match output {
+            ManaOutput::AnyOf(colors) => color
+                .filter(|c| colors.contains(c))
+                .or_else(|| colors.first().copied())
+                .map(ManaOutput::Colored)
+                .unwrap_or_else(|| output.clone()),
+            ManaOutput::Repeated { amount, output } => ManaOutput::Repeated {
+                amount: amount.clone(),
+                output: Box::new(concrete(output, color)),
+            },
+            _ => output.clone(),
         }
     }
-    None
+    let mut excluded = vec![false; sources.len()];
+    let mut branches = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        if excluded[index] || source.ability == HELPER || source.ability == DELVE {
+            continue;
+        }
+        let group: Vec<usize> = if source.taps {
+            (index..sources.len())
+                .filter(|j| {
+                    sources[*j].taps
+                        && sources[*j].object == source.object
+                        && sources[*j].ability != HELPER
+                        && sources[*j].ability != DELVE
+                })
+                .collect()
+        } else {
+            vec![index]
+        };
+        let multi = group.iter().any(|j| source_units(&sources[*j]) > 1);
+        let correlated = group.iter().any(|j| {
+            source_units(&sources[*j]) > 1
+                && sources[*j].outputs.iter().any(ManaOutput::is_ambiguous)
+        });
+        if !(correlated || (multi && group.len() > 1)) {
+            continue;
+        }
+        let mut alternatives = Vec::new();
+        for j in group {
+            excluded[j] = true;
+            for color in color_options(&sources[j]) {
+                let mut selected = sources[j].clone();
+                selected.outputs = selected
+                    .outputs
+                    .iter()
+                    .map(|out| concrete(out, color))
+                    .collect();
+                alternatives.push((selected, color));
+            }
+        }
+        branches.push(alternatives);
+    }
+    if branches.is_empty() {
+        return solve(req, sources, pool, life);
+    }
+    fn select(
+        index: usize,
+        branches: &[Vec<(ManaSource, Option<Color>)>],
+        selected: &mut Vec<ManaSource>,
+        req: &Requirements,
+        pool: [u16; 6],
+        life: i32,
+    ) -> Option<Payment> {
+        // A necessary capacity bound avoids enumerating choices when even each
+        // remaining permanent's largest output cannot cover the mana cost.
+        // Phyrexian symbols are omitted because life may pay for them.
+        let available = pool.iter().map(|n| u64::from(*n)).sum::<u64>()
+            + selected.iter().map(|s| source_units(s) as u64).sum::<u64>()
+            + branches[index..]
+                .iter()
+                .map(|options| {
+                    options
+                        .iter()
+                        .map(|(s, _)| source_units(s) as u64)
+                        .max()
+                        .unwrap_or(0)
+                })
+                .sum::<u64>();
+        if available < req.colored.len() as u64 + u64::from(req.generic) {
+            return None;
+        }
+        if index == branches.len() {
+            return solve(req, selected, pool, life);
+        }
+        for (source, color) in &branches[index] {
+            selected.push(source.clone());
+            let payment = select(index + 1, branches, selected, req, pool, life);
+            selected.pop();
+            if let Some(mut payment) = payment {
+                // The matcher may spend any of several produced units first;
+                // the recorded choice must remain the whole ability's choice.
+                if color.is_some() {
+                    for (object, ability, choice) in &mut payment.activate {
+                        if *object == source.object && *ability == source.ability {
+                            *choice = *color;
+                        }
+                    }
+                }
+                return Some(payment);
+            }
+        }
+        None
+    }
+    let mut selected = sources
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| !excluded[*j])
+        .map(|(_, s)| s.clone())
+        .collect();
+    select(0, &branches, &mut selected, req, pool, life)
 }
 
 fn solve(req: &Requirements, sources: &[ManaSource], pool: [u16; 6], life: i32) -> Option<Payment> {
@@ -365,10 +642,23 @@ fn solve(req: &Requirements, sources: &[ManaSource], pool: [u16; 6], life: i32) 
             .map(|c| ColorRequirement::OneOf(vec![*c])),
     );
 
-    let matching = match_requirements(&mandatory, &units);
+    let mut matching = match_requirements(&mandatory, &units);
 
     // Every non-phyrexian requirement must be matched.
     if matching[..phyrexian_start].iter().any(Option::is_none) {
+        return None;
+    }
+
+    // Mana assigned to optional Phyrexian symbols may be needed for mandatory
+    // generic payment. Free those assignments and pay those symbols with life.
+    let free = units.len() - matching.iter().flatten().count();
+    let mut release = (req.generic as usize).saturating_sub(free);
+    for assigned in matching[phyrexian_start..].iter_mut().rev() {
+        if release > 0 && assigned.take().is_some() {
+            release -= 1;
+        }
+    }
+    if release > 0 {
         return None;
     }
 
@@ -448,9 +738,23 @@ fn charge(payment: &mut Payment, unit: &Unit, sources: &[ManaSource], color: Opt
     payment.spend[slot] += 1;
 
     // A source is activated once even when it makes several mana, so it is recorded
-    // only the first time one of its units is spent.
+    // only the first time one of its units is spent. A permanent's tapping abilities
+    // merged into one unit (see `build_units`) activate the one that makes this color.
     if let Some(si) = unit.source {
-        let s = &sources[si];
+        let makes = |s: &ManaSource| {
+            s.outputs.iter().any(|o| match color {
+                Some(c) => o.possible_colors().contains(&c),
+                None => o.possible_colors().is_empty(),
+            })
+        };
+        let s = if sources[si].taps && !makes(&sources[si]) {
+            sources
+                .iter()
+                .find(|o| o.object == sources[si].object && o.taps && makes(o))
+                .unwrap_or(&sources[si])
+        } else {
+            &sources[si]
+        };
         if !payment
             .activate
             .iter()
@@ -486,13 +790,66 @@ fn build_units(sources: &[ManaSource], pool: [u16; 6]) -> Vec<Unit> {
             units.push(Unit {
                 source: None,
                 colors: colors.clone(),
+                colorless: slot == 5,
                 generic_only: false,
             });
         }
     }
 
+    // A permanent taps once (CR 106.1/605): its tapping abilities are one unit of mana
+    // between them when each makes one ("{T}: Add {G}" and the Forest's own), which
+    // [`charge`] maps back to the ability that makes the color spent. Where one makes
+    // more, `solve_source_choices` selects the whole ability before reaching here.
+    let tapping = |s: &ManaSource| s.taps && s.ability != HELPER && s.ability != DELVE;
+    let mut skip = vec![false; sources.len()];
     let mut from_sources = Vec::new();
     for (i, s) in sources.iter().enumerate() {
+        if skip[i] || !tapping(s) {
+            continue;
+        }
+        let group: Vec<usize> = (i..sources.len())
+            .filter(|j| tapping(&sources[*j]) && sources[*j].object == s.object)
+            .collect();
+        if group.len() < 2 {
+            continue;
+        }
+        for j in &group {
+            skip[*j] = true;
+        }
+        if group.iter().all(|j| source_units(&sources[*j]) == 1) {
+            let mut colors: Vec<Color> = Vec::new();
+            for j in &group {
+                for out in &sources[*j].outputs {
+                    for c in out.possible_colors() {
+                        if !colors.contains(&c) {
+                            colors.push(c);
+                        }
+                    }
+                }
+            }
+            from_sources.push(Unit {
+                source: Some(i),
+                colors,
+                colorless: group.iter().any(|j| {
+                    sources[*j]
+                        .outputs
+                        .iter()
+                        .any(|out| out.possible_colors().is_empty())
+                }),
+                generic_only: false,
+            });
+        } else if let Some(best) = group
+            .iter()
+            .copied()
+            .max_by_key(|j| source_units(&sources[*j]))
+        {
+            skip[best] = false;
+        }
+    }
+    for (i, s) in sources.iter().enumerate() {
+        if skip[i] {
+            continue;
+        }
         for out in &s.outputs {
             let n = match out {
                 // A `Repeated` output with a dynamic amount cannot be sized without
@@ -508,6 +865,7 @@ fn build_units(sources: &[ManaSource], pool: [u16; 6]) -> Vec<Unit> {
                 let colors = out.possible_colors();
                 from_sources.push(Unit {
                     source: Some(i),
+                    colorless: colors.is_empty(),
                     generic_only: (s.ability == HELPER || s.ability == DELVE) && colors.is_empty(),
                     colors,
                 });
@@ -678,15 +1036,17 @@ pub fn mana_sources(
                 continue;
             }
 
-            let chosen = state.objects.get(&id).and_then(|o| o.chosen_color);
-            let outputs: Vec<ManaOutput> = collect_mana_outputs(effect)
+            let mut outputs: Vec<ManaOutput> = collect_mana_outputs(effect)
                 .iter()
-                .map(|o| with_chosen_color(o, chosen))
+                .flat_map(|o| concrete_outputs(state, cards, id, player, o))
                 .map(|o| counted(state, cards, id, player, 0, o))
                 .collect();
+            // Wild Growth: tapping it for mana makes more.
+            if taps && !outputs.is_empty() {
+                outputs.extend(additional_mana(state, cards, id));
+            }
             // "The chosen color" with none chosen makes nothing.
-            if !outputs.is_empty() && !outputs.iter().any(|o| matches!(o, ManaOutput::ChosenColor))
-            {
+            if !outputs.is_empty() && !outputs.iter().any(unresolved) {
                 out.push(ManaSource {
                     object: id,
                     ability: ability.id,
@@ -700,7 +1060,58 @@ pub fn mana_sources(
         }
     }
 
+    // "Exile this card from your hand: Add {R}." (Simian Spirit Guide): a mana ability of a
+    // card in hand, used up as it is activated.
+    for id in state.objects_in(mtg_core::ZoneRef::of(mtg_core::Zone::Hand, player)) {
+        let Some(face) = state
+            .objects
+            .get(&id)
+            .and_then(|o| cards.face(o.card, o.face))
+        else {
+            continue;
+        };
+        for ability in &face.abilities {
+            let AbilityKind::Activated {
+                cost,
+                effect,
+                is_mana_ability: true,
+                functions_from: mtg_core::Zone::Hand,
+                ..
+            } = &ability.kind
+            else {
+                continue;
+            };
+            if !cost.mana.symbols.is_empty() || !exiles_self_from_hand(cost) {
+                continue;
+            }
+            let outputs = collect_mana_outputs(effect);
+            if !outputs.is_empty() {
+                out.push(ManaSource {
+                    object: id,
+                    ability: ability.id,
+                    outputs,
+                    taps: false,
+                    sacrifices: true,
+                    only: spend_only(effect),
+                    spells_only: spends_on_non_spells(effect),
+                });
+            }
+        }
+    }
+
     out
+}
+
+/// Whether a cost is exactly "exile this card from your hand".
+pub fn exiles_self_from_hand(cost: &mtg_ir::Cost) -> bool {
+    matches!(
+        cost.additional.as_slice(),
+        [mtg_ir::AdditionalCost::ExileFrom {
+            zone: mtg_core::Zone::Hand,
+            filter: mtg_ir::ObjectFilter::IsSelf,
+            ..
+        }]
+    )
 }
 
 /// Whether a mana ability's cost is a choice — "tap an untapped creature you control",
@@ -718,6 +1129,15 @@ pub fn announced(cost: &mtg_ir::Cost) -> bool {
                     amount: Value::X,
                     ..
                 }
+                // "Sacrifice a creature: Add {C}{C}." — which one is chosen.
+                | A::Sacrifice {
+                    what: S::All { .. },
+                    ..
+                }
+                // "Discard your hand, sacrifice this artifact: Add three mana …" — never
+                // spent automatically, and only when its controller has priority, which
+                // makes it "activate only as an instant".
+                | A::DiscardHand
         )
     })
 }
@@ -759,7 +1179,10 @@ pub fn manual_source(
             } | A::TapUntapped {
                 count: Value::Fixed(1..),
                 ..
-            }
+            } | A::Sacrifice {
+                what: S::All { .. },
+                count: Value::Fixed(1)
+            } | A::DiscardHand
         )
     }) || !crate::cost::additional_payable(state, cards, object, player, cost)
     {
@@ -799,12 +1222,11 @@ pub fn manual_source(
     {
         return None;
     }
-    let chosen = state.objects.get(&object).and_then(|o| o.chosen_color);
     let outputs: Vec<ManaOutput> = collect_mana_outputs(effect)
         .iter()
-        .map(|o| with_chosen_color(o, chosen))
+        .flat_map(|o| concrete_outputs(state, cards, object, player, o))
         .collect();
-    if outputs.is_empty() || outputs.iter().any(|o| matches!(o, ManaOutput::ChosenColor)) {
+    if outputs.is_empty() || outputs.iter().any(unresolved) {
         return None;
     }
     Some(ManaSource {
@@ -856,37 +1278,342 @@ pub(crate) fn counted(
     }
 }
 
-/// "One mana of the chosen color", as the color its source chose.
-pub(crate) fn with_chosen_color(out: &ManaOutput, chosen: Option<Color>) -> ManaOutput {
+/// A mana output as its source makes it now: "one mana of the chosen color" as the color it
+/// chose, "any color in your commander's color identity" as those colors, "any of the
+/// exiled card's colors", "any color among …". An output with nothing to make stays
+/// unresolved (see [`unresolved`]) and makes no mana.
+pub(crate) fn concrete_output(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    player: PlayerId,
+    out: &ManaOutput,
+) -> ManaOutput {
+    let any_of = |colors: Vec<Color>, unresolved: ManaOutput| match colors.as_slice() {
+        [] => unresolved,
+        [one] => ManaOutput::Colored(*one),
+        several => ManaOutput::AnyOf(several.to_vec()),
+    };
     match out {
-        ManaOutput::ChosenColor => match chosen {
+        ManaOutput::ChosenColor => match state.objects.get(&source).and_then(|o| o.chosen_color) {
             Some(c) => ManaOutput::Colored(c),
             None => ManaOutput::ChosenColor,
         },
-        ManaOutput::AnyOf(cs) => ManaOutput::AnyOf(cs.clone()),
+        ManaOutput::OrChosen(color) => {
+            match state.objects.get(&source).and_then(|o| o.chosen_color) {
+                Some(c) if c != *color => ManaOutput::AnyOf(vec![*color, c]),
+                _ => ManaOutput::Colored(*color),
+            }
+        }
+        ManaOutput::CommanderIdentity => any_of(
+            commander_identity(state, cards, player),
+            ManaOutput::CommanderIdentity,
+        ),
+        ManaOutput::ExiledCardColors => {
+            let exiled = state
+                .exiled_with
+                .iter()
+                .filter(|(by, _)| *by == source)
+                .map(|(_, card)| *card);
+            any_of(
+                colors_of(state, cards, exiled),
+                ManaOutput::ExiledCardColors,
+            )
+        }
+        ManaOutput::ColorsAmong(sel) => {
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source,
+                controller: player,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            let among = crate::eval::objects(&ctx, sel).unwrap_or_default();
+            any_of(colors_of(state, cards, among.into_iter()), out.clone())
+        }
+        // CR 106.7 — the colors those lands' mana abilities could make, without looking
+        // through another land that asks the same question (two Exotic Orchards).
+        ManaOutput::LandColors(whose) => {
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source,
+                controller: player,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            let players = crate::eval::players(&ctx, whose).unwrap_or_default();
+            let mut colors = Vec::new();
+            for land in state.battlefield() {
+                let Some(owner) = crate::layers::controller(state, land) else {
+                    continue;
+                };
+                if !players.contains(&owner)
+                    || !crate::layers::compute(state, cards, land)
+                        .is_some_and(|c| c.has_type(mtg_core::CardType::Land))
+                {
+                    continue;
+                }
+                for ability in &crate::abilities::current(state, cards, land) {
+                    let AbilityKind::Activated {
+                        effect,
+                        is_mana_ability: true,
+                        ..
+                    } = &ability.kind
+                    else {
+                        continue;
+                    };
+                    for made in collect_mana_outputs(effect) {
+                        if matches!(made, ManaOutput::LandColors(_)) {
+                            continue;
+                        }
+                        let made = concrete_output(state, cards, land, owner, &made);
+                        for c in made.possible_colors() {
+                            if !colors.contains(&c) {
+                                colors.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+            let ordered = [
+                Color::White,
+                Color::Blue,
+                Color::Black,
+                Color::Red,
+                Color::Green,
+            ]
+            .into_iter()
+            .filter(|c| colors.contains(c))
+            .collect();
+            any_of(ordered, out.clone())
+        }
         ManaOutput::Repeated { amount, output } => ManaOutput::Repeated {
             amount: amount.clone(),
-            output: Box::new(with_chosen_color(output, chosen)),
+            output: Box::new(concrete_output(state, cards, source, player, output)),
         },
         other => other.clone(),
     }
 }
 
-/// Whether a mana ability's restriction is only about casting spells (a Powerstone's).
-fn spends_on_non_spells(effect: &Effect) -> bool {
-    match effect {
-        Effect::SpendOnly { spells_only, .. } => *spells_only,
-        Effect::Sequence(items) => items.iter().any(spends_on_non_spells),
+/// What else tapping `object` for mana makes: "whenever enchanted land is tapped for mana,
+/// its controller adds an additional {G}" (Wild Growth), each effect's mana made concrete
+/// from its own source. Only fixed outputs: a choice would need its own color answer.
+pub(crate) fn additional_mana(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+) -> Vec<ManaOutput> {
+    let mut out = Vec::new();
+    for e in crate::layers::effects(state, cards) {
+        let mtg_ir::effect::Modification::Restriction(
+            mtg_ir::effect::Restriction::AddsAdditionalMana { produces },
+        ) = &e.modification
+        else {
+            continue;
+        };
+        if !crate::layers::applies(state, cards, &e, object) {
+            continue;
+        }
+        let Some(controller) = crate::layers::controller(state, e.source) else {
+            continue;
+        };
+        for p in produces {
+            let made = concrete_output(state, cards, e.source, controller, p);
+            if made.possible_colors().len() <= 1 && !unresolved(&made) {
+                out.push(made);
+            }
+        }
+    }
+    out
+}
+
+/// [`concrete_output`], with "one mana of each color among …" as one output per color.
+pub(crate) fn concrete_outputs(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    player: PlayerId,
+    out: &ManaOutput,
+) -> Vec<ManaOutput> {
+    let ManaOutput::EachColorAmong(sel) = out else {
+        return vec![concrete_output(state, cards, source, player, out)];
+    };
+    let chars = crate::eval::ComputedChars(cards);
+    let ctx = crate::eval::Ctx {
+        state,
+        cards,
+        chars: &chars,
+        source,
+        controller: player,
+        targets: &[],
+        target_legal: &[],
+        x: 0,
+        bindings: crate::empty_bindings(),
+    };
+    let among = crate::eval::objects(&ctx, sel).unwrap_or_default();
+    colors_of(state, cards, among.into_iter())
+        .into_iter()
+        .map(ManaOutput::Colored)
+        .collect()
+}
+
+/// The colors among these objects, in WUBRG order.
+fn colors_of(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    objects: impl Iterator<Item = ObjectId>,
+) -> Vec<Color> {
+    let computed: Vec<_> = objects
+        .filter_map(|id| crate::layers::compute(state, cards, id))
+        .collect();
+    [
+        Color::White,
+        Color::Blue,
+        Color::Black,
+        Color::Red,
+        Color::Green,
+    ]
+    .into_iter()
+    .filter(|c| computed.iter().any(|ch| ch.colors.contains(*c)))
+    .collect()
+}
+
+/// Whether an output is still waiting on its source (see [`with_chosen_color`]).
+pub(crate) fn unresolved(out: &ManaOutput) -> bool {
+    match out {
+        ManaOutput::ChosenColor
+        | ManaOutput::CommanderIdentity
+        | ManaOutput::ExiledCardColors
+        | ManaOutput::ColorsAmong(_)
+        | ManaOutput::LandColors(_)
+        | ManaOutput::EachColorAmong(_) => true,
+        ManaOutput::Repeated { output, .. } => unresolved(output),
         _ => false,
     }
 }
 
-/// What a mana ability's mana may be spent on, if it says.
+/// CR 903.4 — a player's commander's color identity: the colors of the mana symbols in its
+/// mana cost and rules text, and its color indicator, on every face.
+pub fn commander_identity(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    player: PlayerId,
+) -> Vec<Color> {
+    let Some(card) = state.commander.commanders.get(&player) else {
+        return Vec::new();
+    };
+    let mut colors: Vec<Color> = Vec::new();
+    let mut add = |c: Color| {
+        if !colors.contains(&c) {
+            colors.push(c);
+        }
+    };
+    for face in (0..=1).filter_map(|f| cards.face(*card, f)) {
+        for symbol in &face.mana_cost.symbols {
+            symbol_colors(symbol, &mut add);
+        }
+        for c in face.colors.iter().flatten() {
+            add(*c);
+        }
+        let text = face.oracle_text.as_deref().unwrap_or("");
+        for symbol in text.split('{').skip(1).filter_map(|s| s.split_once('}')) {
+            for part in symbol.0.split('/') {
+                if let Some(c) = match part {
+                    "W" => Some(Color::White),
+                    "U" => Some(Color::Blue),
+                    "B" => Some(Color::Black),
+                    "R" => Some(Color::Red),
+                    "G" => Some(Color::Green),
+                    _ => None,
+                } {
+                    add(c);
+                }
+            }
+        }
+    }
+    // WUBRG order, so the same commander always offers the same list.
+    [
+        Color::White,
+        Color::Blue,
+        Color::Black,
+        Color::Red,
+        Color::Green,
+    ]
+    .into_iter()
+    .filter(|c| colors.contains(c))
+    .collect()
+}
+
+fn symbol_colors(symbol: &mtg_core::ManaSymbol, add: &mut impl FnMut(Color)) {
+    use mtg_core::ManaSymbol as S;
+    match symbol {
+        S::Colored(c) | S::Phyrexian(c) | S::MonoHybrid(_, c) => add(*c),
+        S::Hybrid(a, b) => {
+            add(*a);
+            add(*b);
+        }
+        _ => {}
+    }
+}
+
+/// Whether a mana ability's restriction is only about casting spells (a Powerstone's).
+fn spends_on_non_spells(effect: &Effect) -> bool {
+    fn collect(effect: &Effect, restrictions: &mut Vec<bool>) {
+        match effect {
+            Effect::SpendOnly {
+                spells_only,
+                effect,
+                ..
+            } => {
+                restrictions.push(*spells_only);
+                collect(effect, restrictions);
+            }
+            Effect::Sequence(items) => {
+                for item in items {
+                    collect(item, restrictions);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut restrictions = Vec::new();
+    collect(effect, &mut restrictions);
+    !restrictions.is_empty() && restrictions.iter().all(|only| *only)
+}
+
+/// Conjoin nested restrictions; treating different branches conservatively cannot
+/// unlock mana whose restriction is not represented by the automatic source.
 fn spend_only(effect: &Effect) -> Option<mtg_ir::ObjectFilter> {
-    match effect {
-        Effect::SpendOnly { only, .. } => Some(only.clone()),
-        Effect::Sequence(items) => items.iter().find_map(spend_only),
-        _ => None,
+    fn collect(effect: &Effect, filters: &mut Vec<mtg_ir::ObjectFilter>) {
+        match effect {
+            Effect::SpendOnly { only, effect, .. } => {
+                filters.push(only.clone());
+                collect(effect, filters);
+            }
+            Effect::Sequence(items) => {
+                for item in items {
+                    collect(item, filters);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut filters = Vec::new();
+    collect(effect, &mut filters);
+    match filters.len() {
+        0 => None,
+        1 => filters.pop(),
+        _ => Some(mtg_ir::ObjectFilter::And(filters)),
     }
 }
 

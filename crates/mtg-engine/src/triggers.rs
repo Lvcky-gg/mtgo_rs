@@ -318,13 +318,12 @@ impl SelectorResolver for StateResolver<'_> {
             S::ActivePlayer => Some(vec![self.state.active_player]),
             S::Opponents => Some(
                 self.state
-                    .turn_order
-                    .iter()
-                    .copied()
+                    .apnap()
+                    .into_iter()
                     .filter(|p| *p != self.controller)
                     .collect(),
             ),
-            S::EachPlayer => Some(self.state.turn_order.clone()),
+            S::EachPlayer => Some(self.state.apnap()),
             S::Target { index } => match self.targets.get(*index as usize) {
                 Some(mtg_core::Target::Player(p)) => Some(vec![*p]),
                 Some(mtg_core::Target::Object(_)) => Some(Vec::new()),

@@ -1,0 +1,449 @@
+{
+  "format_version": 1,
+  "tier": "pr",
+  "property_cases_requested_per_property": 10000,
+  "semantic_action_budget_per_game": 200,
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "mtg-verify",
+        "--locked"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 25.665,
+      "log": "/tmp/mtgo-advance-pr/verification_tests.log",
+      "name": "verification_tests"
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "mtg-verify",
+        "--bin",
+        "mtgo-rs",
+        "--locked"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 3.592,
+      "log": "/tmp/mtgo-advance-pr/build_replay_cli.log",
+      "name": "build_replay_cli"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/basic_casting.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.064,
+      "log": "/tmp/mtgo-advance-pr/replays_0.log",
+      "name": "replays_0"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/combat.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.214,
+      "log": "/tmp/mtgo-advance-pr/replays_1.log",
+      "name": "replays_1"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/commander_cast.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.114,
+      "log": "/tmp/mtgo-advance-pr/replays_2.log",
+      "name": "replays_2"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/commander_declines_return.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.064,
+      "log": "/tmp/mtgo-advance-pr/replays_3.log",
+      "name": "replays_3"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/enters_trigger.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.064,
+      "log": "/tmp/mtgo-advance-pr/replays_4.log",
+      "name": "replays_4"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/multiplayer_elimination.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.114,
+      "log": "/tmp/mtgo-advance-pr/replays_5.log",
+      "name": "replays_5"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/multiplayer_priority.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.164,
+      "log": "/tmp/mtgo-advance-pr/replays_6.log",
+      "name": "replays_6"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/replays/stack_interaction.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.114,
+      "log": "/tmp/mtgo-advance-pr/replays_7.log",
+      "name": "replays_7"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_canonical_life_omission.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.008,
+      "log": "/tmp/mtgo-advance-pr/regressions_0.log",
+      "name": "regressions_0"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_copied_mana_spent.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.064,
+      "log": "/tmp/mtgo-advance-pr/regressions_1.log",
+      "name": "regressions_1"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_copied_spell_owner.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.032,
+      "log": "/tmp/mtgo-advance-pr/regressions_2.log",
+      "name": "regressions_2"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_copied_spell_target_identity.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.114,
+      "log": "/tmp/mtgo-advance-pr/regressions_3.log",
+      "name": "regressions_3"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_forced_commander_return.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.008,
+      "log": "/tmp/mtgo-advance-pr/regressions_4.log",
+      "name": "regressions_4"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_malformed_target_rejection.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.065,
+      "log": "/tmp/mtgo-advance-pr/regressions_5.log",
+      "name": "regressions_5"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_phased_out_targeting.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.008,
+      "log": "/tmp/mtgo-advance-pr/regressions_6.log",
+      "name": "regressions_6"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_priority_eliminated_player.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.016,
+      "log": "/tmp/mtgo-advance-pr/regressions_7.log",
+      "name": "regressions_7"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_shared_command_zone_casting.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.016,
+      "log": "/tmp/mtgo-advance-pr/regressions_8.log",
+      "name": "regressions_8"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_terminal_priority.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.016,
+      "log": "/tmp/mtgo-advance-pr/regressions_9.log",
+      "name": "regressions_9"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/home/lvcky/mtgo_rs/tests/regressions/issue_local_unpreventable_prevention.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.032,
+      "log": "/tmp/mtgo-advance-pr/regressions_10.log",
+      "name": "regressions_10"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "scenario",
+        "fuzz",
+        "/tmp/mtgo-advance-pr/semantic_seed_0.json",
+        "/tmp/mtgo-advance-pr/semantic_result_0.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.164,
+      "log": "/tmp/mtgo-advance-pr/semantic_0.log",
+      "name": "semantic_0",
+      "semantic_actions_observed": 200
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/tmp/mtgo-advance-pr/semantic_result_0.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.815,
+      "log": "/tmp/mtgo-advance-pr/semantic_replay_0.log",
+      "name": "semantic_replay_0"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "scenario",
+        "fuzz",
+        "/tmp/mtgo-advance-pr/semantic_seed_1.json",
+        "/tmp/mtgo-advance-pr/semantic_result_1.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.214,
+      "log": "/tmp/mtgo-advance-pr/semantic_1.log",
+      "name": "semantic_1",
+      "semantic_actions_observed": 200
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/tmp/mtgo-advance-pr/semantic_result_1.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.815,
+      "log": "/tmp/mtgo-advance-pr/semantic_replay_1.log",
+      "name": "semantic_replay_1"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "scenario",
+        "fuzz",
+        "/tmp/mtgo-advance-pr/semantic_seed_2.json",
+        "/tmp/mtgo-advance-pr/semantic_result_2.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.164,
+      "log": "/tmp/mtgo-advance-pr/semantic_2.log",
+      "name": "semantic_2",
+      "semantic_actions_observed": 200
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/tmp/mtgo-advance-pr/semantic_result_2.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.716,
+      "log": "/tmp/mtgo-advance-pr/semantic_replay_2.log",
+      "name": "semantic_replay_2"
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "scenario",
+        "fuzz",
+        "/tmp/mtgo-advance-pr/semantic_seed_3.json",
+        "/tmp/mtgo-advance-pr/semantic_result_3.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.164,
+      "log": "/tmp/mtgo-advance-pr/semantic_3.log",
+      "name": "semantic_3",
+      "semantic_actions_observed": 200
+    },
+    {
+      "command": [
+        "/home/lvcky/mtgo_rs/target/debug/mtgo-rs",
+        "replay",
+        "/tmp/mtgo-advance-pr/semantic_result_3.json"
+      ],
+      "status": "PASS",
+      "exit_code": 0,
+      "elapsed_seconds": 0.816,
+      "log": "/tmp/mtgo-advance-pr/semantic_replay_3.log",
+      "name": "semantic_replay_3"
+    }
+  ],
+  "unsupported_campaigns": [
+    "real-deck network impairment campaigns",
+    "external engine differential testing"
+  ],
+  "confidence_promotion": false,
+  "semantic_actions_observed": 800,
+  "passed": true,
+  "source_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "review_fixture_metadata": {
+    "origin": "Observed checks copied from /tmp/mtgo-advance-pr/report.json",
+    "synthetic_fields": [
+      "source_fingerprint",
+      "plan"
+    ],
+    "note": "Schema-only synthetic plan/provenance; not evidence of a new execution."
+  },
+  "plan": {
+    "corpora": {
+      "replays": [
+        "tests/replays/basic_casting.json",
+        "tests/replays/combat.json",
+        "tests/replays/commander_cast.json",
+        "tests/replays/commander_declines_return.json",
+        "tests/replays/enters_trigger.json",
+        "tests/replays/multiplayer_elimination.json",
+        "tests/replays/multiplayer_priority.json",
+        "tests/replays/stack_interaction.json"
+      ],
+      "regressions": [
+        "tests/regressions/issue_local_canonical_life_omission.json",
+        "tests/regressions/issue_local_copied_mana_spent.json",
+        "tests/regressions/issue_local_copied_spell_owner.json",
+        "tests/regressions/issue_local_copied_spell_target_identity.json",
+        "tests/regressions/issue_local_forced_commander_return.json",
+        "tests/regressions/issue_local_malformed_target_rejection.json",
+        "tests/regressions/issue_local_phased_out_targeting.json",
+        "tests/regressions/issue_local_priority_eliminated_player.json",
+        "tests/regressions/issue_local_shared_command_zone_casting.json",
+        "tests/regressions/issue_local_terminal_priority.json",
+        "tests/regressions/issue_local_unpreventable_prevention.json"
+      ]
+    },
+    "semantic_games": 4,
+    "checks": [
+      "verification_tests",
+      "build_replay_cli",
+      "replays_0",
+      "replays_1",
+      "replays_2",
+      "replays_3",
+      "replays_4",
+      "replays_5",
+      "replays_6",
+      "replays_7",
+      "regressions_0",
+      "regressions_1",
+      "regressions_2",
+      "regressions_3",
+      "regressions_4",
+      "regressions_5",
+      "regressions_6",
+      "regressions_7",
+      "regressions_8",
+      "regressions_9",
+      "regressions_10",
+      "semantic_0",
+      "semantic_replay_0",
+      "semantic_1",
+      "semantic_replay_1",
+      "semantic_2",
+      "semantic_replay_2",
+      "semantic_3",
+      "semantic_replay_3"
+    ]
+  }
+}

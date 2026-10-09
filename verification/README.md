@@ -21,5 +21,5 @@ VERIFIED requires same-build, independently reviewed golden, property,
 differential, fuzz, and production mutation evidence meeting explicit thresholds.
 Builder-only evidence may reach TESTED, never VERIFIED. Failing current-build
 reports force EXPERIMENTAL. Controlled predicate mutation examples are excluded
-from production mutation counts. No local four-mutant smoke result alone satisfies
+from production mutation counts. A small curated mutation smoke result alone does not satisfy
 the default minimum sample of 20 production mutations.

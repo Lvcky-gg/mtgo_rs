@@ -151,11 +151,28 @@ pub fn compute(
     // Created once, on the stack, and threaded through: every selector and value
     // inside a continuous effect is evaluated against printed characteristics.
     let chars = crate::eval::PrintedChars(printed);
-    let effects = ordered_effects(state, printed, &chars, id);
+    let effects = ordered_effects(state, printed, id);
+    // Whether a "creatures that are …" effect reaches this object is decided as its layer
+    // comes up, from what the object has become so far: a creature that became blue in
+    // layer 5 gets "blue creatures get +1/+1" in layer 7 (CR 613.1). Other objects are
+    // still read as printed.
+    let reaches = |effect: &ContinuousEffect, ch: &Characteristics| match effect.affected {
+        AffectedSet::Fixed(_) => true,
+        AffectedSet::Dynamic(_) => {
+            let so_far = SoFar {
+                id,
+                ch,
+                printed: &chars,
+            };
+            affects(state, printed, &so_far, effect, id)
+        }
+    };
 
     // Layers 1 through 7c.
     for effect in effects.iter().filter(|e| e.layer <= layer::PT_MODIFY) {
-        apply_one(&mut ch, effect, state, printed, &chars, obj);
+        if reaches(effect, &ch) {
+            apply_one(&mut ch, effect, state, printed, &chars, obj);
+        }
     }
 
     // Layer 7d — counters.
@@ -171,13 +188,34 @@ pub fn compute(
 
     // Layer 7e — switching, which must see the post-counter values.
     for effect in effects.iter().filter(|e| e.layer >= layer::PT_SWITCH) {
-        apply_one(&mut ch, effect, state, printed, &chars, obj);
+        if reaches(effect, &ch) {
+            apply_one(&mut ch, effect, state, printed, &chars, obj);
+        }
     }
 
     Some(ch)
 }
 
-/// Continuous effects affecting `id`, sorted into application order.
+/// The object being computed as it stands partway through the layers, and every other
+/// object as printed.
+struct SoFar<'a> {
+    id: ObjectId,
+    ch: &'a Characteristics,
+    printed: &'a crate::eval::PrintedChars<'a>,
+}
+
+impl CharacteristicsSource for SoFar<'_> {
+    fn characteristics(&self, state: &GameState, id: ObjectId) -> Option<Characteristics> {
+        if id == self.id {
+            Some(self.ch.clone())
+        } else {
+            self.printed.characteristics(state, id)
+        }
+    }
+}
+
+/// Continuous effects that may affect `id`, sorted into application order. Fixed sets
+/// are settled here; dynamic ones are decided layer by layer in [`compute`].
 ///
 /// Sorting is by `(layer, timestamp)`, then dependency-corrected. Dependency
 /// handling (CR 613.8) is the subtle part: effect A depends on B when applying B
@@ -187,12 +225,14 @@ pub fn compute(
 fn ordered_effects(
     state: &GameState,
     printed: &dyn PrintedCards,
-    chars: &dyn CharacteristicsSource,
     id: ObjectId,
 ) -> Vec<ContinuousEffect> {
     let mut applicable: Vec<ContinuousEffect> = effects(state, printed)
         .into_iter()
-        .filter(|e| affects(state, printed, chars, e, id))
+        .filter(|e| match &e.affected {
+            AffectedSet::Fixed(ids) => ids.contains(&id),
+            AffectedSet::Dynamic(_) => true,
+        })
         .collect();
 
     applicable.sort_by_key(|e| (e.layer, e.timestamp));
@@ -221,11 +261,14 @@ fn dependency_sort(_effects: &mut [ContinuousEffect]) {}
 /// A static effect takes its source's timestamp (CR 613.7a) and re-evaluates its
 /// affected set on every pass.
 ///
-/// Not yet modelled: a static ability removed by a layer 6 effect ("loses all
-/// abilities") still applies. Checking would need the source's computed abilities
-/// while computing characteristics — the CR 613.8 dependency case.
+/// A permanent that loses all its abilities (layer 6) has no static abilities, so they
+/// generate no effects — not even in layer 7, which comes later (CR 613.1f). Which
+/// permanents lose them is read from printed characteristics, like every affected set.
+/// The ability that removes them keeps applying, even to its own source (CR 613.6).
+/// Not modelled: removal decided by characteristics another effect changed (CR 613.8).
 pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousEffect> {
     let mut out = state.continuous.clone();
+    let mut statics = Vec::new();
     let spells = state
         .objects_in(mtg_core::ZoneRef::shared(mtg_core::Zone::Stack))
         .into_iter()
@@ -286,7 +329,7 @@ pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousE
                     continue;
                 }
             }
-            out.push(ContinuousEffect {
+            statics.push(ContinuousEffect {
                 id,
                 source: id,
                 affected: AffectedSet::Dynamic(what.clone()),
@@ -299,6 +342,27 @@ pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousE
             });
         }
     }
+    let silencers: Vec<ContinuousEffect> = out
+        .iter()
+        .chain(&statics)
+        .filter(|e| {
+            matches!(
+                e.modification,
+                mtg_ir::effect::Modification::LoseAllAbilities
+            )
+        })
+        .cloned()
+        .collect();
+    if !silencers.is_empty() {
+        let chars = crate::eval::PrintedChars(printed);
+        statics.retain(|e| {
+            !silencers.iter().any(|s| {
+                !(s.source == e.source && s.ability == e.ability)
+                    && affects(state, printed, &chars, s, e.source)
+            })
+        });
+    }
+    out.extend(statics);
     out
 }
 

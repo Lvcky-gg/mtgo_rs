@@ -19,3 +19,7 @@ in a four-player 40-life setup. It is not a complete Commander game and does not
 verify commander-damage elimination, deck construction, or every Commander
 interaction. A separate owner-declines-return replay exercises the optional
 graveyard return and subsequent priority without a repeated prompt.
+
+`multiplayer_elimination.json` checkpoints were intentionally refreshed for the
+CR 800.4a increment after its golden tests passed: the eliminated player's
+library now leaves the game with them. Answers and offered choices are unchanged.

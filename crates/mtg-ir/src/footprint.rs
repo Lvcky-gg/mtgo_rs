@@ -438,7 +438,12 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             .with(selector_read(who, r))
             .with(Footprint::writing(Resource::ContinuousEffects)),
 
-        Effect::CounterSpell { what, .. } | Effect::CopySpell { what, .. } => {
+        Effect::CounterSpell { what, .. }
+        | Effect::CopySpell { what, .. }
+        | Effect::ChangeTargets { what, .. }
+        | Effect::LoseGame { who: what }
+        | Effect::PhaseOut { what }
+        | Effect::WinGame { who: what } => {
             objects_write(what, r).with(Footprint::writing(Resource::Stack))
         }
         // Asks another player whether to pay, so it always prompts.
@@ -549,6 +554,7 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         | Value::PartySize(s)
         | Value::BasicLandTypesAmong(s)
         | Value::SpellsCastThisTurn(s)
+        | Value::MostSpellsCastThisTurn(s)
         | Value::CardsDrawnThisTurn(s) => selector_read(s, r),
         Value::Power(s)
         | Value::Toughness(s)
@@ -566,6 +572,12 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
             }
             f
         }
+        // The condition reads something too; unanalysable, like other conditions here.
+        Value::If {
+            then, otherwise, ..
+        } => Footprint::unanalysable()
+            .with(value_footprint(then, r))
+            .with(value_footprint(otherwise, r)),
         Value::Sum(vs) | Value::Product(vs) => vs.iter().fold(Footprint::default(), |acc, v| {
             acc.with(value_footprint(v, r))
         }),

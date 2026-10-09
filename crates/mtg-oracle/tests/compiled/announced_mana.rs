@@ -312,3 +312,108 @@ fn a_spell_adds_mana_in_the_chosen_combination() {
     assert_eq!(pool(&game, Color::Green as usize), 1);
     assert_eq!(game.count(Zone::Hand, P0), hand, "cast one, drew one");
 }
+
+/// Ashnod's Altar: "Sacrifice a creature: Add {C}{C}." — which creature is announced.
+#[test]
+fn sacrificing_a_chosen_creature_makes_mana() {
+    let mut table = Table::default();
+    let altar = table.card("{3}", "Artifact", None, "Sacrifice a creature: Add {C}{C}.");
+    let bear = table.bear();
+    let mut game = Game::new(table);
+    let altar = game.put(altar, P0, Zone::Battlefield);
+    let keep = game.put(bear, P0, Zone::Battlefield);
+    let fodder = game.put(bear, P0, Zone::Battlefield);
+    let (ability, _) = mana_ability(&game, altar);
+    game.main();
+    game.act(
+        Action::ActivateManaAbility {
+            source: altar,
+            ability,
+            color: None,
+        },
+        &[],
+        &[Answer::Objects(vec![fodder])],
+    );
+    assert_eq!(pool(&game, ManaPool::COLORLESS_SLOT), 2);
+    assert!(game.engine.state.objects.contains_key(&keep));
+    assert!(!game.engine.state.objects.contains_key(&fodder));
+    assert_eq!(game.count(Zone::Graveyard, P0), 1);
+    assert!(game.stack().is_empty(), "a mana ability uses no stack");
+}
+
+/// Phyrexian Tower: "{T}, Sacrifice a creature: Add {B}{B}." pays for a spell.
+#[test]
+fn a_sacrifice_mana_ability_pays_for_a_spell_when_activated_first() {
+    let mut table = Table::default();
+    let tower = table.card("", "Land", None, "{T}, Sacrifice a creature: Add {B}{B}.");
+    let spell = table.card("{B}{B}", "Instant", None, "You gain 3 life.");
+    let bear = table.bear();
+    let mut game = Game::new(table);
+    let tower = game.put(tower, P0, Zone::Battlefield);
+    let bear = game.put(bear, P0, Zone::Battlefield);
+    let spell = game.put(spell, P0, Zone::Hand);
+    let (ability, _) = mana_ability(&game, tower);
+    game.main();
+    game.act(
+        Action::ActivateManaAbility {
+            source: tower,
+            ability,
+            color: None,
+        },
+        &[],
+        &[Answer::Objects(vec![bear])],
+    );
+    assert_eq!(pool(&game, Color::Black as usize), 2);
+    let actions = game.until(P0, mtg_core::Step::PrecombatMain);
+    assert!(actions.contains(&Action::Cast { object: spell }));
+    game.cast(spell, &[]);
+    assert_eq!(game.life(P0), 23);
+}
+
+const LED: &str = "Discard your hand, Sacrifice this artifact: Add three mana of any one \
+                   color. Activate only as an instant.";
+
+/// Lion's Eye Diamond: discard the hand and sacrifice it for three mana of one color.
+#[test]
+fn lions_eye_diamond_discards_the_hand_for_three_mana() {
+    let mut table = Table::default();
+    let led = table.card("{0}", "Artifact", None, LED);
+    let bear = table.bear();
+    let mut game = Game::new(table);
+    let led = game.put(led, P0, Zone::Battlefield);
+    game.put(bear, P0, Zone::Hand);
+    game.put(bear, P0, Zone::Hand);
+    let (ability, _) = mana_ability(&game, led);
+    game.main();
+    let hand = game.count(Zone::Hand, P0);
+    assert!(hand >= 2);
+    game.act(
+        Action::ActivateManaAbility {
+            source: led,
+            ability,
+            color: Some(Color::Red),
+        },
+        &[],
+        &[],
+    );
+    assert_eq!(pool(&game, Color::Red as usize), 3);
+    assert_eq!(game.count(Zone::Hand, P0), 0, "the whole hand");
+    assert_eq!(
+        game.count(Zone::Graveyard, P0),
+        hand + 1,
+        "the hand and the Diamond"
+    );
+    assert!(game.stack().is_empty());
+}
+
+/// "Activate only as an instant": it is never tapped automatically to pay for a spell.
+#[test]
+fn lions_eye_diamond_never_pays_automatically() {
+    let mut table = Table::default();
+    let led = table.card("{0}", "Artifact", None, LED);
+    let spell = table.card("{R}", "Instant", None, "You gain 3 life.");
+    let mut game = Game::new(table);
+    game.put(led, P0, Zone::Battlefield);
+    let spell = game.put(spell, P0, Zone::Hand);
+    assert!(!game.main().contains(&Action::Cast { object: spell }));
+}
