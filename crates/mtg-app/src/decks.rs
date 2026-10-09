@@ -302,6 +302,19 @@ impl convert::Subtypes for LocalSource {
 }
 
 impl CardSource for LocalSource {
+    fn legal_in(&self, key: &CardKey, format: mtg_session::game::Format) -> Option<bool> {
+        let CardKey::Oracle(uuid, _) = key else {
+            return None;
+        };
+        let store = self.store.as_ref()?;
+        let oracle = store.find_by_uuid(uuid).ok()??;
+        let name = match format {
+            mtg_session::game::Format::Standard => "standard",
+            mtg_session::game::Format::Commander => "commander",
+            mtg_session::game::Format::Constructed => return None,
+        };
+        Some(store.legal_in(oracle, name).unwrap_or(false))
+    }
     fn card(&self, key: &CardKey) -> Option<SourcedCard> {
         match key {
             CardKey::Demo(i) => Some(SourcedCard {
@@ -313,6 +326,9 @@ impl CardSource for LocalSource {
                 let store = self.store.as_ref()?;
                 let oracle = store.find_by_uuid(uuid).ok()??;
                 let card = store.card(oracle).ok()??;
+                if !mtg_oracle::compile::card_understood(&card, self) {
+                    return None;
+                }
                 Some(SourcedCard {
                     layout: convert::to_engine_layout(&card.layout),
                     faces: card
@@ -356,6 +372,91 @@ pub fn create_store() -> Result<Store, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_match_source_refuses_partial_text_and_unsupported_second_faces() {
+        for layout in ["normal", "modal_dfc", "unknown-layout"] {
+            let store = Store::in_memory().unwrap();
+            let mut card = mtg_store::StoredCard {
+                oracle_uuid: "support-boundary".into(),
+                name: "Boundary".into(),
+                layout: layout.into(),
+                faces: vec![mtg_store::FaceRow {
+                    name: "Boundary".into(),
+                    type_line: "Sorcery".into(),
+                    oracle_text: Some("You gain 2 life.\nDo an invented unsupported thing.".into()),
+                    ..Default::default()
+                }],
+            };
+            if layout == "modal_dfc" {
+                card.faces[0].oracle_text = Some("You gain 2 life.".into());
+                card.faces.push(mtg_store::FaceRow {
+                    name: "Other Boundary".into(),
+                    type_line: "Sorcery".into(),
+                    oracle_text: Some("Do an invented unsupported thing.".into()),
+                    ..Default::default()
+                });
+            }
+            store.put_card(&card, &[]).unwrap();
+            let source = LocalSource::new(Some(store));
+            let key = CardKey::Oracle(card.oracle_uuid, None);
+            assert!(source.card(&key).is_none(), "{layout}");
+            let deck = DeckSpec {
+                main: vec![(key.clone(), 60)],
+                ..Default::default()
+            };
+            assert_eq!(GameCards::build([&deck], &source).unwrap_err(), [key]);
+        }
+    }
+
+    #[test]
+    fn standard_legality_is_catalog_driven_and_preserved_over_the_wire() {
+        for legal in [false, true] {
+            let store = Store::in_memory().unwrap();
+            let card = mtg_store::StoredCard {
+                oracle_uuid: "standard-boundary".into(),
+                name: "Standard Field".into(),
+                layout: "normal".into(),
+                faces: vec![mtg_store::FaceRow {
+                    name: "Standard Field".into(),
+                    type_line: "Basic Land — Plains".into(),
+                    ..Default::default()
+                }],
+            };
+            let oracle = store.put_card(&card, &[]).unwrap();
+            store
+                .set_legal_in(
+                    oracle,
+                    if legal {
+                        &["standard", "commander"]
+                    } else {
+                        &["commander"]
+                    },
+                )
+                .unwrap();
+            let source = LocalSource::new(Some(store));
+            let deck = DeckSpec {
+                main: vec![(CardKey::Oracle(card.oracle_uuid, None), 60)],
+                ..Default::default()
+            };
+            let cards = GameCards::build([&deck], &source).unwrap();
+            let decoded: GameCards =
+                serde_json::from_slice(&serde_json::to_vec(&cards).unwrap()).unwrap();
+            assert_eq!(
+                deck_problems(Format::Standard, &deck, &decoded).is_empty(),
+                legal
+            );
+            assert!(deck_problems(Format::Constructed, &deck, &decoded).is_empty());
+        }
+        assert!(
+            !deck_problems(
+                Format::Standard,
+                &demo_deck(),
+                &GameCards::build([&demo_deck()], &LocalSource::new(None)).unwrap()
+            )
+            .is_empty()
+        );
+    }
 
     #[test]
     fn deck_listing_reports_read_errors_and_recovers() {

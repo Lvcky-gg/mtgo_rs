@@ -1,5 +1,17 @@
 # Current work
 
+Codex (2026-10-09, pre-alpha Commander/Standard implementation — COMPLETE):
+startup catalog/image population carried forward; local/hosted Commander supports
+two to four seats, per-seat private snapshots and single-use invites. Standard
+uses imported legality; LocalSource refuses unsupported text/layouts. Focused
+multiplayer, split-combat and encrypted-loopback tests pass. Workspace 2,123 pass /
+44 ignored; fmt, Clippy and Python checks pass. Fresh PR35 campaign and ordinary
+current-source gate pass. Three selected multiplayer mutations killed across two
+reports; the first report's compile error is retained without kill credit.
+Closed-alpha gate rejects three unknown assessments; independent review and
+real-machine acceptance remain pending. See [plan](alpha-plan.md) and
+[session](sessions/2026-10-09-pre-alpha-pods.md).
+
 Claude (2026-10-08, card coverage: round 6 — IN PROGRESS): Chaos Warp, Arcane Denial,
 Rhythm of the Wild, Teferi's Protection, Ad Nauseam, Necropotence, Demonic
 Consultation, Final Fortune, Underworld Breach. Touching compile/*, mtg-ir, mtg-engine

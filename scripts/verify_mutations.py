@@ -18,6 +18,27 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MUTATIONS = [
     {
+        "id": "pod_attack_destinations_only_first_opponent",
+        "source": "crates/mtg-engine/src/combat.rs",
+        "before": "let mut destinations: Vec<_> = defenders.iter().copied().map(Target::Player).collect();",
+        "after": "let mut destinations: Vec<_> = defenders.iter().take(1).copied().map(Target::Player).collect();",
+        "checks": [["--test", "multiplayer_combat"]],
+    },
+    {
+        "id": "pod_blocks_allow_foreign_attackers",
+        "source": "crates/mtg-engine/src/combat.rs",
+        "before": "if state.combat.attackers.contains_key(&attacker)",
+        "after": "if false && state.combat.attackers.contains_key(&attacker)",
+        "checks": [["--test", "multiplayer_combat"]],
+    },
+    {
+        "id": "pod_only_first_defender_declares_blocks",
+        "source": "crates/mtg-engine/src/engine.rs",
+        "before": "return self.next_pod_blocker(cards, remaining);",
+        "after": "return self.next_pod_blocker(cards, { let mut selected: Vec<PlayerId> = remaining; selected.truncate(1); selected });",
+        "checks": [["--test", "multiplayer_combat"]],
+    },
+    {
         "id": "mana_floating_restriction_ignored",
         "source": "crates/mtg-engine/src/mana.rs",
         "before": "pool[slot] = pool[slot].saturating_sub(*amount);",

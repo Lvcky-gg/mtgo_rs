@@ -63,6 +63,7 @@ impl<C: Channel> GuestSession<C> {
             match msg {
                 HostMessage::Snapshot { view_bytes, .. } => {
                     self.view = Some(mtg_net::wire::decode(&view_bytes)?);
+                    decide.observe(self.view.as_ref().expect("decoded view"));
                 }
 
                 HostMessage::Ask {
@@ -78,6 +79,11 @@ impl<C: Channel> GuestSession<C> {
                             "a question arrived before any view".into(),
                         ));
                     };
+                    if choice.id != choice_id || choice.who != view.viewer {
+                        return Err(SessionError::Unexpected(
+                            "question does not belong to this seat".into(),
+                        ));
+                    }
 
                     self.pending = Some(choice.clone());
                     let answer = decide.decide(&choice, view);

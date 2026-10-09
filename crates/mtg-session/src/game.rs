@@ -25,6 +25,8 @@ pub const SEATS: [PlayerId; 2] = [PlayerId(0), PlayerId(1)];
 pub enum Format {
     /// 60 or more cards, at most four of each but basic lands, 20 life.
     Constructed,
+    /// Constructed deck sizes plus Standard legality from the imported catalog.
+    Standard,
     /// A commander and 99 others, one of each but basic lands, all within the commander's
     /// colour identity; 40 life (CR 903).
     Commander,
@@ -33,7 +35,7 @@ pub enum Format {
 impl Format {
     pub fn starting_life(self) -> i32 {
         match self {
-            Format::Constructed => 20,
+            Format::Constructed | Format::Standard => 20,
             Format::Commander => 40,
         }
     }
@@ -41,13 +43,14 @@ impl Format {
     pub fn name(self) -> &'static str {
         match self {
             Format::Constructed => "Constructed",
+            Format::Standard => "Standard",
             Format::Commander => "Commander",
         }
     }
 
     /// Sideboarding between games is a Constructed practice; Commander has none.
     pub fn has_sideboard(self) -> bool {
-        self == Format::Constructed
+        self != Format::Commander
     }
 }
 
@@ -123,6 +126,10 @@ pub struct SourcedCard {
 
 /// Where a match's cards come from: the local database, the demo set, or both.
 pub trait CardSource {
+    /// Catalog legality, when available. Standard requires an affirmative assessment.
+    fn legal_in(&self, _key: &CardKey, _format: Format) -> Option<bool> {
+        None
+    }
     fn card(&self, key: &CardKey) -> Option<SourcedCard>;
     /// Names for the subtype ids in this source's faces.
     fn subtype_name(&self, subtype: Subtype) -> Option<String>;
@@ -136,6 +143,10 @@ pub struct GameCards {
     #[serde(default)]
     layouts: Vec<mtg_ir::Layout>,
     identities: Vec<String>,
+    #[serde(default)]
+    standard_legal: Vec<bool>,
+    #[serde(default)]
+    commander_legal: Vec<Option<bool>>,
     subtypes: Vec<String>,
     /// Faces for the tokens these cards can create, numbered from
     /// [`mtg_ir::walk::TOKEN_CARD_BASE`].
@@ -171,6 +182,10 @@ impl GameCards {
     }
 
     fn add(&mut self, key: CardKey, card: SourcedCard, source: &dyn CardSource) {
+        self.standard_legal
+            .push(source.legal_in(&key, Format::Standard) == Some(true));
+        self.commander_legal
+            .push(source.legal_in(&key, Format::Commander));
         // Subtype ids belong to the source; re-intern them into this table's own list —
         // the face's own subtypes and every subtype its abilities mention ("other Elves
         // you control"), which would otherwise compare against the wrong numbering.
@@ -278,6 +293,20 @@ pub fn deck_problems(format: Format, deck: &DeckSpec, cards: &GameCards) -> Vec<
     let english_name = |key: &CardKey| face(key).map(|f| f.name.as_ref());
     let is_basic =
         |key: &CardKey| face(key).is_some_and(|f| f.supertypes.contains(&Supertype::Basic));
+    for key in deck.keys() {
+        let legal = cards.id(key).is_some_and(|id| match format {
+            Format::Standard => cards.standard_legal.get(id.0 as usize) == Some(&true),
+            Format::Commander => cards.commander_legal.get(id.0 as usize) != Some(&Some(false)),
+            Format::Constructed => true,
+        });
+        if !legal {
+            problems.push(format!(
+                "{} is not legal for {} in the loaded catalog",
+                name(key),
+                format.name()
+            ));
+        }
+    }
 
     let mut main_names: BTreeMap<&str, u32> = BTreeMap::new();
     for (key, count) in &deck.main {
@@ -292,7 +321,7 @@ pub fn deck_problems(format: Format, deck: &DeckSpec, cards: &GameCards) -> Vec<
     }
 
     match format {
-        Format::Constructed => {
+        Format::Constructed | Format::Standard => {
             if deck.main_count() < 60 {
                 problems.push(format!(
                     "the main deck has {} cards; it needs at least 60",
@@ -398,22 +427,34 @@ pub fn new_game(
     game: u8,
     first: PlayerId,
 ) -> GameState {
-    let mut state = GameState::new(&SEATS, format.starting_life());
+    new_game_with_players(format, cards, &decks, match_seed, game, first)
+}
+
+/// Start a two-to-four-player game, with distinct per-seat shuffle streams.
+pub fn new_game_with_players(
+    format: Format,
+    cards: &GameCards,
+    decks: &[&DeckSpec],
+    match_seed: &Seed,
+    game: u8,
+    first: PlayerId,
+) -> GameState {
+    assert!((2..=4).contains(&decks.len()));
+    assert!((first.0 as usize) < decks.len());
+    let players: Vec<_> = (0..decks.len()).map(|i| PlayerId(i as u8)).collect();
+    let mut state = GameState::new(&players, format.starting_life());
     state.turn = 1;
     state.active_player = first;
     state.priority = Some(first);
     // Seating starts with whoever plays first, so turn order follows.
-    state.turn_order = if first == SEATS[0] {
-        SEATS.to_vec()
-    } else {
-        vec![SEATS[1], SEATS[0]]
-    };
+    state.turn_order = players.clone();
+    state.turn_order.rotate_left(first.0 as usize);
     // Opening hands are decided before turn 1, starting player first (CR 103.5), and every
     // mulligan's shuffle comes from this game's own seed.
     state.pregame = Some(mtg_engine::state::Pregame::new(state.turn_order.clone()));
     state.rng = mtg_engine::state::Rng::from_seed(&game_seed(match_seed, game, PlayerId(0xEE)).0);
 
-    for (seat, deck) in SEATS.into_iter().zip(decks) {
+    for (seat, deck) in players.into_iter().zip(decks) {
         if format == Format::Commander
             && let Some(id) = deck.commander.as_ref().and_then(|k| cards.id(k))
         {

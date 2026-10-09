@@ -55,6 +55,9 @@ pub struct UiSeat {
 }
 
 impl Decide for UiSeat {
+    fn observe(&mut self, view: &PlayerView) {
+        self.inner.observe(view);
+    }
     fn decide(&mut self, choice: &Choice, view: &PlayerView) -> Answer {
         // A player who has left concedes at the next opportunity rather than leaving the game
         // to play itself out.
@@ -77,11 +80,11 @@ impl Seat for UiSeat {
     }
 
     fn begin_game(&mut self, start: &GameStart) {
-        let _ = self.events.send(MatchEvent::GameStarted(*start));
+        let _ = self.events.send(MatchEvent::GameStarted(start.clone()));
     }
 
     fn end_game(&mut self, end: &GameEnd) {
-        let _ = self.events.send(MatchEvent::GameEnded(*end));
+        let _ = self.events.send(MatchEvent::GameEnded(end.clone()));
     }
 
     fn sideboard(&mut self, deck: &DeckSpec, cards: &GameCards) -> DeckSpec {

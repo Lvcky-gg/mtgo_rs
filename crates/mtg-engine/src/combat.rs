@@ -139,12 +139,19 @@ fn defender_condition_met(
     id: ObjectId,
     attacker: PlayerId,
 ) -> bool {
-    let Some(defender) = crate::turn::living(state)
+    crate::turn::living(state)
         .into_iter()
-        .find(|p| *p != attacker)
-    else {
-        return true;
-    };
+        .filter(|p| *p != attacker)
+        .any(|defender| may_attack_defender(state, cards, id, attacker, defender))
+}
+
+pub(crate) fn may_attack_defender(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    id: ObjectId,
+    attacker: PlayerId,
+    defender: PlayerId,
+) -> bool {
     crate::layers::effects(state, cards).iter().all(|e| {
         let mtg_ir::effect::Modification::Restriction(
             Restriction::CantAttackUnlessDefenderControls(filter),
@@ -174,28 +181,39 @@ fn defender_condition_met(
     })
 }
 
-/// Destinations in the current two-seat combat flow: the defending player and
-/// planeswalkers they control. Players are listed first for legacy declarations.
+/// Every living opponent and their planeswalkers. Players come first for legacy answers.
 pub fn attack_destinations(state: &GameState, cards: &dyn PrintedCards) -> Vec<Target> {
-    let Some(defender) = crate::turn::living(state)
+    let defenders: Vec<_> = crate::turn::living(state)
         .into_iter()
-        .find(|p| *p != state.active_player)
-    else {
-        return Vec::new();
-    };
-    let mut destinations = vec![Target::Player(defender)];
+        .filter(|p| *p != state.active_player)
+        .collect();
+    let mut destinations: Vec<_> = defenders.iter().copied().map(Target::Player).collect();
     destinations.extend(
         state
             .battlefield()
             .into_iter()
             .filter(|id| {
-                crate::layers::controller(state, *id) == Some(defender)
+                crate::layers::controller(state, *id).is_some_and(|p| defenders.contains(&p))
                     && crate::layers::compute(state, cards, *id)
                         .is_some_and(|c| c.has_type(CardType::Planeswalker))
             })
             .map(Target::Object),
     );
     destinations
+}
+
+/// The defender associated with this attacker, retained when its planeswalker leaves.
+pub fn defending_player(state: &GameState, attacker: ObjectId) -> Option<PlayerId> {
+    state.combat.defenders.get(&attacker).copied().or_else(|| {
+        match state.combat.attackers.get(&attacker) {
+            Some(Target::Player(p)) => Some(*p),
+            Some(Target::Object(o)) => state
+                .combat
+                .defending_player
+                .or_else(|| crate::layers::controller(state, *o)),
+            None => state.combat.defending_player,
+        }
+    })
 }
 
 /// Creatures that could block, each with the attackers it could block.
@@ -248,6 +266,11 @@ pub fn can_block(
     blocker: ObjectId,
     attacker: ObjectId,
 ) -> bool {
+    if state.combat.attackers.contains_key(&attacker)
+        && crate::layers::controller(state, blocker) != defending_player(state, attacker)
+    {
+        return false;
+    }
     let a = |k| has(state, cards, attacker, k);
     let b = |k| has(state, cards, blocker, k);
     let chars = |id| crate::layers::compute(state, cards, id);

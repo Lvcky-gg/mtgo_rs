@@ -1,5 +1,9 @@
 # mtgo_rs
 
+The GitHub Pages hub starts at [index.html](index.html): platform downloads,
+deckbuilders, Commander resources, card search, official rules and ban lists.
+See [website preview and deployment](site/README.md).
+
 A Magic client in Rust: native app, offline by design, peer-to-peer over
 WebSockets, local database, and a rules engine that resolves triggers without
 interrogating you about every one of them.
@@ -38,6 +42,7 @@ cargo clippy --workspace --all-targets
 Agent-first verification uses versioned scenarios, deterministic replay,
 independent rules/security properties, fuzzing and production mutation checks.
 See [verification commands, evidence and remaining work](docs/verification.md).
+The [pre-alpha acceptance plan](docs/alpha-plan.md) prioritizes two-to-four-player Commander, Standard, then cEDH.
 
 ```sh
 cargo run -p mtg-verify --bin mtgo-rs -- replay tests/replays/basic_casting.json
@@ -344,8 +349,13 @@ question. An outstanding choice is re-emitted rather than skipped, which makes
 ## Ships no card data
 
 No card names, oracle text, images or set data are in this repository. `mtg-oracle`
-fetches Scryfall's bulk data on first run into the local database, and card images
-are cached from their CDN. Cards in the tests and docs are invented.
+automatically populates the local database when the GUI launches and refreshes it
+at most once daily. Startup also checks every catalog card face's image cache and
+downloads missing or corrupt images from Scryfall in the background. Progress is
+shown on the menu and under Decks; the app stays usable while images arrive.
+Interrupted or failed image downloads are retried on the next launch. The first
+image population can take substantial time and disk space. Cards in the tests
+and docs are invented.
 
 This is also why new sets work without a release.
 

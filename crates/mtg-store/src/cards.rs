@@ -284,6 +284,19 @@ impl Store {
         Ok(())
     }
 
+    /// Use the imported catalog's legality snapshot, including bans and rotation.
+    pub fn legal_in(&self, oracle: u32, format: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT instr(legal_in, ?1) > 0 FROM cards WHERE oracle = ?2",
+                params![format!(",{format},"), oracle],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// Record a card's colour identity.
     pub fn set_color_identity(&self, oracle: u32, identity: &str) -> Result<()> {
         self.conn.execute(

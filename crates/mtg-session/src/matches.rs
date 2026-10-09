@@ -32,31 +32,33 @@ use mtg_net::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Decide, GuestSession, HostSession, Outcome, SessionError,
-    game::{CardSource, DeckSpec, GameCards, MatchSettings, SEATS, deck_problems, new_game},
+    Decide, GuestSession, Outcome, SessionError,
+    game::{
+        CardSource, DeckSpec, GameCards, MatchSettings, SEATS, deck_problems, new_game_with_players,
+    },
 };
 
 /// A game about to begin, from one seat's point of view.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct GameStart {
     /// 1-based.
     pub number: u8,
     pub you: PlayerId,
     pub first: PlayerId,
     /// Games won so far, by seat.
-    pub score: [u8; 2],
+    pub score: Vec<u8>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GameEnd {
     pub number: u8,
     pub winner: Option<PlayerId>,
-    pub score: [u8; 2],
+    pub score: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MatchEnd {
-    pub score: [u8; 2],
+    pub score: Vec<u8>,
     pub winner: Option<PlayerId>,
     /// Why it ended early, if it did.
     pub reason: Option<String>,
@@ -81,7 +83,7 @@ pub trait Seat: Decide {
 /// The running score, and who plays first next.
 struct Score {
     settings: MatchSettings,
-    wins: [u8; 2],
+    wins: Vec<u8>,
     games: u8,
     next_first: PlayerId,
 }
@@ -92,7 +94,7 @@ impl Score {
         let next_first = SEATS[(seed.0[0] & 1) as usize];
         Self {
             settings,
-            wins: [0, 0],
+            wins: vec![0, 0],
             games: 0,
             next_first,
         }
@@ -114,7 +116,10 @@ impl Score {
 
     fn match_winner(&self) -> Option<PlayerId> {
         let need = self.settings.wins_needed();
-        SEATS.into_iter().find(|p| self.wins[p.0 as usize] >= need)
+        self.wins
+            .iter()
+            .position(|wins| *wins >= need)
+            .map(|i| PlayerId(i as u8))
     }
 
     fn over(&self) -> bool {
@@ -123,7 +128,7 @@ impl Score {
 
     fn end(&self, reason: Option<String>) -> MatchEnd {
         MatchEnd {
-            score: self.wins,
+            score: self.wins.clone(),
             winner: self.match_winner(),
             reason,
         }
@@ -153,9 +158,29 @@ pub fn play_local_match(
     seed: Seed,
     seats: [&mut dyn Seat; 2],
 ) -> MatchEnd {
-    let [a, b] = seats;
-    let mut seats: [&mut dyn Seat; 2] = [a, b];
+    play_local_match_with_players(
+        settings,
+        cards,
+        &mut decks,
+        seed,
+        &mut seats.into_iter().collect::<Vec<_>>(),
+    )
+}
+
+/// Local Commander pods share the same rules loop as two-player matches.
+pub fn play_local_match_with_players(
+    settings: MatchSettings,
+    cards: &GameCards,
+    decks: &mut [DeckSpec],
+    seed: Seed,
+    seats: &mut [&mut dyn Seat],
+) -> MatchEnd {
+    assert!((2..=4).contains(&seats.len()) && seats.len() == decks.len());
+    assert!(seats.len() == 2 || settings.format == crate::game::Format::Commander);
+    assert!(seats.len() == 2 || settings.best_of == 1);
     let mut score = Score::new(settings, &seed);
+    score.wins = vec![0; seats.len()];
+    score.next_first = PlayerId((seed.0[0] as usize % seats.len()) as u8);
     for seat in seats.iter_mut() {
         seat.begin_match(settings, cards);
     }
@@ -165,26 +190,29 @@ pub fn play_local_match(
         for (i, seat) in seats.iter_mut().enumerate() {
             seat.begin_game(&GameStart {
                 number,
-                you: SEATS[i],
+                you: PlayerId(i as u8),
                 first,
-                score: score.wins,
+                score: score.wins.clone(),
             });
         }
 
-        let state = new_game(
+        let state = new_game_with_players(
             settings.format,
             cards,
-            [&decks[0], &decks[1]],
+            &decks.iter().collect::<Vec<_>>(),
             &seed,
             number,
             first,
         );
-        let winner = play_local_game(Engine::new(state), cards, &mut seats);
+        let winner = match play_local_game(Engine::new(state), cards, seats) {
+            Ok(winner) => winner,
+            Err(error) => return score.end(Some(error.to_string())),
+        };
         score.finish(winner);
         let end = GameEnd {
             number,
             winner,
-            score: score.wins,
+            score: score.wins.clone(),
         };
         for seat in seats.iter_mut() {
             seat.end_game(&end);
@@ -212,14 +240,22 @@ const REJECTIONS: u32 = 3;
 fn play_local_game(
     mut engine: Engine,
     cards: &GameCards,
-    seats: &mut [&mut dyn Seat; 2],
-) -> Option<PlayerId> {
+    seats: &mut [&mut dyn Seat],
+) -> Result<Option<PlayerId>, SessionError> {
     let mut rejected = 0;
     for _ in 0..GAME_BUDGET {
         match engine.advance(cards) {
             Progress::Continue => {}
-            Progress::GameOver { winners } => return winners.first().copied(),
+            Progress::GameOver { winners } => {
+                for (i, seat) in seats.iter_mut().enumerate() {
+                    seat.observe(&engine.view_for(PlayerId(i as u8)));
+                }
+                return Ok(winners.first().copied());
+            }
             Progress::NeedsChoice(choice) => {
+                for (i, seat) in seats.iter_mut().enumerate() {
+                    seat.observe(&engine.view_for(PlayerId(i as u8)));
+                }
                 let view = engine.view_for(choice.who);
                 let seat = &mut seats[choice.who.0 as usize];
                 let answer = if rejected >= REJECTIONS {
@@ -235,7 +271,7 @@ fn play_local_game(
             }
         }
     }
-    None
+    Err(SessionError::Stalled)
 }
 
 // ---- over a connection ---------------------------------------------------
@@ -253,7 +289,7 @@ pub enum ToGuest {
     Game(GameStart),
     Sideboard,
     MatchOver {
-        score: [u8; 2],
+        score: Vec<u8>,
         reason: Option<String>,
     },
 }
@@ -275,111 +311,145 @@ pub fn host_match<C: Channel>(
     seed: Seed,
     seat: &mut dyn Seat,
 ) -> Result<MatchEnd, SessionError> {
-    let ToHost::Deck(guest_deck) = channel.recv_msg::<ToHost>()? else {
-        return Err(SessionError::Unexpected("expected the guest's deck".into()));
-    };
+    host_match_with_players(&mut [channel], settings, host_deck, source, seed, seat)
+}
 
-    let cards = match GameCards::build([&host_deck, &guest_deck], source) {
+/// Host a two-to-four-seat pod. Extra seats are supported for Commander best-of-one.
+pub fn host_match_with_players<C: Channel>(
+    channels: &mut [C],
+    settings: MatchSettings,
+    host_deck: DeckSpec,
+    source: &dyn CardSource,
+    seed: Seed,
+    seat: &mut dyn Seat,
+) -> Result<MatchEnd, SessionError> {
+    if !(1..=3).contains(&channels.len())
+        || ![1, 3].contains(&settings.best_of)
+        || (channels.len() > 1
+            && (settings.format != crate::game::Format::Commander || settings.best_of != 1))
+    {
+        return Err(SessionError::Unexpected(
+            "use two players, or a two-to-four-player Commander game".into(),
+        ));
+    }
+    let mut decks = vec![host_deck];
+    for channel in channels.iter_mut() {
+        let ToHost::Deck(deck) = channel.recv_msg::<ToHost>()? else {
+            return Err(SessionError::Unexpected("expected the guest's deck".into()));
+        };
+        decks.push(deck);
+    }
+    let prepared = (|| {
+        let cards = GameCards::build(decks.iter(), source).map_err(|missing| format!(
+            "the host's card database is missing or cannot support {} cards; check deck support before playing", missing.len()))?;
+        for (i, deck) in decks.iter().enumerate() {
+            let problems = deck_problems(settings.format, deck, &cards);
+            if !problems.is_empty() {
+                return Err(format!(
+                    "seat {} deck is not legal for {}: {}",
+                    i + 1,
+                    settings.format.name(),
+                    problems.join("; ")
+                ));
+            }
+        }
+        Ok::<_, String>(cards)
+    })();
+    let cards = match prepared {
         Ok(cards) => cards,
-        Err(missing) => {
-            let reason = format!(
-                "the host's card database is missing {} of your cards; both players need a recent import",
-                missing.len()
-            );
-            channel.send_msg(&ToGuest::Rejected {
-                reason: reason.clone(),
-            })?;
+        Err(reason) => {
+            for channel in channels.iter_mut() {
+                let _ = channel.send_msg(&ToGuest::Rejected {
+                    reason: reason.clone(),
+                });
+            }
             return Err(SessionError::Unexpected(reason));
         }
     };
-    let problems = deck_problems(settings.format, &guest_deck, &cards);
-    if !problems.is_empty() {
-        let reason = format!(
-            "your deck is not legal for {}: {}",
-            settings.format.name(),
-            problems.join("; ")
-        );
-        channel.send_msg(&ToGuest::Rejected {
-            reason: reason.clone(),
+    for channel in channels.iter_mut() {
+        channel.send_msg(&ToGuest::Welcome {
+            settings,
+            cards: Box::new(cards.clone()),
         })?;
-        return Err(SessionError::Unexpected(reason));
     }
-
-    channel.send_msg(&ToGuest::Welcome {
-        settings,
-        cards: Box::new(cards.clone()),
-    })?;
     seat.begin_match(settings, &cards);
-
-    let mut decks = [host_deck, guest_deck];
     let mut score = Score::new(settings, &seed);
+    score.wins = vec![0; decks.len()];
+    score.next_first = PlayerId((seed.0[0] as usize % decks.len()) as u8);
     while !score.over() {
         let (number, first) = score.start();
-        let start = GameStart {
-            number,
-            you: SEATS[1],
-            first,
-            score: score.wins,
-        };
-        channel.send_msg(&ToGuest::Game(start))?;
+        for (i, channel) in channels.iter_mut().enumerate() {
+            channel.send_msg(&ToGuest::Game(GameStart {
+                number,
+                you: PlayerId((i + 1) as u8),
+                first,
+                score: score.wins.clone(),
+            }))?;
+        }
         seat.begin_game(&GameStart {
-            you: SEATS[0],
-            ..start
+            number,
+            you: PlayerId(0),
+            first,
+            score: score.wins.clone(),
         });
-
-        let state = new_game(
+        let state = new_game_with_players(
             settings.format,
             &cards,
-            [&decks[0], &decks[1]],
+            &decks.iter().collect::<Vec<_>>(),
             &seed,
             number,
             first,
         );
-        let mut session = HostSession::new(Engine::new(state), &mut *channel, SEATS[1]);
-        let outcome = session.play(&cards, seat)?;
+        let outcome = crate::host::play_pod(Engine::new(state), &cards, channels, seat);
         let winner = match outcome {
-            Outcome::Over { winners } => winners.first().copied(),
-            Outcome::Disconnected => {
-                seat.end_game(&GameEnd {
-                    number,
-                    winner: None,
-                    score: score.wins,
-                });
-                return Ok(score.end(Some("your opponent disconnected".into())));
+            Ok(Outcome::Over { winners }) => winners.first().copied(),
+            Ok(Outcome::Disconnected)
+            | Err(SessionError::Wire(mtg_net::WireError::Closed | mtg_net::WireError::Io(_))) => {
+                let reason = Some("a player disconnected; this match cannot resume".into());
+                for channel in channels.iter_mut() {
+                    let _ =
+                        channel.send_msg(&mtg_net::session::HostMessage::GameOver { winner: None });
+                    let _ = channel.send_msg(&ToGuest::MatchOver {
+                        score: score.wins.clone(),
+                        reason: reason.clone(),
+                    });
+                }
+                return Ok(score.end(reason));
             }
+            Err(error) => return Err(error),
         };
         score.finish(winner);
         seat.end_game(&GameEnd {
             number,
             winner,
-            score: score.wins,
+            score: score.wins.clone(),
         });
-
         if seat.has_left() {
-            let reason = Some("the host left".to_string());
-            let _ = channel.send_msg(&ToGuest::MatchOver {
-                score: score.wins,
-                reason: reason.clone(),
-            });
-            return Ok(score.end(reason));
+            break;
         }
         if !score.over() && settings.format.has_sideboard() {
-            channel.send_msg(&ToGuest::Sideboard)?;
+            for channel in channels.iter_mut() {
+                channel.send_msg(&ToGuest::Sideboard)?;
+            }
             decks[0] = sideboarded(seat, &decks[0], &cards);
-            if let ToHost::Sideboarded(next) = channel.recv_msg::<ToHost>()?
-                && next.same_cards_as(&decks[1])
-                && sideboard_sizes_valid(&next)
-            {
-                decks[1] = next;
+            for (i, channel) in channels.iter_mut().enumerate() {
+                if let ToHost::Sideboarded(next) = channel.recv_msg::<ToHost>()?
+                    && next.same_cards_as(&decks[i + 1])
+                    && sideboard_sizes_valid(&next)
+                {
+                    decks[i + 1] = next;
+                }
             }
         }
     }
-
-    channel.send_msg(&ToGuest::MatchOver {
-        score: score.wins,
-        reason: None,
-    })?;
-    Ok(score.end(None))
+    let reason = seat.has_left().then(|| "the host left".to_string());
+    for channel in channels.iter_mut() {
+        channel.send_msg(&ToGuest::MatchOver {
+            score: score.wins.clone(),
+            reason: reason.clone(),
+        })?;
+    }
+    Ok(score.end(reason))
 }
 
 /// Join a match: send the deck, then play whatever games the host starts. `seat` is the
@@ -403,7 +473,13 @@ pub fn guest_match<C: Channel>(
     loop {
         match channel.recv_msg::<ToGuest>()? {
             ToGuest::Game(start) => {
-                let mut score = start.score;
+                if !(2..=4).contains(&start.score.len())
+                    || start.you.0 as usize >= start.score.len()
+                    || start.first.0 as usize >= start.score.len()
+                {
+                    return Err(SessionError::Unexpected("invalid game seating".into()));
+                }
+                let mut score = start.score.clone();
                 seat.begin_game(&start);
                 let outcome = GuestSession::new(&mut *channel).play(seat)?;
                 let winner = match outcome {
@@ -418,7 +494,12 @@ pub fn guest_match<C: Channel>(
                     }
                 };
                 if let Some(w) = winner {
-                    score[w.0 as usize] += 1;
+                    let wins = score
+                        .get_mut(w.0 as usize)
+                        .ok_or_else(|| SessionError::Unexpected("winner is not seated".into()))?;
+                    *wins = wins
+                        .checked_add(1)
+                        .ok_or_else(|| SessionError::Unexpected("invalid match score".into()))?;
                 }
                 seat.end_game(&GameEnd {
                     number: start.number,
@@ -431,11 +512,16 @@ pub fn guest_match<C: Channel>(
                 channel.send_msg(&ToHost::Sideboarded(deck.clone()))?;
             }
             ToGuest::MatchOver { score, reason } => {
-                let winner = match score[0].cmp(&score[1]) {
-                    std::cmp::Ordering::Greater => Some(SEATS[0]),
-                    std::cmp::Ordering::Less => Some(SEATS[1]),
-                    std::cmp::Ordering::Equal => None,
-                };
+                if !(2..=4).contains(&score.len()) {
+                    return Err(SessionError::Unexpected("invalid final seating".into()));
+                }
+                let maximum = score.iter().copied().max().unwrap_or(0);
+                let leaders: Vec<_> = score
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, wins)| **wins == maximum && maximum > 0)
+                    .collect();
+                let winner = (leaders.len() == 1).then(|| PlayerId(leaders[0].0 as u8));
                 return Ok(MatchEnd {
                     score,
                     winner,
@@ -559,10 +645,10 @@ mod tests {
     }
     impl Seat for Recorder {
         fn begin_game(&mut self, start: &GameStart) {
-            self.starts.push(*start);
+            self.starts.push(start.clone());
         }
         fn end_game(&mut self, end: &GameEnd) {
-            self.ends.push(*end);
+            self.ends.push(end.clone());
         }
         fn sideboard(&mut self, deck: &DeckSpec, _: &GameCards) -> DeckSpec {
             self.sideboarded += 1;

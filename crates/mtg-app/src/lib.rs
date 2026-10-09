@@ -136,6 +136,9 @@ impl PolicyThenUi {
 }
 
 impl Decide for PolicyThenUi {
+    fn observe(&mut self, view: &PlayerView) {
+        self.ui.observe(view);
+    }
     fn decide(&mut self, choice: &Choice, view: &PlayerView) -> Answer {
         self.ui.observe(view);
         if let Some(answer) = self.policy.may_auto_answer(choice, view) {

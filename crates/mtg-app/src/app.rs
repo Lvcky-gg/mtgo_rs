@@ -16,7 +16,7 @@ use egui::{RichText, Ui};
 use mtg_net::fairness::Seed;
 use mtg_session::{
     game::{CardKey, DeckSpec, Format, GameCards, MatchSettings, deck_problems},
-    matches::{GameEnd, GameStart, MatchEnd, play_local_match},
+    matches::{GameEnd, GameStart, MatchEnd, play_local_match_with_players},
 };
 use mtg_store::Store;
 
@@ -81,10 +81,12 @@ struct Running {
 
 enum DatabaseUpdate {
     Progress(String),
+    CatalogReady,
     Finished(Result<String, String>),
 }
 
 enum DatabasePoll {
+    CatalogReady,
     Pending { backlog: bool },
     Finished(Result<String, String>),
     Stopped,
@@ -97,6 +99,7 @@ fn drain_database_updates(
     for _ in 0..MAX_EVENTS_PER_FRAME {
         match rx.try_recv() {
             Ok(DatabaseUpdate::Progress(progress)) => *status = Some(progress),
+            Ok(DatabaseUpdate::CatalogReady) => return DatabasePoll::CatalogReady,
             Ok(DatabaseUpdate::Finished(result)) => return DatabasePoll::Finished(result),
             Err(TryRecvError::Empty) => return DatabasePoll::Pending { backlog: false },
             Err(TryRecvError::Disconnected) => return DatabasePoll::Stopped,
@@ -118,6 +121,7 @@ pub struct App {
 
     format: Format,
     best_of: u8,
+    players: u8,
     my_deck: DeckId,
     bot_deck: DeckId,
     join_link: String,
@@ -162,6 +166,7 @@ impl App {
             card_count: 0,
             format: Format::Constructed,
             best_of: 1,
+            players: 2,
             my_deck: DeckId::Demo,
             bot_deck: DeckId::Demo,
             join_link: String::new(),
@@ -208,6 +213,7 @@ impl App {
             .filter(|domain| !domain.is_empty())
             .or_else(|| std::env::var("NGROK_DOMAIN").ok())
             .unwrap_or_default();
+        app.start_db_job(None);
         app
     }
 
@@ -302,47 +308,78 @@ impl eframe::App for App {
 
 impl App {
     fn menu(&mut self, ui: &mut Ui) {
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(20)).show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.10);
-                ui.label(RichText::new("M T G O   R S").size(13.0).color(crate::theme::GOLD));
-                ui.add_space(12.0);
-                ui.heading(RichText::new("Make your next move.").size(38.0).strong());
-                ui.label(RichText::new("Build a deck. Find a match. Play your cards.").color(crate::theme::MUTED));
-                ui.add_space(30.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(crate::theme::INK).inner_margin(20))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.10);
+                    ui.label(
+                        RichText::new("M T G O   R S")
+                            .size(13.0)
+                            .color(crate::theme::GOLD),
+                    );
+                    ui.add_space(12.0);
+                    ui.heading(RichText::new("Make your next move.").size(38.0).strong());
+                    ui.label(
+                        RichText::new("Build a deck. Find a match. Play your cards.")
+                            .color(crate::theme::MUTED),
+                    );
+                    ui.add_space(30.0);
 
-                let button = |ui: &mut Ui, text: &str| {
-                    ui.add_sized([ui.available_width().min(320.0), 44.0], egui::Button::new(RichText::new(text).size(16.0)))
-                };
-                for mode in [Mode::Bot, Mode::Host, Mode::Join] {
-                    let response = if mode == Mode::Bot {
-                        ui.add_sized([ui.available_width().min(320.0), 46.0], egui::Button::new(RichText::new(mode.title()).size(16.0).strong().color(crate::theme::INK)).fill(crate::theme::GOLD))
-                    } else { button(ui, mode.title()) };
-                    if response.clicked() {
-                        self.setup_error = None;
-                        self.screen = Screen::Setup(mode);
+                    let button = |ui: &mut Ui, text: &str| {
+                        ui.add_sized(
+                            [ui.available_width().min(320.0), 44.0],
+                            egui::Button::new(RichText::new(text).size(16.0)),
+                        )
+                    };
+                    for mode in [Mode::Bot, Mode::Host, Mode::Join] {
+                        let response = if mode == Mode::Bot {
+                            ui.add_sized(
+                                [ui.available_width().min(320.0), 46.0],
+                                egui::Button::new(
+                                    RichText::new(mode.title())
+                                        .size(16.0)
+                                        .strong()
+                                        .color(crate::theme::INK),
+                                )
+                                .fill(crate::theme::GOLD),
+                            )
+                        } else {
+                            button(ui, mode.title())
+                        };
+                        if response.clicked() {
+                            self.setup_error = None;
+                            self.screen = Screen::Setup(mode);
+                        }
+                        ui.add_space(6.0);
+                    }
+                    if button(ui, "Decks").clicked() {
+                        self.screen = Screen::Decks;
                     }
                     ui.add_space(6.0);
-                }
-                if button(ui, "Decks").clicked() {
-                    self.screen = Screen::Decks;
-                }
-                ui.add_space(6.0);
-                if button(ui, "Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                    if button(ui, "Quit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
 
-                ui.add_space(24.0);
-                if self.card_count == 0 {
-                    ui.label(
-                        RichText::new("No card database yet — the demo deck works now; import cards under Decks.")
-                            .color(WARN),
-                    );
-                } else {
-                    ui.label(RichText::new(format!("{} cards in the local database", self.card_count)).weak());
-                }
+                    ui.add_space(24.0);
+                    if self.card_count == 0 {
+                        ui.label(
+                            RichText::new("Preparing the card database automatically…").color(WARN),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} cards in the local database",
+                                self.card_count
+                            ))
+                            .weak(),
+                        );
+                    }
+                    if let Some(status) = &self.db_status {
+                        ui.label(status);
+                    }
+                });
             });
-        });
     }
 }
 
@@ -781,7 +818,7 @@ impl App {
         std::thread::spawn(move || {
             let result = (|| -> Result<String, String> {
                 let mut store = decks::create_store()?;
-                match file {
+                let catalog = match file {
                     Some(path) => {
                         let f = std::fs::File::open(&path)
                             .map_err(|e| format!("cannot open {path}: {e}"))?;
@@ -808,6 +845,18 @@ impl App {
                         }
                         Err(e) => Err(e.to_string()),
                     },
+                };
+                let _ = tx.send(DatabaseUpdate::CatalogReady);
+                ctx.request_repaint();
+                // Even offline, an existing catalog can repair/check its image cache.
+                let images = crate::art::populate_cache(&store, &mut |status| {
+                    let _ = tx.send(DatabaseUpdate::Progress(status));
+                    ctx.request_repaint();
+                });
+                match (catalog, images) {
+                    (Ok(catalog), Ok(images)) => Ok(format!("{catalog}. {images}")),
+                    (Err(error), _) => Err(error),
+                    (_, Err(error)) => Err(error),
                 }
             })();
             let _ = tx.send(DatabaseUpdate::Finished(result));
@@ -820,6 +869,13 @@ impl App {
     fn poll_db_job(&mut self) {
         if let Some(rx) = &self.db_job {
             match drain_database_updates(rx, &mut self.db_status) {
+                DatabasePoll::CatalogReady => {
+                    self.refresh();
+                    if self.art.is_some() {
+                        self.art = Some(CardArt::start(self.ctx.clone(), ArtConfig::standard()));
+                    }
+                    self.ctx.request_repaint();
+                }
                 DatabasePoll::Finished(result) => {
                     self.db_status = Some(match result {
                         Ok(status) => status,
@@ -895,6 +951,8 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut self.format, Format::Constructed, "Constructed")
                                 .on_hover_text("60+ cards, up to 4 of each, 20 life");
+                            ui.radio_value(&mut self.format, Format::Standard, "Standard")
+                                .on_hover_text("Standard legality from the current card catalog");
                             ui.radio_value(&mut self.format, Format::Commander, "Commander")
                                 .on_hover_text(
                                     "a commander and 99 singleton cards in its colours, 40 life",
@@ -902,8 +960,24 @@ impl App {
                         });
                         ui.end_row();
 
+                        if self.format == Format::Commander
+                            && matches!(mode, Mode::Host | Mode::Bot)
+                        {
+                            ui.label("Players");
+                            ui.horizontal(|ui| {
+                                for count in 2..=4 {
+                                    ui.radio_value(&mut self.players, count, count.to_string());
+                                }
+                            });
+                            ui.end_row();
+                        } else {
+                            self.players = 2;
+                        }
+                        if self.players > 2 {
+                            self.best_of = 1;
+                        }
                         ui.label("Match");
-                        ui.horizontal(|ui| {
+                        ui.add_enabled_ui(self.players == 2, |ui| {
                             ui.radio_value(&mut self.best_of, 1, "Best of 1");
                             ui.radio_value(&mut self.best_of, 3, "Best of 3");
                         });
@@ -1180,7 +1254,7 @@ impl App {
                 Ok(c) => c,
                 Err(missing) => {
                     return self.setup_error = Some(format!(
-                        "{} cards are missing from the database",
+                        "{} cards are missing or have unsupported rules; open the deck builder for details",
                         missing.len()
                     ));
                 }
@@ -1242,6 +1316,7 @@ impl App {
         gui.watch(views);
 
         let link = self.join_link.clone();
+        let players = self.players;
         let address = self.host_address.clone();
         let tunnel_token = self.host_internet.then(|| self.ngrok_token.clone());
         let host_name = self.host_name.clone();
@@ -1259,6 +1334,7 @@ impl App {
                         bots.unwrap_or_default(),
                         &mut seat,
                         &mut BotSeat::default(),
+                        players,
                     ),
                     Mode::Playtest => local_match(
                         settings,
@@ -1266,11 +1342,13 @@ impl App {
                         decks::goldfish_deck(),
                         &mut seat,
                         &mut crate::seat::GoldfishSeat,
+                        2,
                     ),
                     Mode::Host => net::identity().and_then(|identity| {
                         let source = LocalSource::standard();
                         let config = net::HostConfig {
                             settings,
+                            players,
                             deck: mine,
                             port,
                             public_address: Some(address),
@@ -1317,6 +1395,22 @@ impl App {
     }
 }
 
+fn score_label(score: &[u8], you: mtg_core::PlayerId) -> String {
+    score
+        .iter()
+        .enumerate()
+        .map(|(i, wins)| {
+            let name = if i == you.0 as usize {
+                "you".into()
+            } else {
+                format!("player {}", i + 1)
+            };
+            format!("{name} {wins}")
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// A match against the bot, on the worker thread.
 fn local_match(
     settings: MatchSettings,
@@ -1324,16 +1418,30 @@ fn local_match(
     bots: DeckSpec,
     seat: &mut UiSeat,
     bot: &mut dyn mtg_session::matches::Seat,
+    players: u8,
 ) -> Result<MatchEnd, String> {
     let source = LocalSource::standard();
-    let cards = GameCards::build([&mine, &bots], &source)
-        .map_err(|missing| format!("{} cards are missing from the database", missing.len()))?;
-    Ok(play_local_match(
+    let cards = GameCards::build([&mine, &bots], &source).map_err(|missing| {
+        format!(
+            "{} cards are missing or have unsupported rules; open the deck builder for details",
+            missing.len()
+        )
+    })?;
+    let mut decks = vec![mine];
+    decks.extend(std::iter::repeat_n(bots, players as usize - 1));
+    let mut extra_bots: Vec<_> = (2..players).map(|_| BotSeat::default()).collect();
+    let mut seats: Vec<&mut dyn mtg_session::matches::Seat> = vec![seat, bot];
+    seats.extend(
+        extra_bots
+            .iter_mut()
+            .map(|bot| bot as &mut dyn mtg_session::matches::Seat),
+    );
+    Ok(play_local_match_with_players(
         settings,
         &cards,
-        [mine, bots],
+        &mut decks,
         Seed::random(),
-        [seat, bot],
+        &mut seats,
     ))
 }
 
@@ -1358,14 +1466,10 @@ impl App {
                     ui.label(RichText::new(s.format.name()).strong());
                     ui.label(format!("best of {}", s.best_of));
                 }
-                if let Some(g) = run.game {
-                    let (me, them) = (g.score[g.you.0 as usize], g.score[1 - g.you.0 as usize]);
-                    let (me, them) = match run.last_game {
-                        Some(e) => (e.score[g.you.0 as usize], e.score[1 - g.you.0 as usize]),
-                        None => (me, them),
-                    };
+                if let Some(g) = &run.game {
+                    let score = run.last_game.as_ref().map_or(&g.score, |end| &end.score);
                     ui.label(format!("game {}", g.number));
-                    ui.label(RichText::new(format!("you {me} – {them} opponent")).strong());
+                    ui.label(RichText::new(score_label(score, g.you)).strong());
                     if g.first == g.you {
                         ui.label(RichText::new("you play first").weak());
                     }
@@ -1392,9 +1496,10 @@ impl App {
         let ctx = ui.ctx().clone();
         if let Some(end) = run
             .last_game
+            .as_ref()
             .filter(|_| run.ended.is_none() && run.sideboard.is_none())
         {
-            let you = run.game.map_or(mtg_core::PlayerId(0), |g| g.you);
+            let you = run.game.as_ref().map_or(mtg_core::PlayerId(0), |g| g.you);
             let verdict = match end.winner {
                 Some(w) if w == you => "You won",
                 Some(_) => "You lost",
@@ -1452,16 +1557,14 @@ impl App {
                 .show(&ctx, |ui| {
                     match ended {
                         Ok(end) => {
-                            let you = run.game.map_or(mtg_core::PlayerId(0), |g| g.you);
+                            let you = run.game.as_ref().map_or(mtg_core::PlayerId(0), |g| g.you);
                             let verdict = match end.winner {
                                 Some(w) if w == you => "You won the match",
                                 Some(_) => "You lost the match",
                                 None => "No result",
                             };
-                            let (me, them) =
-                                (end.score[you.0 as usize], end.score[1 - you.0 as usize]);
                             ui.label(RichText::new(verdict).size(22.0).strong());
-                            ui.label(format!("{me} – {them}"));
+                            ui.label(score_label(&end.score, you));
                             if let Some(reason) = &end.reason {
                                 ui.label(RichText::new(reason).weak());
                             }
@@ -1734,6 +1837,25 @@ pub(crate) fn read_deck_file(file: &dyn egui::DroppedFile) -> Result<String, Str
 #[cfg(test)]
 mod event_tests {
     use super::*;
+
+    #[test]
+    fn catalog_becomes_available_before_image_population_finishes() {
+        let (updates, receiver) = mpsc::channel();
+        updates.send(DatabaseUpdate::CatalogReady).unwrap();
+        updates
+            .send(DatabaseUpdate::Progress("Preparing images".into()))
+            .unwrap();
+        let mut status = None;
+        assert!(matches!(
+            drain_database_updates(&receiver, &mut status),
+            DatabasePoll::CatalogReady
+        ));
+        assert!(matches!(
+            drain_database_updates(&receiver, &mut status),
+            DatabasePoll::Pending { backlog: false }
+        ));
+        assert_eq!(status.as_deref(), Some("Preparing images"));
+    }
 
     #[test]
     fn database_progress_is_bounded_without_losing_a_queued_result() {

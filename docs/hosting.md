@@ -2,7 +2,8 @@
 
 The game runs on the host's computer. You can play on the same network or use
 ngrok to let a friend connect over the internet. You do not need to enter your
-computer's address or change your router settings.
+computer's address or change your router settings. Commander hosts can choose
+two, three or four players; Standard and unrestricted Constructed use two seats.
 
 ## On the same network
 
@@ -60,9 +61,15 @@ TCP tunnel option that requires credit-card verification.
 4. Keep the host's game open while you play. The tunnel closes automatically
    when the hosted match ends or you leave it.
 
-An invite is valid for one hour and one guest. Host a new game to get a new
-invite if it expires or a guest disconnects after joining. Both players should
-use the updated version of the game: older versions cannot read tunnel invites.
+For a Commander pod, share the displayed invite with one player at a time. A new
+invite appears after each player joins; send that new link to the next player.
+Each link is valid for one hour and admits one guest. The game starts when the
+chosen number of players have joined and their decks pass validation.
+
+A player can concede in the game and keep watching the remaining players.
+Leaving the hosted match or a broken connection ends it; reconnection is not
+supported. Start a new game after an interrupted match. All players should use
+the same updated client, particularly for four-player pods.
 
 Nearby discovery also stays available while an online game waits for a guest.
 The guest never needs to install ngrok or enter the host's public address.

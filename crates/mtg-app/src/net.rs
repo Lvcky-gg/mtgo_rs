@@ -28,7 +28,7 @@ use mtg_net::{
 };
 use mtg_session::{
     game::{CardSource, DeckSpec, MatchSettings},
-    matches::{MatchEnd, Seat, guest_match, host_match},
+    matches::{MatchEnd, Seat, guest_match, host_match_with_players},
 };
 use mtg_store::{Store, StoredIdentity};
 
@@ -102,6 +102,8 @@ fn commit(seed: &Seed, deck: &DeckSpec) -> Commitment {
 /// listen. Passed in rather than read from the default database, so a test can use its own.
 pub struct HostConfig<'a> {
     pub settings: MatchSettings,
+    /// Total seats, including the host. Commander supports two to four.
+    pub players: u8,
     pub deck: DeckSpec,
     /// 0 for any free port.
     pub port: u16,
@@ -126,6 +128,7 @@ pub fn host(
 ) -> Result<MatchEnd, String> {
     let HostConfig {
         settings,
+        players,
         deck,
         port,
         public_address: extra_address,
@@ -135,6 +138,12 @@ pub fn host(
         identity,
         source,
     } = config;
+    if !(2..=4).contains(&players)
+        || (players > 2
+            && (settings.format != mtg_session::game::Format::Commander || settings.best_of != 1))
+    {
+        return Err("Choose two players, or a Commander pod of up to four for one game.".into());
+    }
     let listener = TcpListener::bind(("0.0.0.0", port))
         .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -178,35 +187,62 @@ pub fn host(
         port,
     });
 
-    let invite = Invite::issue(identity, session, endpoints, now() + INVITE_LIFETIME);
-    let advertisement = match mtg_net::discovery::Advertisement::publish(&invite, port, &name) {
-        Ok(advertisement) => Some(advertisement),
-        Err(_) => {
-            let _ = events.send(MatchEvent::Status(
-                "Nearby discovery is unavailable. Share the invite link instead.".into(),
-            ));
-            None
-        }
-    };
-    let _ = events.send(MatchEvent::Invite(invite.to_url()));
-    let _ = events.send(MatchEvent::Status("waiting for someone to join…".into()));
-
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let (mut secure, shuffle) = wait_for_guest_with_tunnel(
-        &listener,
-        identity,
-        &invite,
-        &deck,
-        events,
-        cancel,
-        tunnel.as_mut(),
-    )?;
-    drop(advertisement);
-    let guest = secure.peer().fingerprint().to_grouped_string();
-    let _ = events.send(MatchEvent::Status(format!("playing {guest}")));
-
-    play_with_cancel(&mut secure, cancel, |secure| {
-        host_match(secure, settings, deck, source, shuffle, seat).map_err(|e| e.to_string())
+    let mut channels = Vec::new();
+    let mut shuffle = None;
+    for guest_number in 1..players {
+        // Each seat gets a fresh single-use invite; a consumed nonce never reopens.
+        let invite = Invite::issue(
+            identity,
+            session,
+            endpoints.clone(),
+            now() + INVITE_LIFETIME,
+        );
+        let advertisement = mtg_net::discovery::Advertisement::publish(&invite, port, &name).ok();
+        let _ = events.send(MatchEvent::Invite(invite.to_url()));
+        let _ = events.send(MatchEvent::Status(format!(
+            "{}/{} players connected; share this invite with player {}",
+            guest_number,
+            players,
+            guest_number + 1
+        )));
+        let (secure, contribution) = wait_for_guest_with_tunnel(
+            &listener,
+            identity,
+            &invite,
+            &deck,
+            events,
+            cancel,
+            tunnel.as_mut(),
+        )?;
+        drop(advertisement);
+        if channels
+            .iter()
+            .any(|channel: &NoiseChannel<WsChannel>| channel.peer() == secure.peer())
+        {
+            return Err(
+                "The same identity cannot occupy two seats. Host again with distinct players."
+                    .into(),
+            );
+        }
+        shuffle = Some(shuffle.map_or(contribution, |previous| {
+            Seed::combine(previous, contribution)
+        }));
+        channels.push(secure);
+    }
+    let _ = events.send(MatchEvent::Status(format!(
+        "All {players} players connected; checking decks…"
+    )));
+    play_pod_with_cancel(&mut channels, cancel, |channels| {
+        host_match_with_players(
+            channels,
+            settings,
+            deck,
+            source,
+            shuffle.expect("at least one guest"),
+            seat,
+        )
+        .map_err(|e| e.to_string())
     })
 }
 
@@ -377,6 +413,40 @@ fn play_with_cancel<T>(
     })
 }
 
+/// Interrupt every connection when the host cancels a pod.
+fn play_pod_with_cancel<T>(
+    channels: &mut [NoiseChannel<WsChannel>],
+    cancel: &AtomicBool,
+    play: impl FnOnce(&mut [NoiseChannel<WsChannel>]) -> Result<T, String>,
+) -> Result<T, String> {
+    let sockets = channels
+        .iter_mut()
+        .map(|channel| channel.inner_mut().shutdown_handle())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    std::thread::scope(|scope| {
+        let (finished, waiting) = std::sync::mpsc::channel::<()>();
+        scope.spawn(move || {
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    for socket in &sockets {
+                        let _ = socket.shutdown(std::net::Shutdown::Both);
+                    }
+                    break;
+                }
+                match waiting.recv_timeout(Duration::from_millis(100)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+            }
+        });
+        let result = play(channels);
+        drop(finished);
+        check_cancel(cancel)?;
+        result
+    })
+}
+
 /// Only an authenticated endpoint counts as reaching the invited host. No Join is
 /// sent while trying addresses, so a failed attempt cannot consume the invite.
 fn connect_to_host(
@@ -469,6 +539,7 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
 mod tests {
     use super::*;
     use mtg_net::wire::{Channel, TypedChannel};
+    use mtg_session::matches::host_match;
 
     #[test]
     fn first_use_saves_a_consistent_identity_and_reuses_it() {

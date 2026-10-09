@@ -686,6 +686,11 @@ fn perform(state: &mut GameState, event: &Event) {
                 mtg_core::Target::Player(p) => Some(*p),
                 mtg_core::Target::Object(o) => state.objects.get(o).map(|o| o.controller),
             });
+            if state.players.len() > 2
+                && let Some(player) = state.combat.defending_player
+            {
+                state.combat.defenders.insert(*attacker, player);
+            }
             state.combat.attackers.insert(*attacker, *defender);
             if let Some(o) = state.objects.get(attacker) {
                 let who = o.controller;
@@ -732,6 +737,15 @@ fn perform(state: &mut GameState, event: &Event) {
             }
         }
         Event::EnteredAttacking { attacker, defender } => {
+            if state.players.len() > 2 {
+                let player = match defender {
+                    mtg_core::Target::Player(p) => Some(*p),
+                    mtg_core::Target::Object(o) => crate::layers::controller(state, *o),
+                };
+                if let Some(player) = player {
+                    state.combat.defenders.insert(*attacker, player);
+                }
+            }
             state.combat.attackers.insert(*attacker, *defender);
         }
         Event::DayNight { day } => {

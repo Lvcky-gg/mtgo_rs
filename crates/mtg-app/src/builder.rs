@@ -1285,6 +1285,7 @@ impl Builder {
             ui.label("Check for");
             let before = self.format;
             ui.radio_value(&mut self.format, Format::Constructed, "Constructed");
+            ui.radio_value(&mut self.format, Format::Standard, "Standard");
             ui.radio_value(&mut self.format, Format::Commander, "Commander");
             if self.format != before {
                 self.problems = None;
@@ -1750,6 +1751,7 @@ impl Builder {
         let mut query = CardQuery {
             legal_in: match self.format {
                 Format::Constructed => Some("modern".to_string()),
+                Format::Standard => Some("standard".to_string()),
                 Format::Commander => Some("commander".to_string()),
             },
             ..CardQuery::default()

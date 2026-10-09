@@ -174,7 +174,9 @@ pub fn fetch_and_import_with_progress(
     progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<Option<crate::ImportReport>, FetchError> {
     let now = now_unix();
-    if !needs_refresh(last_import(store)?, now, force) {
+    if store.card_count().map_err(FetchError::Store)? > 0
+        && !needs_refresh(last_import(store)?, now, force)
+    {
         return Ok(None);
     }
 

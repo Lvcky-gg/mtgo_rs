@@ -668,7 +668,7 @@ fn pattern_matches(
                 .and_then(|host| crate::layers::controller(state, host))
                 == Some(p)
         }
-        _ => selector_covers_player(state, sel, p, controller),
+        _ => selector_covers_player(state, sel, p, controller, Some(source)),
     };
 
     match (pattern, event) {
@@ -1136,6 +1136,7 @@ fn selector_covers_player(
     sel: &Selector,
     who: PlayerId,
     controller: PlayerId,
+    source: Option<ObjectId>,
 ) -> bool {
     match sel {
         Selector::You => who == controller,
@@ -1143,15 +1144,20 @@ fn selector_covers_player(
         Selector::EachPlayer => true,
         Selector::ActivePlayer => who == state.active_player,
         Selector::Player(p) => who == *p,
-        Selector::DefendingPlayer => state.combat.defending_player == Some(who),
+        Selector::DefendingPlayer => {
+            source
+                .and_then(|source| crate::combat::defending_player(state, source))
+                .or(state.combat.defending_player)
+                == Some(who)
+        }
         // Needs the source; `pattern_matches` answers it before getting here.
         Selector::EnchantedPlayer => false,
         Selector::Union(parts) => parts
             .iter()
-            .any(|p| selector_covers_player(state, p, who, controller)),
+            .any(|p| selector_covers_player(state, p, who, controller, source)),
         Selector::Except(base, minus) => {
-            selector_covers_player(state, base, who, controller)
-                && !selector_covers_player(state, minus, who, controller)
+            selector_covers_player(state, base, who, controller, source)
+                && !selector_covers_player(state, minus, who, controller, source)
         }
         _ => false,
     }
@@ -1274,10 +1280,20 @@ fn eval_filter(
         }
         ObjectFilter::ToughnessAtMost(v) => chars.toughness.unwrap_or(0) <= static_value(v),
         ObjectFilter::ManaValueAtLeast(v) => chars.mana_cost.mana_value() as i32 >= static_value(v),
-        ObjectFilter::ControlledBy(sel) => {
-            selector_covers_player(state, sel, obj.controller, controller)
-        }
-        ObjectFilter::OwnedBy(sel) => selector_covers_player(state, sel, obj.owner, controller),
+        ObjectFilter::ControlledBy(sel) => selector_covers_player(
+            state,
+            sel,
+            obj.controller,
+            controller,
+            selves.iter().flatten().next().copied(),
+        ),
+        ObjectFilter::OwnedBy(sel) => selector_covers_player(
+            state,
+            sel,
+            obj.owner,
+            controller,
+            selves.iter().flatten().next().copied(),
+        ),
         // Not something a trigger's event filter asks.
         ObjectFilter::SharesColorWith(_) | ObjectFilter::SharesCreatureTypeWith(_) => false,
         ObjectFilter::PowerAtLeast(v) => chars.power.unwrap_or(0) >= static_value(v),

@@ -106,6 +106,8 @@ enum Suspended {
     Exerting { candidates: Vec<ObjectId> },
     /// CR 509.1 — waiting for the defending player to declare blockers.
     Blockers,
+    /// Remaining defending players in APNAP order; no priority until all have declared.
+    PodBlockers { remaining: Vec<PlayerId> },
     /// CR 510.1c — damage assignment for attackers where it is not forced.
     AssigningDamage {
         queue: Vec<ObjectId>,
@@ -5852,6 +5854,7 @@ impl Engine {
             | Suspended::Blockers
             | Suspended::Discarding
             | Suspended::Untapping => None,
+            Suspended::PodBlockers { remaining } => self.next_pod_blocker(cards, remaining),
             Suspended::AssigningDamage {
                 queue,
                 first_strike,
@@ -6040,21 +6043,49 @@ impl Engine {
         if eligible.is_empty() {
             return None;
         }
+        let defenders = crate::combat::attack_destinations(&self.state, cards);
+        let mandatory = crate::combat::must_attack(&self.state, cards, who);
+        let default = if self.state.players.len() > 2 {
+            Answer::Attackers(
+                mandatory
+                    .iter()
+                    .filter_map(|attacker| {
+                        defenders
+                            .iter()
+                            .copied()
+                            .find(|target| {
+                                let defender = match target {
+                                    Target::Player(p) => Some(*p),
+                                    Target::Object(o) => crate::layers::controller(&self.state, *o),
+                                };
+                                defender.is_some_and(|p| {
+                                    crate::combat::may_attack_defender(
+                                        &self.state,
+                                        cards,
+                                        *attacker,
+                                        who,
+                                        p,
+                                    )
+                                })
+                            })
+                            .map(|target| (*attacker, target))
+                    })
+                    .collect(),
+            )
+        } else {
+            Answer::Objects(mandatory)
+        };
         self.suspended = Some(Suspended::Attackers);
         Some(self.new_choice(
             who,
             ChoiceKind::DeclareAttackers {
                 eligible,
-                defenders: crate::combat::attack_destinations(&self.state, cards),
+                defenders,
             },
             "declare attackers".into(),
             // Attacking with only the creatures that must is always legal, so there is a
             // safe default and a client may take it without asking.
-            Some(Answer::Objects(crate::combat::must_attack(
-                &self.state,
-                cards,
-                who,
-            ))),
+            Some(default),
         ))
     }
 
@@ -6083,10 +6114,16 @@ impl Engine {
             return false;
         }
 
-        let defending_player = destinations.first().and_then(|d| match d {
-            Target::Player(p) => Some(*p),
-            _ => None,
-        });
+        if attackers.iter().any(|(a, destination)| {
+            let defender = match destination {
+                Target::Player(p) => Some(*p),
+                Target::Object(o) => crate::layers::controller(&self.state, *o),
+            };
+            !defender
+                .is_some_and(|p| crate::combat::may_attack_defender(&self.state, cards, *a, who, p))
+        }) {
+            return false;
+        }
 
         // Propaganda: {2} for each creature attacking its controller, paid as attackers
         // are declared (CR 508.1h); unaffordable, the declaration is illegal.
@@ -6120,6 +6157,10 @@ impl Engine {
         // share a timestamp and no trigger sees a half-declared combat.
         let mut events = Vec::new();
         for (a, defender) in attackers {
+            let defending_player = match defender {
+                Target::Player(p) => Some(*p),
+                Target::Object(o) => crate::layers::controller(&self.state, *o),
+            };
             events.push(Event::Attacked {
                 attacker: *a,
                 defender: *defender,
@@ -6248,6 +6289,22 @@ impl Engine {
         if self.state.combat.attackers.is_empty() {
             return None;
         }
+        if self.state.players.len() > 2 {
+            let defenders: std::collections::BTreeSet<_> = self
+                .state
+                .combat
+                .attackers
+                .keys()
+                .filter_map(|a| crate::combat::defending_player(&self.state, *a))
+                .collect();
+            let remaining = self
+                .state
+                .apnap()
+                .into_iter()
+                .filter(|p| defenders.contains(p))
+                .collect();
+            return self.next_pod_blocker(cards, remaining);
+        }
         let defender = self
             .state
             .combat
@@ -6284,6 +6341,40 @@ impl Engine {
                 defender,
             ))),
         ))
+    }
+
+    fn next_pod_blocker(
+        &mut self,
+        cards: &dyn PrintedCards,
+        mut remaining: Vec<PlayerId>,
+    ) -> Option<Choice> {
+        while !remaining.is_empty() {
+            let defender = remaining.remove(0);
+            let eligible = crate::combat::eligible_blockers(&self.state, cards, defender);
+            if eligible.is_empty() {
+                continue;
+            }
+            let capacity = eligible
+                .iter()
+                .map(|(b, _)| (*b, crate::combat::block_capacity(&self.state, cards, *b)))
+                .filter(|(_, n)| *n > 1)
+                .map(|(b, n)| (b, u32::try_from(n).unwrap_or(u32::MAX)))
+                .collect();
+            self.suspended = Some(Suspended::PodBlockers { remaining });
+            return Some(self.new_choice(
+                defender,
+                ChoiceKind::DeclareBlockers { eligible, capacity },
+                "declare blockers".into(),
+                Some(Answer::Blocks(crate::combat::required_blocks(
+                    &self.state,
+                    cards,
+                    defender,
+                ))),
+            ));
+        }
+        self.suspended = None;
+        self.mark_unblocked();
+        None
     }
 
     /// CR 509.3h — once blockers are declared, each attacker no creature blocks "isn't
@@ -6330,12 +6421,16 @@ impl Engine {
             }
         }
         apply::apply_simultaneous(&mut self.state, Cause::TurnStructure, events, &mut self.log);
-        self.mark_unblocked();
+        if !matches!(self.suspended, Some(Suspended::PodBlockers { .. })) {
+            self.mark_unblocked();
+        }
         self.cache.invalidate();
 
         // CR 509.2: priority follows declaration. Damage assignment order is obsolete;
         // each controller chooses the division when combat damage is assigned.
-        self.suspended = None;
+        if !matches!(self.suspended, Some(Suspended::PodBlockers { .. })) {
+            self.suspended = None;
+        }
         Ok(())
     }
 
@@ -6865,7 +6960,7 @@ impl Engine {
                     || (crate::layers::compute(&self.state, cards, object)
                         .is_some_and(|c| c.has_type(mtg_core::CardType::Planeswalker))
                         && crate::layers::controller(&self.state, object)
-                            == self.state.combat.defending_player);
+                            == crate::combat::defending_player(&self.state, source));
                 still_attacked
                     && self
                         .state

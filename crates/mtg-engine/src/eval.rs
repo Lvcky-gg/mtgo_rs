@@ -284,7 +284,9 @@ pub fn players(ctx: &Ctx, sel: &Selector) -> Eval<Vec<PlayerId>> {
         Selector::You => Ok(vec![ctx.controller]),
         Selector::ActivePlayer => Ok(vec![ctx.state.active_player]),
         Selector::Player(p) => Ok(vec![*p]),
-        Selector::DefendingPlayer => Ok(ctx.state.combat.defending_player.into_iter().collect()),
+        Selector::DefendingPlayer => Ok(crate::combat::defending_player(ctx.state, ctx.source)
+            .into_iter()
+            .collect()),
         Selector::EnchantedPlayer => Ok(ctx
             .state
             .objects

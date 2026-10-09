@@ -156,3 +156,105 @@ impl<C: Channel> HostSession<C> {
         Err(SessionError::Stalled)
     }
 }
+
+/// Authoritative play for a host and one to three remote seats. Each connection
+/// receives its own projection; only the connection assigned to a choice may answer.
+pub fn play_pod<C: Channel>(
+    mut engine: Engine,
+    cards: &dyn PrintedCards,
+    channels: &mut [C],
+    local: &mut dyn Decide,
+) -> Result<Outcome, SessionError> {
+    if !(1..=3).contains(&channels.len()) || engine.state.players.len() != channels.len() + 1 {
+        return Err(SessionError::Unexpected("invalid pod seating".into()));
+    }
+    let mut illegal = 0;
+    for _ in 0..BUDGET {
+        match engine.advance(cards) {
+            Progress::Continue => {}
+            Progress::GameOver { winners } => {
+                local.observe(&engine.view_for(PlayerId(0)));
+                for (i, channel) in channels.iter_mut().enumerate() {
+                    channel.send_msg(&HostMessage::Snapshot {
+                        at_event: engine.log.len() as u64,
+                        view_bytes: mtg_net::wire::encode(
+                            &engine.view_for(PlayerId((i + 1) as u8)),
+                        )?,
+                    })?;
+                    channel.send_msg(&HostMessage::GameOver {
+                        winner: winners.first().map(|p| p.0),
+                    })?;
+                }
+                return Ok(Outcome::Over { winners });
+            }
+            Progress::NeedsChoice(choice) => {
+                local.observe(&engine.view_for(PlayerId(0)));
+                for (i, channel) in channels.iter_mut().enumerate() {
+                    channel.send_msg(&HostMessage::Snapshot {
+                        at_event: engine.log.len() as u64,
+                        view_bytes: mtg_net::wire::encode(
+                            &engine.view_for(PlayerId((i + 1) as u8)),
+                        )?,
+                    })?;
+                }
+                let answer = if choice.who == PlayerId(0) {
+                    local.decide(&choice, &engine.view_for(PlayerId(0)))
+                } else {
+                    let channel = channels.get_mut(choice.who.0 as usize - 1).ok_or_else(|| {
+                        SessionError::Unexpected("choice for an unseated player".into())
+                    })?;
+                    channel.send_msg(&HostMessage::Ask {
+                        choice_id: choice.id,
+                        choice_bytes: mtg_net::wire::encode(&choice)?,
+                    })?;
+                    let mut answer = None;
+                    for _ in 0..64 {
+                        match channel.recv_msg::<GuestMessage>()? {
+                            GuestMessage::Answer {
+                                choice_id,
+                                answer_bytes,
+                            } if choice_id == choice.id => {
+                                answer = Some(mtg_net::wire::decode(&answer_bytes)?);
+                                break;
+                            }
+                            GuestMessage::Answer { .. } => {}
+                            GuestMessage::Concede => {
+                                answer = Some(Answer::Action(Action::Concede));
+                                break;
+                            }
+                            GuestMessage::RequestTakeback { to_event, .. } => {
+                                channel.send_msg(&HostMessage::TakebackDecision {
+                                    to_event,
+                                    granted: false,
+                                })?;
+                            }
+                            GuestMessage::Resume { .. } => {
+                                channel.send_msg(&HostMessage::Snapshot {
+                                    at_event: engine.log.len() as u64,
+                                    view_bytes: mtg_net::wire::encode(
+                                        &engine.view_for(choice.who),
+                                    )?,
+                                })?;
+                                channel.send_msg(&HostMessage::Ask {
+                                    choice_id: choice.id,
+                                    choice_bytes: mtg_net::wire::encode(&choice)?,
+                                })?;
+                            }
+                            other => return Err(SessionError::Unexpected(format!("{other:?}"))),
+                        }
+                    }
+                    answer.ok_or(SessionError::Stalled)?
+                };
+                if let Err(error) = engine.answer(cards, choice.id, answer) {
+                    illegal += 1;
+                    if illegal > ILLEGAL_TOLERANCE {
+                        return Err(SessionError::Illegal(error));
+                    }
+                } else {
+                    illegal = 0;
+                }
+            }
+        }
+    }
+    Err(SessionError::Stalled)
+}

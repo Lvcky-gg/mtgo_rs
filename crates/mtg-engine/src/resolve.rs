@@ -2251,9 +2251,7 @@ fn resolve_inner(
             Ok(())
         }
         Effect::PutAttacking { what } => {
-            let Some(defender) = state
-                .combat
-                .defending_player
+            let Some(defender) = crate::combat::defending_player(state, rc.source)
                 .filter(|_| state.step.is_combat())
             else {
                 return Ok(());

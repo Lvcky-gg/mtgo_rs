@@ -87,6 +87,8 @@ impl From<mtg_net::WireError> for SessionError {
 /// The seam a UI, a policy, or an AI plugs into — all three are the same shape, which is why
 /// the engine was built to hand out [`Choice`] values rather than to call into a UI.
 pub trait Decide {
+    /// Observe a projected position while another seat is making a decision.
+    fn observe(&mut self, _view: &PlayerView) {}
     fn decide(&mut self, choice: &Choice, view: &PlayerView) -> Answer;
 }
 

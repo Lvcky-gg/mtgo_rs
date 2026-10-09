@@ -534,6 +534,12 @@ pub struct CastContext {
 pub struct Combat {
     /// The defending seat stays known if its attacked planeswalker leaves combat.
     pub defending_player: Option<PlayerId>,
+    /// Multiplayer association for each attacker, including an attacked walker that left.
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub defenders: BTreeMap<ObjectId, PlayerId>,
     /// Attacker to what it is attacking.
     pub attackers: BTreeMap<ObjectId, mtg_core::Target>,
     /// Attacker to its blockers. Their order does not constrain damage assignment.
@@ -558,6 +564,7 @@ impl Combat {
 
     pub fn clear(&mut self) {
         self.defending_player = None;
+        self.defenders.clear();
         self.attackers.clear();
         self.blocks.clear();
         self.was_blocked.clear();

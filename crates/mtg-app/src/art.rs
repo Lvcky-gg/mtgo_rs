@@ -168,15 +168,52 @@ pub struct ArtConfig {
 }
 
 impl ArtConfig {
-    /// The standard locations. A database that does not exist is not created.
+    /// The standard locations. Workers wait for startup to create a missing database.
     pub fn standard() -> Self {
         let db = mtg_store::default_path();
         Self {
             names: ArtNames::load(&ArtNames::default_path()),
-            db: db.exists().then_some(db),
+            db: Some(db),
             cache_dir: default_cache_dir(),
         }
     }
+}
+
+/// Fill the durable cache without keeping the whole catalog's decoded images in memory.
+/// Valid images survive interrupted runs; missing or corrupt entries are retried next launch.
+pub(crate) fn populate_cache(
+    store: &Store,
+    progress: &mut dyn FnMut(String),
+) -> Result<String, String> {
+    let config = ArtConfig::standard();
+    let cards = store.all_cards().map_err(|e| e.to_string())?;
+    let mut names = std::collections::BTreeSet::new();
+    for (_, card) in cards {
+        names.insert(card.name);
+        for face in card.faces {
+            names.insert(face.name);
+        }
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .build()
+        .into();
+    let total = names.len();
+    let mut failed = 0;
+    for (i, name) in names.into_iter().enumerate() {
+        if load(&config, Some(store), &agent, &ApiGate, &name).is_none() {
+            failed += 1;
+        }
+        if i % 25 == 0 || i + 1 == total {
+            progress(format!(
+                "Preparing card images: {}/{total} ({failed} unavailable)",
+                i + 1
+            ));
+        }
+    }
+    Ok(format!(
+        "Card images checked: {total}; {failed} unavailable (retried next launch)."
+    ))
 }
 
 enum Slot {
@@ -356,13 +393,24 @@ fn worker(
     ctx: egui::Context,
 ) {
     // Opened here, not on the UI thread: a lookup is I/O, and the connection never needs sharing.
-    let store = config.db.as_deref().and_then(|p| Store::open(p).ok());
+    let mut store = config
+        .db
+        .as_deref()
+        .filter(|p| p.exists())
+        .and_then(|p| Store::open(p).ok());
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(20)))
         .build()
         .into();
 
     while let Some(job) = jobs.pop() {
+        if store.is_none() {
+            store = config
+                .db
+                .as_deref()
+                .filter(|p| p.exists())
+                .and_then(|p| Store::open(p).ok());
+        }
         let image = match &job {
             Art::Card(shown) => load(config, store.as_ref(), &agent, gate, shown),
             Art::Printing(id, uri) => {
