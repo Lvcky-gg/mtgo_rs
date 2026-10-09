@@ -16,7 +16,7 @@ use egui::{RichText, Ui};
 use mtg_net::fairness::Seed;
 use mtg_session::{
     game::{CardKey, DeckSpec, Format, GameCards, MatchSettings, deck_problems},
-    matches::{GameEnd, GameStart, MatchEnd, play_local_match_with_players},
+    matches::{GameEnd, GameStart, MatchEnd, PlayDrawChoice, play_local_match_with_players},
 };
 use mtg_store::Store;
 
@@ -67,6 +67,7 @@ struct Running {
     gui: Option<GuiApp>,
     events: Receiver<MatchEvent>,
     sideboards: Sender<DeckSpec>,
+    play_draws: Sender<bool>,
     left: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     status: VecDeque<String>,
@@ -76,6 +77,7 @@ struct Running {
     /// The last game's result, shown until the next game starts.
     last_game: Option<GameEnd>,
     sideboard: Option<(DeckSpec, BTreeMap<CardKey, String>)>,
+    play_draw: Option<PlayDrawChoice>,
     ended: Option<Result<MatchEnd, String>>,
 }
 
@@ -1299,12 +1301,14 @@ impl App {
         let auto = Arc::clone(&inner.auto_answered);
         let (events_tx, events) = mpsc::channel();
         let (sideboards, sideboard_rx) = mpsc::channel();
+        let (play_draws, play_draw_rx) = mpsc::channel();
         let left = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let mut seat = UiSeat {
             inner,
             events: events_tx.clone(),
             sideboards: sideboard_rx,
+            play_draws: play_draw_rx,
             left: Arc::clone(&left),
         };
 
@@ -1381,6 +1385,7 @@ impl App {
             gui: Some(gui),
             events,
             sideboards,
+            play_draws,
             left,
             cancel,
             status: VecDeque::new(),
@@ -1389,6 +1394,7 @@ impl App {
             game: None,
             last_game: None,
             sideboard: None,
+            play_draw: None,
             ended: None,
         });
         self.screen = Screen::Match;
@@ -1497,7 +1503,7 @@ impl App {
         if let Some(end) = run
             .last_game
             .as_ref()
-            .filter(|_| run.ended.is_none() && run.sideboard.is_none())
+            .filter(|_| run.ended.is_none() && run.sideboard.is_none() && run.play_draw.is_none())
         {
             let you = run.game.as_ref().map_or(mtg_core::PlayerId(0), |g| g.you);
             let verdict = match end.winner {
@@ -1511,7 +1517,7 @@ impl App {
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
                 .show(&ctx, |ui| {
                     ui.label(RichText::new(verdict).size(20.0).strong());
-                    ui.label("the next game starts in a moment");
+                    ui.label("Waiting for the next game’s play/draw choice.");
                 });
         }
 
@@ -1536,7 +1542,7 @@ impl App {
                     if ui
                         .add_enabled(
                             valid,
-                            egui::Button::new(RichText::new("Done — play the next game").strong()),
+                            egui::Button::new(RichText::new("Done — continue").strong()),
                         )
                         .clicked()
                     {
@@ -1546,6 +1552,21 @@ impl App {
             if done {
                 let (deck, _) = run.sideboard.take().expect("present");
                 let _ = run.sideboards.send(deck);
+            }
+        }
+
+        if let Some(choice) = run.play_draw.as_ref() {
+            let mut answer = None;
+            egui::Window::new(format!("Game {} — play or draw", choice.number))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(&ctx, |ui| {
+                    answer = play_draw_editor(ui);
+                });
+            if let Some(play_first) = answer {
+                run.play_draw = None;
+                let _ = run.play_draws.send(play_first);
             }
         }
 
@@ -1629,6 +1650,7 @@ fn drain_events(run: &mut Running) -> bool {
                 if run.ended.is_none() {
                     run.ended = Some(Err("The match worker stopped unexpectedly.".into()));
                     run.sideboard = None;
+                    run.play_draw = None;
                 }
                 return false;
             }
@@ -1647,7 +1669,9 @@ fn drain_events(run: &mut Running) -> bool {
                     gui.set_texts(texts);
                 }
             }
+            MatchEvent::PlayDraw(choice) => run.play_draw = Some(choice),
             MatchEvent::GameStarted(start) => {
+                run.play_draw = None;
                 run.game = Some(start);
                 run.last_game = None;
             }
@@ -1656,10 +1680,30 @@ fn drain_events(run: &mut Running) -> bool {
             MatchEvent::MatchEnded(result) => {
                 run.ended = Some(result);
                 run.sideboard = None;
+                run.play_draw = None;
             }
         }
     }
     true
+}
+
+fn play_draw_editor(ui: &mut Ui) -> Option<bool> {
+    ui.label(
+        RichText::new("You choose who goes first")
+            .size(20.0)
+            .strong(),
+    );
+    ui.label("Choose before your opening hand is dealt.");
+    ui.horizontal(|ui| {
+        if ui.button("Play first").clicked() {
+            Some(true)
+        } else if ui.button("Draw first").clicked() {
+            Some(false)
+        } else {
+            None
+        }
+    })
+    .inner
 }
 
 /// Before the first game: connection progress, and for a host the link to send.
@@ -1839,6 +1883,91 @@ mod event_tests {
     use super::*;
 
     #[test]
+    fn play_draw_buttons_submit_the_selected_order() {
+        for (label, expected) in [("Play first", true), ("Draw first", false)] {
+            let ctx = egui::Context::default();
+            let mut answer = None;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                answer = play_draw_editor(ui);
+            });
+            output.textures_delta.clear();
+            assert_eq!(answer, None, "opening the prompt must not select a default");
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::epaint::Shape::Text(text) = &shape.shape
+                        && text.galley.text() == label
+                    {
+                        Some(text.pos + text.galley.rect.center().to_vec2())
+                    } else {
+                        None
+                    }
+                })
+                .expect("button rendered");
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| {
+                    answer = play_draw_editor(ui);
+                },
+            );
+            output.textures_delta.clear();
+            assert_eq!(answer, Some(expected));
+        }
+    }
+
+    #[test]
+    fn play_draw_prompts_are_cleared_on_game_start_match_end_and_worker_shutdown() {
+        for ending in 0..3 {
+            let (events, receiver) = mpsc::channel();
+            let mut run = running(receiver);
+            let choice = PlayDrawChoice {
+                number: 1,
+                chooser: mtg_core::PlayerId(0),
+                score: vec![0, 0],
+            };
+            events.send(MatchEvent::PlayDraw(choice.clone())).unwrap();
+            drain_events(&mut run);
+            assert_eq!(run.play_draw, Some(choice));
+            if ending == 0 {
+                events
+                    .send(MatchEvent::GameStarted(GameStart {
+                        number: 1,
+                        you: mtg_core::PlayerId(0),
+                        first: mtg_core::PlayerId(1),
+                        score: vec![0, 0],
+                    }))
+                    .unwrap();
+            } else if ending == 1 {
+                events
+                    .send(MatchEvent::MatchEnded(Err("cancelled".into())))
+                    .unwrap();
+            } else {
+                drop(events);
+            }
+            drain_events(&mut run);
+            assert!(run.play_draw.is_none());
+        }
+    }
+
+    #[test]
     fn catalog_becomes_available_before_image_population_finishes() {
         let (updates, receiver) = mpsc::channel();
         updates.send(DatabaseUpdate::CatalogReady).unwrap();
@@ -1995,11 +2124,13 @@ mod event_tests {
 
     fn running(events: Receiver<MatchEvent>) -> Running {
         let (sideboards, _receiver) = mpsc::channel();
+        let (play_draws, _receiver) = mpsc::channel();
         Running {
             mode: Mode::Host,
             gui: None,
             events,
             sideboards,
+            play_draws,
             left: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             status: VecDeque::new(),
@@ -2008,6 +2139,7 @@ mod event_tests {
             game: None,
             last_game: None,
             sideboard: Some((DeckSpec::default(), BTreeMap::new())),
+            play_draw: None,
             ended: None,
         }
     }

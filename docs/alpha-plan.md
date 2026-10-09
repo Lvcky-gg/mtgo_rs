@@ -32,12 +32,20 @@ Implemented and covered by automated acceptance tests:
   declares only their own blocks, in APNAP order, before priority resumes. Combat
   damage and commander damage remain associated with the attacked player.
 - The board already groups multiple opponents; scores now contain all seats.
+- Opening hands use declaration rounds: everyone decides before replacement
+  hands are dealt. Three/four-player pods grant each player one free mulligan;
+  subsequent redraws bottom cards before the next declaration round. Two-player
+  games retain the normal paid London mulligan.
 
 Evidence: `crates/mtg-session/tests/pods.rs` checks opening hands, command zones,
 turn order, two/three/four-seat results, question routing, private views, host
 elimination and disconnects. `crates/mtg-app/tests/network_match.rs` exercises
 four encrypted clients, distinct invites and cancellation of a partially filled
-lobby. `crates/mtg-verify/tests/multiplayer_combat.rs` checks split attacks, legal
+lobby. Each encrypted pod seat now exercises its free mulligan.
+`crates/mtg-verify/tests/opening_hands.rs` checks declaration order, free/paid
+redraws, bottom order, rejection without mutation, the zero-card limit and
+first-turn drawing for two/three/four players.
+`crates/mtg-verify/tests/multiplayer_combat.rs` checks split attacks, legal
 blocker candidates, foreign-block rejection, APNAP order, damage to three players
 and a planeswalker, and commander damage. The permanent replay is
 `tests/regressions/issue_local_multiplayer_combat.json`.
@@ -63,14 +71,50 @@ Implemented:
 - Constructed deck size/copy limits and best-of-three sideboarding still apply.
 - Imported Commander legality is also enforced; unrestricted Constructed remains
   a separate option.
+- Guests verify game numbering, assigned seating, score transitions and
+  sideboarding order. An interrupted best-of-three with a one-game lead has no
+  match winner on either client. A snapshot for a different seat is refused
+  before it reaches the UI.
+- Drawn games do not consume a decisive game in best-of-three. Both clients
+  continue sideboarding and game numbering until a player has two wins. Repeated
+  draws stop at an explicit 64-game safety limit without awarding a winner.
+  Best-of-one still ends after its single game, including a draw.
 
 Evidence: the app's catalog-driven legality regression checks legal/illegal cards
 and card-table serialization; existing match/sideboard suites cover structural
 limits. Daily startup refresh updates the legality snapshot when online. An offline
 catalog is a historical snapshot, not a guarantee of today's rotation or bans.
 
+Encrypted Standard acceptance now imports two synthetic legal decks through the
+actual app importer, plays all three games, swaps main/sideboard cards twice,
+checks private hands and compares both clients' score, game and sideboarding
+events. Both previous losers now exercise drawing first after sideboarding.
+A separate encrypted test refuses a catalog-illegal card before either client
+begins a game. These loopback fixtures exercise application plumbing;
+they do not replace real deck or separate-machine acceptance.
+
+Two-player games now ask the entitled player to play or draw before opening
+hands are dealt. The agreed seed selects the first chooser; subsequent losers
+choose, and a drawn game retains the previous chooser even if they elected to
+draw. Between games the prompt comes after sideboarding. Three/four-player
+Commander pods retain their seeded starting seat.
+
+The UI offers Play first / Draw first, clears the prompt when a game starts or
+the worker ends, and releases its wait when the player leaves. Guests validate
+chooser, score, game number, sideboarding order and their selected starting
+player before accepting the game. This follows
+[CR 103.1](https://media.wizards.com/2026/downloads/MagicCompRules%2020260925.txt).
+New lobby messages require every client to use this candidate build.
+
+Local and hosted engine regressions resolve an invented simultaneous-life-loss
+spell, then play through game four, checking the drawn score, three sideboarding
+rounds and the agreed 1–2 result. Protocol tests reject unexplained early endings
+and a 65th game, while accepting a completed best-of-one draw.
+
 Before inviting outside testers:
 
+- [x] Implement and automatically verify explicit two-player play/draw selection
+  before opening hands, including host/guest agreement and UI cancellation.
 - [ ] Import two legal Standard decks that compile completely, then run a full
   best-of-three match with sideboarding on two machines.
 - [ ] Verify an illegal card is refused and deck editing/saving preserves the deck.
@@ -131,3 +175,5 @@ channels for hidden-card data. Existing offline scenario reports remain availabl
 
 Publication is a separate final step after the above evidence and manual checks.
 No release or external invitation is issued by these local changes.
+
+Use the [tester runbook](alpha-testing.md) to collect the remaining manual results.

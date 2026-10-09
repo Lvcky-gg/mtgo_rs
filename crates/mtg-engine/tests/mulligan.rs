@@ -83,6 +83,16 @@ fn a_mulligan_deals_a_fresh_seven_and_keeping_bottoms_one() {
     let c = next(&mut engine);
     answer(&mut engine, &c, Answer::Bool(false));
 
+    assert_eq!(
+        hand(&engine, P0),
+        before,
+        "redraw waits for all declarations"
+    );
+    let c = next(&mut engine);
+    assert_eq!(c.who, P1);
+    answer(&mut engine, &c, Answer::Bool(true));
+    let c = next(&mut engine); // all declarations are complete; redraw and bottom
+
     let after = hand(&engine, P0);
     assert_eq!(after.len(), 7, "a fresh seven");
     assert_eq!(
@@ -94,14 +104,6 @@ fn a_mulligan_deals_a_fresh_seven_and_keeping_bottoms_one() {
     );
     assert_ne!(before, after, "a different hand");
 
-    let c = next(&mut engine);
-    assert!(matches!(
-        c.kind,
-        ChoiceKind::KeepOrMulligan { mulligans_taken: 1 }
-    ));
-    answer(&mut engine, &c, Answer::Bool(true));
-
-    let c = next(&mut engine);
     let ChoiceKind::ChooseObjects {
         from,
         min: 1,
@@ -120,6 +122,13 @@ fn a_mulligan_deals_a_fresh_seven_and_keeping_bottoms_one() {
     );
     let library = engine.state.objects_in(ZoneRef::of(Zone::Library, P0));
     assert_eq!(library.last(), Some(&bottomed), "on the bottom");
+    let c = next(&mut engine);
+    assert!(matches!(
+        c.kind,
+        ChoiceKind::KeepOrMulligan { mulligans_taken: 1 }
+    ));
+    assert_eq!(c.who, P0, "the kept player does not declare again");
+    answer(&mut engine, &c, Answer::Bool(true));
 }
 
 #[test]
@@ -128,6 +137,7 @@ fn bottoming_the_wrong_number_is_refused_and_asked_again() {
     let c = next(&mut engine);
     answer(&mut engine, &c, Answer::Bool(false));
     let c = next(&mut engine);
+    assert_eq!(c.who, P1);
     answer(&mut engine, &c, Answer::Bool(true));
     let c = next(&mut engine);
     let ChoiceKind::ChooseObjects { from, .. } = &c.kind else {
@@ -148,6 +158,9 @@ fn the_same_seed_makes_the_same_mulligan() {
         let mut engine = game();
         let c = next(&mut engine);
         answer(&mut engine, &c, Answer::Bool(false));
+        let c = next(&mut engine);
+        answer(&mut engine, &c, Answer::Bool(true));
+        let _ = next(&mut engine);
         hand(&engine, P0)
     };
     assert_eq!(deal(), deal(), "deterministic: a replay reproduces it");

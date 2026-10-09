@@ -301,15 +301,16 @@ pub const PHASE_BAR: [(mtg_core::Step, &str); 11] = {
 pub fn priority_heading(view: &PlayerView, top_of_stack: Option<&str>) -> String {
     use mtg_core::Step as S;
     let mine = view.active_player == view.viewer;
-    if let Some(top) = top_of_stack {
-        return format!("{top} is on the stack — respond, or let it resolve");
+    if !view.stack.is_empty() {
+        return format!(
+            "{} is on the stack — respond, or pass priority",
+            top_of_stack.unwrap_or("An item")
+        );
     }
     match (mine, view.step) {
-        (true, S::PrecombatMain) => {
-            "Your main phase — play a land, cast spells, or go to combat".into()
-        }
+        (true, S::PrecombatMain) => "Your main phase — act, or pass toward combat".into(),
         (true, S::PostcombatMain) => {
-            "Your second main phase — play what you held back, or end the turn".into()
+            "Your second main phase — act, or pass toward the end step".into()
         }
         (true, _) => format!("Your turn · {}", step_name(view.step)),
         (false, _) => format!(
@@ -319,18 +320,39 @@ pub fn priority_heading(view: &PlayerView, top_of_stack: Option<&str>) -> String
     }
 }
 
-/// What passing priority does from here, as the button should say it.
-pub fn pass_label(view: &PlayerView, top_of_stack: Option<&str>) -> String {
+/// The current-step intent of passing. This sends one priority pass; it never
+/// commits to skipping other players' responses or future decisions.
+pub fn pass_label(view: &PlayerView) -> String {
     use mtg_core::Step as S;
-    if let Some(top) = top_of_stack {
-        return format!("Let {top} resolve");
+    if !view.stack.is_empty() || view.active_player != view.viewer {
+        return "Pass priority".into();
     }
-    let mine = view.active_player == view.viewer;
-    match (mine, view.step) {
-        (true, S::PrecombatMain | S::Upkeep | S::Draw | S::BeginCombat) => "Go to combat".into(),
-        (true, S::PostcombatMain | S::End | S::EndCombat) => "End turn".into(),
-        (true, _) => "Continue".into(),
-        (false, _) => "Pass".into(),
+    match view.step {
+        S::Untap => "Pass priority",
+        S::Upkeep => "Finish upkeep",
+        S::Draw => "Finish draw step",
+        S::PrecombatMain => "Go to combat",
+        // Attackers, blocks and first-strike damage can change which decisions
+        // follow. The projected view is not an oracle for that continuation.
+        S::BeginCombat
+        | S::DeclareAttackers
+        | S::DeclareBlockers
+        | S::FirstStrikeCombatDamage
+        | S::CombatDamage => "Continue combat",
+        S::EndCombat => "Go to second main",
+        S::PostcombatMain => "Go to end step",
+        S::End => "Finish end step",
+        S::Cleanup => "Continue cleanup",
+    }
+    .into()
+}
+
+/// Explain the exact action behind contextual button labels and the Space shortcut.
+pub fn pass_hint(view: &PlayerView) -> &'static str {
+    if !view.stack.is_empty() {
+        "Space: pass priority. The top stack item resolves only after everyone passes."
+    } else {
+        "Space: pass priority. Other players may respond before the step changes."
     }
 }
 

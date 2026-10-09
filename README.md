@@ -43,6 +43,8 @@ Agent-first verification uses versioned scenarios, deterministic replay,
 independent rules/security properties, fuzzing and production mutation checks.
 See [verification commands, evidence and remaining work](docs/verification.md).
 The [pre-alpha acceptance plan](docs/alpha-plan.md) prioritizes two-to-four-player Commander, Standard, then cEDH.
+The [alpha acceptance runbook](docs/alpha-testing.md) gives the manual test cases
+and the evidence to include in bug reports.
 
 ```sh
 cargo run -p mtg-verify --bin mtgo-rs -- replay tests/replays/basic_casting.json

@@ -144,7 +144,7 @@ pub enum ChoiceKind {
         count: u32,
     },
 
-    /// Keep or shuffle the opening hand (CR 103.4).
+    /// Declare keep or mulligan (CR 103.5); counts include the free multiplayer redraw.
     KeepOrMulligan {
         mulligans_taken: u32,
     },

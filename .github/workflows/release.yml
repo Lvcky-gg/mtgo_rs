@@ -206,11 +206,26 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
-      - uses: actions/download-artifact@v4
+      - name: Download windows-x64 assets
+        uses: actions/download-artifact@v4
         with:
-          pattern: release-*
+          name: release-windows-x64
           path: dist
-          merge-multiple: true
+      - name: Download macos-arm64 assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: dist
+      - name: Download macos-x64 assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos-x64
+          path: dist
+      - name: Download linux-flatpak assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-flatpak
+          path: dist
       - name: Verify assets and add checksums
         run: |
           test -f "dist/mtgo-rs-v$RELEASE_VERSION-windows-x64.exe"
@@ -223,11 +238,20 @@ jobs:
           sha256sum -- *.exe *.dmg *.zip *.flatpak > SHA256SUMS.txt
       - name: Create or update the release for this commit
         run: |
+          assets=(
+            "dist/mtgo-rs-v$RELEASE_VERSION-windows-x64.exe"
+            "dist/mtgo-rs-v$RELEASE_VERSION-macos-arm64.dmg"
+            "dist/mtgo-rs-v$RELEASE_VERSION-macos-x64.dmg"
+            "dist/mtgo-rs-v$RELEASE_VERSION-linux-x64.flatpak"
+            "dist/mtgo-rs-v$RELEASE_VERSION-macos-arm64.zip"
+            "dist/mtgo-rs-v$RELEASE_VERSION-macos-x64.zip"
+            "dist/SHA256SUMS.txt"
+          )
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/* --clobber
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
             gh release edit "$RELEASE_TAG" --draft=false
           else
-            gh release create "$RELEASE_TAG" dist/* --target "$RELEASE_SHA" --title "MTGO RS $RELEASE_TAG" --generate-notes --draft
+            gh release create "$RELEASE_TAG" "${assets[@]}" --target "$RELEASE_SHA" --title "MTGO RS $RELEASE_TAG" --generate-notes --draft
             gh release view "$RELEASE_TAG" --json body --jq '.body' > release-notes.md
             cat >> release-notes.md <<'NOTES'
 

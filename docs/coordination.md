@@ -1,5 +1,55 @@
 # Current work
 
+Codex (2026-10-09, GitHub release publication fix — READY TO PUSH): both recent
+remote releases passed all platform builds/test jobs but failed at publication.
+The release-* artifact glob also selected verification evidence, causing dist/*
+to include campaign/. Fixed downloads to four exact artifact names and uploads
+to six installer/archive files plus checksums. The actual workflow shell now
+passes first-publication/retry regressions; the old shell fails both. Python
+80 pass/1 skip and fresh PR35/current-source gate pass. User authorized release
+and push of the previously verified alpha work; closed-alpha reviews remain
+pending. See [session](sessions/2026-10-09-release-publication.md).
+
+Codex (2026-10-09, alpha play/draw selection — COMPLETE): two-player matches
+ask the seeded first chooser, then each previous loser, before opening hands.
+Draws retain the chooser even after electing to draw; choices follow sideboarding.
+Added UI controls, bounded cancellation wait and validated lobby request/reply
+flow. Encrypted Standard acceptance exercises both losers drawing first.
+Workspace 2,154 pass / 44 ignored, fmt/Clippy and fresh PR35/current-source gate
+pass. Strict release still rejects three unknown assessments; independent review
+and separate-machine acceptance remain pending. See
+[session](sessions/2026-10-09-alpha-play-draw.md).
+
+Codex (2026-10-09, alpha drawn-match progression — COMPLETE): best-of-three
+continues until two wins, including sideboarding/game four after a draw. Host
+and guest share an explicit 64-game safety stop without a false winner; guests
+reject unexplained early endings and a 65th game. Six new regressions pass.
+Workspace 2,144 pass / 44 ignored, fmt/Clippy and fresh PR35/current-source gate
+pass. Strict release still rejects three unknown assessments; explicit play/draw
+selection and separate-machine acceptance remain pending. See
+[session](sessions/2026-10-09-alpha-drawn-matches.md).
+
+Codex (2026-10-09, turn-action label audit — COMPLETE): corrected contextual
+priority button text in upkeep/draw, beginning/end of combat, second main and
+end/cleanup. Stack and opponent-turn buttons say Pass priority; tooltips explain
+response windows. First-strike/cleanup phase-bar labels are explicit. Actual
+button clicks through two real engine turns, stack-response rendering and the
+phase bar are covered; app244 pass/5 ignored, fmt and Clippy pass. See
+[session](sessions/2026-10-09-turn-label-audit.md).
+
+Codex (2026-10-09, alpha opening hands and match consistency — COMPLETE):
+fixed declaration-round London mulligans and the first free multiplayer redraw,
+including bottoming before the next decision and the zero-card limit. Fixed
+guest/host winner disagreement on interrupted best-of-three matches; guests now
+check assigned projections, game/score transitions and sideboarding order.
+Encrypted acceptance imports synthetic Standard decks, sideboards twice and
+refuses illegal cards; four-client pods exercise free mulligans. Workspace
+2,135 pass / 44 ignored; fmt, Clippy, Python79/1 skip, PR35/current-source gate
+pass. Three selected opening-hand mutants killed; no confidence promotion.
+Strict release still rejects three unknown assessments. See
+[session](sessions/2026-10-09-alpha-opening-hands.md) and
+[tester runbook](alpha-testing.md).
+
 Codex (2026-10-09, pre-alpha Commander/Standard implementation — COMPLETE):
 startup catalog/image population carried forward; local/hosted Commander supports
 two to four seats, per-seat private snapshots and single-use invites. Standard

@@ -418,7 +418,7 @@ pub fn game_seed(match_seed: &Seed, game: u8, seat: PlayerId) -> Seed {
 
 /// A game ready to start: libraries shuffled, seven cards dealt, commanders set aside.
 ///
-/// There is no mulligan yet: the engine's `KeepOrMulligan` question exists but is not asked.
+/// Opening-hand declarations and London mulligans are handled by the engine's pregame.
 pub fn new_game(
     format: Format,
     cards: &GameCards,

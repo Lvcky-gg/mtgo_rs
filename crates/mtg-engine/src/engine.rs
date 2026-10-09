@@ -7230,7 +7230,23 @@ impl Engine {
             self.state.pregame = None;
             return Progress::Continue;
         }
+        // Everyone declares before any redraw. Resolve bottom choices before
+        // asking about the next round, so each player decides with their actual hand.
+        while pg.to_bottom.is_none() && !pg.bottom_pending.is_empty() {
+            let who = pg.bottom_pending.remove(0);
+            let free = u32::from(pg.order.len() > 2);
+            let count = pg
+                .taken
+                .get(&who)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(free);
+            if count > 0 {
+                pg.to_bottom = Some((who, count.min(7)));
+            }
+        }
         if let Some((who, n)) = pg.to_bottom {
+            self.state.pregame = Some(pg.clone());
             let hand = self.state.objects_in(ZoneRef::of(Zone::Hand, who));
             let default: Vec<ObjectId> = hand.iter().take(n as usize).copied().collect();
             let plural = if n == 1 { "card" } else { "cards" };
@@ -7247,12 +7263,30 @@ impl Engine {
             self.pregame_choice = Some(c.id);
             return Progress::NeedsChoice(c);
         }
+        while pg
+            .order
+            .get(pg.next)
+            .is_some_and(|who| pg.kept.contains(who))
+        {
+            pg.next += 1;
+        }
         let Some(&who) = pg.order.get(pg.next) else {
-            pg.leylines = Some(0);
+            if pg.mulliganing.is_empty() {
+                pg.leylines = Some(0);
+            } else {
+                pg.bottom_pending = std::mem::take(&mut pg.mulliganing);
+                for &player in &pg.bottom_pending {
+                    *pg.taken.entry(player).or_insert(0) += 1;
+                    self.redeal(player);
+                }
+                pg.next = 0;
+                self.cache.invalidate();
+            }
             self.state.pregame = Some(pg);
             return self.pregame_question(cards);
         };
         let taken = pg.taken.get(&who).copied().unwrap_or(0);
+        self.state.pregame = Some(pg);
         let c = self.new_choice(
             who,
             ChoiceKind::KeepOrMulligan {
@@ -7324,17 +7358,15 @@ impl Engine {
         match (&choice.kind, answer) {
             (ChoiceKind::KeepOrMulligan { mulligans_taken }, Answer::Bool(keep)) => {
                 let who = pg.order[pg.next];
-                // Seven mulligans leaves nothing to keep; the eighth answer is a keep either way.
-                if keep || *mulligans_taken >= 7 {
-                    if *mulligans_taken > 0 {
-                        pg.to_bottom = Some((who, (*mulligans_taken).min(7)));
-                    } else {
-                        pg.next += 1;
-                    }
+                // CR 103.5c: multiplayer's first mulligan does not reduce the
+                // hand or count toward the zero-card limit.
+                let free = u32::from(pg.order.len() > 2);
+                if keep || mulligans_taken.saturating_sub(free) >= 7 {
+                    pg.kept.insert(who);
                 } else {
-                    *pg.taken.entry(who).or_insert(0) += 1;
-                    self.redeal(who);
+                    pg.mulliganing.push(who);
                 }
+                pg.next += 1;
             }
             (ChoiceKind::ChooseObjects { from, min, .. }, Answer::Objects(chosen)) => {
                 let mut distinct = chosen.clone();
@@ -7351,7 +7383,6 @@ impl Engine {
                         self.relocate(o, ZoneRef::of(Zone::Library, who), false);
                     }
                 }
-                pg.next += 1;
             }
             _ => return refuse(self, choice),
         }

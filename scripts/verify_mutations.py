@@ -18,6 +18,27 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MUTATIONS = [
     {
+        "id": "multiplayer_first_mulligan_costs_a_card",
+        "source": "crates/mtg-engine/src/engine.rs",
+        "before": ".saturating_sub(free);",
+        "after": ".saturating_sub(0); let _ = free;",
+        "checks": [["--test", "opening_hands"]],
+    },
+    {
+        "id": "mulligan_redraw_before_other_declarations",
+        "source": "crates/mtg-engine/src/engine.rs",
+        "before": "pg.mulliganing.push(who);",
+        "after": "pg.mulliganing.push(who); self.redeal(who);",
+        "checks": [["--test", "opening_hands"]],
+    },
+    {
+        "id": "mulligan_bottom_choice_skipped",
+        "source": "crates/mtg-engine/src/engine.rs",
+        "before": "while pg.to_bottom.is_none() && !pg.bottom_pending.is_empty() {",
+        "after": "while false && pg.to_bottom.is_none() && !pg.bottom_pending.is_empty() {",
+        "checks": [["--test", "opening_hands"]],
+    },
+    {
         "id": "pod_attack_destinations_only_first_opponent",
         "source": "crates/mtg-engine/src/combat.rs",
         "before": "let mut destinations: Vec<_> = defenders.iter().copied().map(Target::Player).collect();",

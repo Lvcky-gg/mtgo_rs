@@ -19,6 +19,7 @@ pub struct GuestSession<C: Channel> {
     view: Option<PlayerView>,
     /// The last question, kept so a client can redraw while it is outstanding.
     pending: Option<Choice>,
+    assigned_seat: Option<mtg_core::PlayerId>,
 }
 
 impl<C: Channel> GuestSession<C> {
@@ -27,6 +28,15 @@ impl<C: Channel> GuestSession<C> {
             channel,
             view: None,
             pending: None,
+            assigned_seat: None,
+        }
+    }
+
+    /// Pin the projection to the seat assigned by the match lobby.
+    pub fn for_seat(channel: C, seat: mtg_core::PlayerId) -> Self {
+        Self {
+            assigned_seat: Some(seat),
+            ..Self::new(channel)
         }
     }
 
@@ -62,7 +72,18 @@ impl<C: Channel> GuestSession<C> {
 
             match msg {
                 HostMessage::Snapshot { view_bytes, .. } => {
-                    self.view = Some(mtg_net::wire::decode(&view_bytes)?);
+                    let view: PlayerView = mtg_net::wire::decode(&view_bytes)?;
+                    if self.assigned_seat.is_some_and(|seat| seat != view.viewer)
+                        || self
+                            .view
+                            .as_ref()
+                            .is_some_and(|previous| previous.viewer != view.viewer)
+                    {
+                        return Err(SessionError::Unexpected(
+                            "snapshot belongs to another seat".into(),
+                        ));
+                    }
+                    self.view = Some(view);
                     decide.observe(self.view.as_ref().expect("decoded view"));
                 }
 

@@ -146,8 +146,10 @@ The workflow stages are:
 3. Build Windows and both macOS architectures on their native runners. Vendor
    dependencies for Linux, then compile offline inside Freedesktop SDK 25.08.
    The Flatpak manifest exports the `stable` branch, matching the bundle command.
-4. Verify all assets are present, generate checksums, upload to a draft release,
-   then publish the complete release. Retries replace assets on the existing
+4. Download the four named platform artifacts, verify the six installer/archive
+   files, generate checksums, and upload only those files and checksums to a draft
+   release. Verification logs/campaign artifacts remain on the workflow run.
+   Then publish the complete release. Retries replace assets on the existing
    release for that commit.
 
 The Windows executable and macOS disk images appear under **Assets** on each

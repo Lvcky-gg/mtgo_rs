@@ -384,7 +384,13 @@ pub struct Pregame {
     pub next: usize,
     /// Mulligans taken so far, per player.
     pub taken: BTreeMap<PlayerId, u32>,
-    /// A player who has kept after mulliganing, still to put this many cards on the bottom.
+    /// Players who kept and no longer participate in subsequent declaration rounds.
+    pub kept: BTreeSet<PlayerId>,
+    /// This round's declarations, collected before anyone sees a replacement hand.
+    pub mulliganing: Vec<PlayerId>,
+    /// Players whose replacement hands still require bottom-card choices.
+    pub bottom_pending: Vec<PlayerId>,
+    /// A player who has just redrawn, still to put this many cards on the bottom.
     pub to_bottom: Option<(PlayerId, u32)>,
     /// Once everyone has kept: index into `order` of the player now choosing which cards
     /// to begin the game with on the battlefield (CR 103.6).

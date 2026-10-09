@@ -1821,12 +1821,12 @@ impl GuiApp {
                             return;
                         }
                     }
-                    let pass = format::pass_label(view, top_of_stack.as_deref());
+                    let pass = format::pass_label(view);
                     if ui
                         .add(crate::theme::primary_button(
                             RichText::new(pass).strong().color(crate::theme::INK),
                         ))
-                        .on_hover_text("Space")
+                        .on_hover_text(format::pass_hint(view))
                         .clicked()
                     {
                         self.answer(Answer::Pass);
@@ -2265,14 +2265,10 @@ impl GuiApp {
 
             ChoiceKind::KeepOrMulligan { mulligans_taken } => {
                 let taken = *mulligans_taken;
-                if taken > 0 {
-                    ui.label(
-                        RichText::new(format!(
-                            "Keeping means putting {taken} card{} on the bottom next.",
-                            if taken == 1 { "" } else { "s" }
-                        ))
-                        .weak(),
-                    );
+                let free = u32::from(view.players.len() > 2);
+                let penalty = taken.saturating_sub(free);
+                if free > 0 && taken == 0 {
+                    ui.label(RichText::new("Your first multiplayer mulligan is free.").weak());
                 }
                 ui.horizontal(|ui| {
                     if ui
@@ -2282,9 +2278,12 @@ impl GuiApp {
                         self.answer(Answer::Bool(true));
                         return;
                     }
-                    if taken < 7
+                    if penalty < 7
                         && ui
-                            .button(format!("Mulligan (to {})", 7 - (taken + 1).min(7)))
+                            .button(format!(
+                                "Mulligan (to {})",
+                                7 - (taken + 1).saturating_sub(free).min(7)
+                            ))
                             .clicked()
                     {
                         self.answer(Answer::Bool(false));
@@ -2491,6 +2490,11 @@ fn phase_bar(ui: &mut Ui, view: &PlayerView, texts: &CardTexts) {
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
         for (step, label) in format::PHASE_BAR {
             let on = step == current;
+            let label = match (on, view.step) {
+                (true, S::FirstStrikeCombatDamage) => "First strike",
+                (true, S::Cleanup) => "Cleanup",
+                _ => label,
+            };
             let text = RichText::new(label).small();
             let text = if on {
                 text.strong().color(Color32::BLACK)
@@ -2501,7 +2505,13 @@ fn phase_bar(ui: &mut Ui, view: &PlayerView, texts: &CardTexts) {
                 .fill(if on { lit } else { Color32::TRANSPARENT })
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::symmetric(8, 5))
-                .show(ui, |ui| ui.label(text));
+                .show(ui, |ui| {
+                    ui.label(text).on_hover_text(format::step_name(if on {
+                        view.step
+                    } else {
+                        step
+                    }))
+                });
         }
     });
 }
@@ -2723,6 +2733,121 @@ mod target_tests {
 
     fn click_question_label(app: &mut GuiApp, ctx: &egui::Context, label: &str) {
         click_label(ctx, label, |ui| app.draw_question(ui));
+    }
+
+    #[test]
+    fn turn_buttons_follow_real_priority_steps_and_submit_one_pass() {
+        use mtg_core::{Step, Zone, ZoneRef};
+        use mtg_engine::{Engine, Progress, state::GameState};
+        use mtg_headless::cards::{DemoCards, PLAINS};
+        let cards = DemoCards::default();
+        let mut state = GameState::new(&[PlayerId(0), PlayerId(1)], 20);
+        state.turn = 1;
+        state.step = Step::Untap;
+        for player in [PlayerId(0), PlayerId(1)] {
+            for _ in 0..20 {
+                state.place(PLAINS, player, ZoneRef::of(Zone::Library, player));
+            }
+        }
+        let mut engine = Engine::new(state);
+        let (mut app, answers, ctx) = question_app(ChoiceKind::Confirm);
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            if engine.state.turn > 2 {
+                break;
+            }
+            let Progress::NeedsChoice(choice) = engine.advance(&cards) else {
+                continue;
+            };
+            let view = engine.view_for(choice.who);
+            if matches!(choice.kind, ChoiceKind::Priority { .. }) {
+                let label = if view.viewer != view.active_player {
+                    "Pass priority"
+                } else {
+                    visited.insert(view.step);
+                    match view.step {
+                        Step::Upkeep => "Finish upkeep",
+                        Step::Draw => "Finish draw step",
+                        Step::PrecombatMain => "Go to combat",
+                        Step::EndCombat => "Go to second main",
+                        Step::PostcombatMain => "Go to end step",
+                        Step::End => "Finish end step",
+                        Step::Cleanup => "Continue cleanup",
+                        _ => "Continue combat",
+                    }
+                };
+                app.current = Some(Question {
+                    choice: choice.clone(),
+                    view,
+                });
+                click_question_label(&mut app, &ctx, label);
+                let answer = answers.try_recv().unwrap();
+                assert!(matches!(answer, Answer::Pass));
+                assert!(answers.try_recv().is_err(), "one click submits one pass");
+                engine.answer(&cards, choice.id, answer).unwrap();
+            } else {
+                engine
+                    .answer(&cards, choice.id, mtg_policy::well_formed(&choice, &view))
+                    .unwrap();
+            }
+        }
+        assert!(engine.state.turn > 2, "both turns completed");
+        for step in [
+            Step::Upkeep,
+            Step::Draw,
+            Step::PrecombatMain,
+            Step::BeginCombat,
+            Step::EndCombat,
+            Step::PostcombatMain,
+            Step::End,
+        ] {
+            assert!(
+                visited.contains(&step),
+                "missing real priority step {step:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stack_item_keeps_the_priority_button_from_promising_a_phase_change() {
+        use mtg_core::{Step, Zone, ZoneRef};
+        use mtg_headless::cards::{DUMMY, DemoCards};
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let mut state = mtg_engine::state::GameState::new(&[PlayerId(0), PlayerId(1)], 20);
+            state.step = Step::PrecombatMain;
+            state.priority = Some(viewer);
+            state.place(DUMMY, PlayerId(0), ZoneRef::shared(Zone::Stack));
+            let (mut app, answers, ctx) = question_app(ChoiceKind::Priority {
+                legal: Default::default(),
+            });
+            app.texts = CardTexts::snapshot(&DemoCards::default(), [DUMMY]);
+            app.current.as_mut().unwrap().view = mtg_engine::view::project(&state, viewer);
+            app.current.as_mut().unwrap().choice.who = viewer;
+            let view = &app.current.as_ref().unwrap().view;
+            assert!(format::priority_heading(view, None).contains("on the stack"));
+            assert!(format::pass_hint(view).contains("only after everyone passes"));
+            click_question_label(&mut app, &ctx, "Pass priority");
+            assert!(matches!(answers.try_recv().unwrap(), Answer::Pass));
+        }
+    }
+
+    #[test]
+    fn phase_bar_names_first_strike_and_cleanup_explicitly() {
+        use mtg_core::Step;
+        for (step, expected) in [
+            (Step::FirstStrikeCombatDamage, "First strike"),
+            (Step::Cleanup, "Cleanup"),
+        ] {
+            let (mut app, _, ctx) = question_app(ChoiceKind::Confirm);
+            app.current.as_mut().unwrap().view.step = step;
+            let view = &app.current.as_ref().unwrap().view;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                phase_bar(ui, view, &app.texts)
+            });
+            output.textures_delta.clear();
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::epaint::Shape::Text(text) if text.galley.text() == expected)));
+        }
     }
 
     #[test]

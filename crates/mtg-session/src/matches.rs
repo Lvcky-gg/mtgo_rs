@@ -14,6 +14,8 @@
 //! ```text
 //!   guest ── Deck ─────────────────────────────►  host   (by CardKey: meaningful on both ends)
 //!   guest ◄──────────── Welcome{settings,cards} ── host   (or Rejected, with the reason)
+//!         ◄──────────── PlayDraw ────────────────        two players; chooser answers before hands
+//!   guest ── PlayDraw{number,play_first} ────────►        only if the guest chooses
 //!         ◄──────────── Game{number,first,score} ─        then one game, as `host`/`guest` run it
 //!         ◄──────────── Sideboard ────────────────        between games, best-of-three only
 //!   guest ── Sideboarded ──────────────────────►
@@ -64,11 +66,26 @@ pub struct MatchEnd {
     pub reason: Option<String>,
 }
 
+/// A two-player decision made before opening hands are dealt.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PlayDrawChoice {
+    pub number: u8,
+    pub chooser: PlayerId,
+    pub score: Vec<u8>,
+}
+
+/// Bound repeated drawn games without mistaking that operational limit for a match result.
+pub const MAX_MATCH_GAMES: u8 = 64;
+
 /// One player's side of a match. See the module docs.
 pub trait Seat: Decide {
     fn begin_match(&mut self, _settings: MatchSettings, _cards: &GameCards) {}
     fn begin_game(&mut self, _start: &GameStart) {}
     fn end_game(&mut self, _end: &GameEnd) {}
+    /// True to play first; false to let the opponent start. Bots prefer to play.
+    fn choose_play_first(&mut self, _choice: &PlayDrawChoice) -> bool {
+        true
+    }
     /// Between games of a best-of-three: the deck for the next game. Only cards moved between
     /// main deck and sideboard are accepted; anything else keeps the deck as it was.
     fn sideboard(&mut self, deck: &DeckSpec, _cards: &GameCards) -> DeckSpec {
@@ -86,10 +103,11 @@ struct Score {
     wins: Vec<u8>,
     games: u8,
     next_first: PlayerId,
+    chooser: PlayerId,
 }
 
 impl Score {
-    /// The first game's starting player comes from the agreed seed, so neither side chose it.
+    /// The agreed seed selects the first chooser; that player may play or draw.
     fn new(settings: MatchSettings, seed: &Seed) -> Self {
         let next_first = SEATS[(seed.0[0] & 1) as usize];
         Self {
@@ -97,6 +115,7 @@ impl Score {
             wins: vec![0, 0],
             games: 0,
             next_first,
+            chooser: next_first,
         }
     }
 
@@ -105,13 +124,30 @@ impl Score {
         (self.games, self.next_first)
     }
 
-    /// Record a result. The loser plays first next game (the loser's choice, CR 103.1c, taken
-    /// as the choice nearly everyone makes); after a draw the same player goes first again.
+    /// CR 103.1: the loser chooses next; a draw retains the previous chooser.
     fn finish(&mut self, winner: Option<PlayerId>) {
         if let Some(w) = winner {
             self.wins[w.0 as usize] += 1;
-            self.next_first = if w == SEATS[0] { SEATS[1] } else { SEATS[0] };
+            if self.wins.len() == 2 {
+                self.chooser = if w == SEATS[0] { SEATS[1] } else { SEATS[0] };
+            }
         }
+    }
+
+    fn play_draw_choice(&self) -> PlayDrawChoice {
+        PlayDrawChoice {
+            number: self.games + 1,
+            chooser: self.chooser,
+            score: self.wins.clone(),
+        }
+    }
+
+    fn choose_first(&mut self, play_first: bool) {
+        self.next_first = if play_first {
+            self.chooser
+        } else {
+            SEATS[1 - self.chooser.0 as usize]
+        };
     }
 
     fn match_winner(&self) -> Option<PlayerId> {
@@ -123,14 +159,22 @@ impl Score {
     }
 
     fn over(&self) -> bool {
-        self.match_winner().is_some() || self.games >= self.settings.best_of
+        self.match_winner().is_some()
+            || (self.settings.best_of == 1 && self.games >= 1)
+            || self.games >= MAX_MATCH_GAMES
     }
 
     fn end(&self, reason: Option<String>) -> MatchEnd {
         MatchEnd {
             score: self.wins.clone(),
             winner: self.match_winner(),
-            reason,
+            reason: reason.or_else(|| {
+                (self.games >= MAX_MATCH_GAMES && self.match_winner().is_none()).then(|| {
+                    format!(
+                        "match stopped at the {MAX_MATCH_GAMES}-game safety limit without a winner"
+                    )
+                })
+            }),
         }
     }
 }
@@ -181,11 +225,23 @@ pub fn play_local_match_with_players(
     let mut score = Score::new(settings, &seed);
     score.wins = vec![0; seats.len()];
     score.next_first = PlayerId((seed.0[0] as usize % seats.len()) as u8);
+    score.chooser = score.next_first;
     for seat in seats.iter_mut() {
         seat.begin_match(settings, cards);
     }
 
     while !score.over() {
+        if seats.iter().any(|seat| seat.has_left()) {
+            return score.end(Some("a player left before the next game".into()));
+        }
+        if seats.len() == 2 {
+            let choice = score.play_draw_choice();
+            let play_first = seats[choice.chooser.0 as usize].choose_play_first(&choice);
+            if seats.iter().any(|seat| seat.has_left()) {
+                return score.end(Some("a player left before the next game".into()));
+            }
+            score.choose_first(play_first);
+        }
         let (number, first) = score.start();
         for (i, seat) in seats.iter_mut().enumerate() {
             seat.begin_game(&GameStart {
@@ -292,6 +348,7 @@ pub enum ToGuest {
         score: Vec<u8>,
         reason: Option<String>,
     },
+    PlayDraw(PlayDrawChoice),
 }
 
 /// Lobby messages from guest to host.
@@ -299,6 +356,7 @@ pub enum ToGuest {
 pub enum ToHost {
     Deck(DeckSpec),
     Sideboarded(DeckSpec),
+    PlayDraw { number: u8, play_first: bool },
 }
 
 /// Host a match: receive the guest's deck, build and send the card table, then play the games.
@@ -376,7 +434,35 @@ pub fn host_match_with_players<C: Channel>(
     let mut score = Score::new(settings, &seed);
     score.wins = vec![0; decks.len()];
     score.next_first = PlayerId((seed.0[0] as usize % decks.len()) as u8);
+    score.chooser = score.next_first;
     while !score.over() {
+        if seat.has_left() {
+            break;
+        }
+        if decks.len() == 2 {
+            let choice = score.play_draw_choice();
+            channels[0].send_msg(&ToGuest::PlayDraw(choice.clone()))?;
+            let play_first = if choice.chooser == PlayerId(0) {
+                seat.choose_play_first(&choice)
+            } else {
+                let ToHost::PlayDraw { number, play_first } = channels[0].recv_msg::<ToHost>()?
+                else {
+                    return Err(SessionError::Unexpected(
+                        "expected a play/draw decision".into(),
+                    ));
+                };
+                if number != choice.number {
+                    return Err(SessionError::Unexpected(
+                        "wrong game in play/draw decision".into(),
+                    ));
+                }
+                play_first
+            };
+            if seat.has_left() {
+                break;
+            }
+            score.choose_first(play_first);
+        }
         let (number, first) = score.start();
         for (i, channel) in channels.iter_mut().enumerate() {
             channel.send_msg(&ToGuest::Game(GameStart {
@@ -442,14 +528,14 @@ pub fn host_match_with_players<C: Channel>(
             }
         }
     }
-    let reason = seat.has_left().then(|| "the host left".to_string());
+    let end = score.end(seat.has_left().then(|| "the host left".to_string()));
     for channel in channels.iter_mut() {
         channel.send_msg(&ToGuest::MatchOver {
             score: score.wins.clone(),
-            reason: reason.clone(),
+            reason: end.reason.clone(),
         })?;
     }
-    Ok(score.end(reason))
+    Ok(end)
 }
 
 /// Join a match: send the deck, then play whatever games the host starts. `seat` is the
@@ -460,28 +546,99 @@ pub fn guest_match<C: Channel>(
     seat: &mut dyn Seat,
 ) -> Result<MatchEnd, SessionError> {
     channel.send_msg(&ToHost::Deck(deck.clone()))?;
-    let cards = match channel.recv_msg::<ToGuest>()? {
+    let (settings, cards) = match channel.recv_msg::<ToGuest>()? {
         ToGuest::Welcome { settings, cards } => {
+            if ![1, 3].contains(&settings.best_of) {
+                return Err(SessionError::Unexpected("invalid match length".into()));
+            }
             seat.begin_match(settings, &cards);
-            cards
+            (settings, cards)
         }
         ToGuest::Rejected { reason } => return Err(SessionError::Unexpected(reason)),
         other => return Err(SessionError::Unexpected(format!("{other:?}"))),
     };
 
     let mut deck = deck;
+    let mut last_score: Option<Vec<u8>> = None;
+    let mut assigned_seat = None;
+    let mut games_played = 0u8;
+    let mut awaiting_sideboard = false;
+    let mut expected_chooser = None;
+    let mut pending_play_draw: Option<(PlayDrawChoice, Option<PlayerId>)> = None;
     loop {
         match channel.recv_msg::<ToGuest>()? {
+            ToGuest::PlayDraw(choice) => {
+                if choice.score.len() != 2
+                    || choice.chooser.0 > 1
+                    || choice.number != games_played + 1
+                    || games_played >= MAX_MATCH_GAMES
+                    || (settings.best_of == 1 && games_played >= 1)
+                    || awaiting_sideboard
+                    || pending_play_draw.is_some()
+                    || assigned_seat.is_some_and(|seat| seat != PlayerId(1))
+                    || expected_chooser.is_some_and(|chooser| chooser != choice.chooser)
+                    || last_score.as_ref().map_or_else(
+                        || choice.score != [0, 0],
+                        |score| {
+                            score != &choice.score
+                                || score.iter().any(|wins| *wins >= settings.wins_needed())
+                        },
+                    )
+                {
+                    return Err(SessionError::Unexpected("invalid play/draw request".into()));
+                }
+                assigned_seat = Some(PlayerId(1));
+                expected_chooser = Some(choice.chooser);
+                let first = if choice.chooser == PlayerId(1) {
+                    let play_first = seat.choose_play_first(&choice);
+                    channel.send_msg(&ToHost::PlayDraw {
+                        number: choice.number,
+                        play_first,
+                    })?;
+                    Some(if play_first { PlayerId(1) } else { PlayerId(0) })
+                } else {
+                    None
+                };
+                pending_play_draw = Some((choice, first));
+            }
             ToGuest::Game(start) => {
                 if !(2..=4).contains(&start.score.len())
+                    || start.you == PlayerId(0)
                     || start.you.0 as usize >= start.score.len()
                     || start.first.0 as usize >= start.score.len()
+                    || (start.score.len() > 2
+                        && (settings.format != crate::game::Format::Commander
+                            || settings.best_of != 1))
+                    || start.number != games_played + 1
+                    || games_played >= MAX_MATCH_GAMES
+                    || (settings.best_of == 1 && games_played >= 1)
+                    || awaiting_sideboard
+                    || if start.score.len() == 2 {
+                        pending_play_draw.as_ref().is_none_or(|(choice, first)| {
+                            choice.number != start.number
+                                || choice.score != start.score
+                                || first.is_some_and(|first| first != start.first)
+                        })
+                    } else {
+                        pending_play_draw.is_some()
+                    }
+                    || assigned_seat.is_some_and(|seat| seat != start.you)
+                    || last_score.as_ref().map_or_else(
+                        || start.score.iter().any(|wins| *wins != 0),
+                        |score| {
+                            score != &start.score
+                                || score.iter().any(|wins| *wins >= settings.wins_needed())
+                        },
+                    )
                 {
                     return Err(SessionError::Unexpected("invalid game seating".into()));
                 }
+                pending_play_draw = None;
                 let mut score = start.score.clone();
+                assigned_seat = Some(start.you);
+                games_played += 1;
                 seat.begin_game(&start);
-                let outcome = GuestSession::new(&mut *channel).play(seat)?;
+                let outcome = GuestSession::for_seat(&mut *channel, start.you).play(seat)?;
                 let winner = match outcome {
                     Outcome::Over { winners } => winners.first().copied(),
                     Outcome::Disconnected => {
@@ -500,28 +657,50 @@ pub fn guest_match<C: Channel>(
                     *wins = wins
                         .checked_add(1)
                         .ok_or_else(|| SessionError::Unexpected("invalid match score".into()))?;
+                    if score.len() == 2 {
+                        expected_chooser = Some(PlayerId(1 - w.0));
+                    }
                 }
                 seat.end_game(&GameEnd {
                     number: start.number,
                     winner,
-                    score,
+                    score: score.clone(),
                 });
+                awaiting_sideboard = settings.format.has_sideboard()
+                    && settings.best_of == 3
+                    && games_played < MAX_MATCH_GAMES
+                    && !score.iter().any(|wins| *wins >= settings.wins_needed());
+                last_score = Some(score);
             }
             ToGuest::Sideboard => {
+                if !awaiting_sideboard {
+                    return Err(SessionError::Unexpected("unexpected sideboarding".into()));
+                }
+                awaiting_sideboard = false;
                 deck = sideboarded(seat, &deck, &cards);
                 channel.send_msg(&ToHost::Sideboarded(deck.clone()))?;
             }
             ToGuest::MatchOver { score, reason } => {
-                if !(2..=4).contains(&score.len()) {
+                let early_abort =
+                    games_played == 0 && reason.is_some() && score.iter().all(|wins| *wins == 0);
+                if !(2..=4).contains(&score.len())
+                    || (early_abort
+                        && pending_play_draw
+                            .as_ref()
+                            .is_some_and(|(choice, _)| choice.score != score))
+                    || (!early_abort && last_score.as_ref() != Some(&score))
+                {
                     return Err(SessionError::Unexpected("invalid final seating".into()));
                 }
-                let maximum = score.iter().copied().max().unwrap_or(0);
-                let leaders: Vec<_> = score
+                let winner = score
                     .iter()
-                    .enumerate()
-                    .filter(|(_, wins)| **wins == maximum && maximum > 0)
-                    .collect();
-                let winner = (leaders.len() == 1).then(|| PlayerId(leaders[0].0 as u8));
+                    .position(|wins| *wins >= settings.wins_needed())
+                    .map(|seat| PlayerId(seat as u8));
+                if reason.is_none() && winner.is_none() && settings.best_of != 1 {
+                    return Err(SessionError::Unexpected(
+                        "match ended before either player won two games".into(),
+                    ));
+                }
                 return Ok(MatchEnd {
                     score,
                     winner,
@@ -549,6 +728,7 @@ mod tests {
             let (name, types) = match key {
                 CardKey::Demo(0) => ("Bare Field", vec![CardType::Land]),
                 CardKey::Demo(1) => ("Small Soldier", vec![CardType::Creature]),
+                CardKey::Demo(2) => ("Shared Defeat", vec![CardType::Instant]),
                 _ => return None,
             };
             let face = CardFace {
@@ -560,7 +740,19 @@ mod tests {
                 power: Some(1),
                 toughness: Some(1),
                 loyalty: None,
-                abilities: Vec::new(),
+                abilities: if *key == CardKey::Demo(2) {
+                    vec![mtg_ir::Ability {
+                        id: mtg_core::AbilityId(0),
+                        kind: mtg_ir::AbilityKind::SpellEffect(mtg_ir::Effect::LoseLife {
+                            who: mtg_ir::Selector::EachPlayer,
+                            amount: mtg_ir::Value::Fixed(20),
+                        }),
+                        targets: Vec::new(),
+                        source_text: None,
+                    }]
+                } else {
+                    Vec::new()
+                },
                 oracle_text: None,
                 colors: None,
             };
@@ -624,26 +816,47 @@ mod tests {
         starts: Vec<GameStart>,
         ends: Vec<GameEnd>,
         sideboarded: u32,
+        leave_after_one: bool,
+        draw_first: bool,
+        choose_draw: bool,
+        choices: Vec<PlayDrawChoice>,
     }
     impl Decide for Recorder {
         fn decide(&mut self, choice: &Choice, view: &PlayerView) -> Answer {
-            // Concede at once in the first game only, so games are short and results known.
-            if let mtg_engine::ChoiceKind::Priority { .. } = choice.kind
-                && view.viewer == SEATS[1]
-                && self.starts.last().is_some_and(|s| s.number == 1)
-            {
-                return Answer::Action(mtg_engine::actions::Action::Concede);
-            }
-            if let mtg_engine::ChoiceKind::Priority { .. } = choice.kind
-                && view.viewer == SEATS[0]
-                && self.starts.last().is_some_and(|s| s.number >= 2)
-            {
-                return Answer::Action(mtg_engine::actions::Action::Concede);
+            let number = self.starts.last().map_or(0, |start| start.number);
+            if let mtg_engine::ChoiceKind::Priority { ref legal } = choice.kind {
+                if self.draw_first && number == 1 {
+                    // A free invented spell makes both players lose simultaneously. Pass
+                    // while it is on the stack so the fixture actually reaches a draw.
+                    if view.stack.is_empty()
+                        && let Some(action) = legal.actions.iter().find(|action| {
+                            matches!(action, mtg_engine::actions::Action::Cast { .. })
+                        })
+                    {
+                        return Answer::Action(action.clone());
+                    }
+                    return Answer::Pass;
+                }
+                let first_decisive = if self.draw_first { 2 } else { 1 };
+                if (view.viewer == SEATS[1] && number == first_decisive)
+                    || (view.viewer == SEATS[0] && number > first_decisive)
+                {
+                    return Answer::Action(mtg_engine::actions::Action::Concede);
+                }
             }
             mtg_policy::well_formed(choice, view)
         }
     }
     impl Seat for Recorder {
+        fn choose_play_first(&mut self, choice: &PlayDrawChoice) -> bool {
+            assert_eq!(self.starts.len() + 1, choice.number as usize);
+            assert_eq!(self.sideboarded + 1, u32::from(choice.number));
+            self.choices.push(choice.clone());
+            !self.choose_draw
+        }
+        fn has_left(&self) -> bool {
+            self.leave_after_one && !self.ends.is_empty()
+        }
         fn begin_game(&mut self, start: &GameStart) {
             self.starts.push(start.clone());
         }
@@ -682,6 +895,201 @@ mod tests {
             a.sideboarded, 2,
             "asked to sideboard before games two and three"
         );
+    }
+
+    fn draw_deck() -> DeckSpec {
+        // Invented Basic fixture cards bypass the copy limit to guarantee a castable
+        // simultaneous-loss spell in the opening hand. This is not a legal real deck.
+        DeckSpec {
+            main: vec![(CardKey::Demo(2), 60)],
+            ..Default::default()
+        }
+    }
+
+    fn assert_draw_match(end: &MatchEnd, seat: &Recorder) {
+        assert_eq!(end.score, [1, 2]);
+        assert_eq!(end.winner, Some(SEATS[1]));
+        assert_eq!(end.reason, None);
+        assert_eq!(
+            seat.starts.len(),
+            4,
+            "a draw does not consume a decisive game"
+        );
+        assert_eq!(seat.sideboarded, 3);
+        assert_eq!(seat.ends[0].winner, None);
+        assert_eq!(seat.ends[0].score, [0, 0]);
+        assert_eq!(seat.starts[1].first, seat.starts[0].first);
+        assert_eq!(seat.starts[3].score, [1, 1]);
+    }
+
+    #[test]
+    fn a_local_draw_continues_through_game_four_and_sideboarding() {
+        let deck = draw_deck();
+        let cards = GameCards::build([&deck], &Invented).unwrap();
+        let (mut a, mut b) = (
+            Recorder {
+                draw_first: true,
+                ..Default::default()
+            },
+            Recorder {
+                draw_first: true,
+                ..Default::default()
+            },
+        );
+        let end = play_local_match(
+            settings(3),
+            &cards,
+            [deck.clone(), deck],
+            Seed([0; 32]),
+            [&mut a, &mut b],
+        );
+        assert_draw_match(&end, &a);
+        assert_draw_match(&end, &b);
+    }
+
+    #[test]
+    fn a_hosted_draw_keeps_both_clients_in_sync_through_game_four() {
+        let (mut host_end, mut guest_end) = MemoryChannel::pair();
+        let guest = std::thread::spawn(move || {
+            let mut seat = Recorder {
+                draw_first: true,
+                ..Default::default()
+            };
+            let end = guest_match(&mut guest_end, draw_deck(), &mut seat).unwrap();
+            (end, seat)
+        });
+        let mut seat = Recorder {
+            draw_first: true,
+            ..Default::default()
+        };
+        let end = host_match(
+            &mut host_end,
+            settings(3),
+            draw_deck(),
+            &Invented,
+            Seed([0; 32]),
+            &mut seat,
+        )
+        .unwrap();
+        let (remote, remote_seat) = guest.join().unwrap();
+        assert_eq!(end, remote);
+        assert_draw_match(&end, &seat);
+        assert_draw_match(&remote, &remote_seat);
+    }
+
+    #[test]
+    fn drawing_first_retains_the_chooser_after_a_draw_and_then_passes_to_the_loser() {
+        for seed in [0, 1] {
+            let deck = draw_deck();
+            let cards = GameCards::build([&deck], &Invented).unwrap();
+            let (mut a, mut b) = (
+                Recorder {
+                    draw_first: true,
+                    choose_draw: true,
+                    ..Default::default()
+                },
+                Recorder {
+                    draw_first: true,
+                    choose_draw: true,
+                    ..Default::default()
+                },
+            );
+            let end = play_local_match(
+                settings(3),
+                &cards,
+                [deck.clone(), deck],
+                Seed([seed; 32]),
+                [&mut a, &mut b],
+            );
+            assert_draw_match(&end, &a);
+            let mut choices = a.choices.iter().chain(&b.choices).collect::<Vec<_>>();
+            choices.sort_by_key(|choice| choice.number);
+            assert_eq!(choices.len(), 4);
+            assert_eq!(choices[0].chooser, PlayerId(seed));
+            assert_eq!(
+                choices[1].chooser,
+                PlayerId(seed),
+                "draw retains chooser, not starter"
+            );
+            assert_eq!(choices[2].chooser, PlayerId(1));
+            assert_eq!(choices[3].chooser, PlayerId(0));
+            assert_eq!(a.starts[0].first, PlayerId(1 - seed));
+            assert_eq!(a.starts[2].first, PlayerId(0));
+            assert_eq!(a.starts[3].first, PlayerId(1));
+        }
+    }
+
+    #[test]
+    fn a_hosted_draw_first_choice_is_honored_before_each_opening_hand() {
+        let (mut host_end, mut guest_end) = MemoryChannel::pair();
+        let guest = std::thread::spawn(move || {
+            let mut seat = Recorder {
+                draw_first: true,
+                choose_draw: true,
+                ..Default::default()
+            };
+            let end = guest_match(&mut guest_end, draw_deck(), &mut seat).unwrap();
+            (end, seat)
+        });
+        let mut seat = Recorder {
+            draw_first: true,
+            choose_draw: true,
+            ..Default::default()
+        };
+        let end = host_match(
+            &mut host_end,
+            settings(3),
+            draw_deck(),
+            &Invented,
+            Seed([1; 32]),
+            &mut seat,
+        )
+        .unwrap();
+        let (remote, remote_seat) = guest.join().unwrap();
+        assert_eq!(end, remote);
+        assert_draw_match(&end, &seat);
+        assert_eq!(
+            remote_seat
+                .choices
+                .iter()
+                .map(|choice| choice.number)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            seat.choices
+                .iter()
+                .map(|choice| choice.number)
+                .collect::<Vec<_>>(),
+            [4]
+        );
+        assert_eq!(
+            seat.starts
+                .iter()
+                .map(|start| start.first)
+                .collect::<Vec<_>>(),
+            [PlayerId(0), PlayerId(0), PlayerId(0), PlayerId(1)]
+        );
+    }
+
+    #[test]
+    fn repeated_draws_stop_at_a_bounded_limit_without_a_false_winner() {
+        let mut score = Score::new(settings(3), &Seed([0; 32]));
+        for number in 1..=MAX_MATCH_GAMES {
+            assert!(!score.over());
+            assert_eq!(score.start().0, number);
+            score.finish(None);
+        }
+        assert!(score.over());
+        let end = score.end(None);
+        assert_eq!(end.winner, None);
+        assert_eq!(end.score, [0, 0]);
+        assert!(end.reason.unwrap().contains("safety limit"));
+        let mut single = Score::new(settings(1), &Seed([0; 32]));
+        single.start();
+        single.finish(None);
+        assert!(single.over(), "best-of-one still means exactly one game");
+        assert_eq!(single.end(None).reason, None);
     }
 
     #[test]
@@ -746,6 +1154,114 @@ mod tests {
     }
 
     #[test]
+    fn leaving_after_game_one_preserves_host_guest_agreement_without_a_match_winner() {
+        let (mut host_end, mut guest_end) = MemoryChannel::pair();
+        let guest = std::thread::spawn(move || {
+            guest_match(&mut guest_end, deck(), &mut Recorder::default()).unwrap()
+        });
+        let end = host_match(
+            &mut host_end,
+            settings(3),
+            deck(),
+            &Invented,
+            Seed([0; 32]),
+            &mut Recorder {
+                leave_after_one: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(end.score, [1, 0]);
+        assert_eq!(end.winner, None);
+        assert_eq!(end.reason.as_deref(), Some("the host left"));
+        assert_eq!(guest.join().unwrap(), end);
+    }
+
+    #[test]
+    fn the_host_refuses_a_play_draw_reply_for_another_game() {
+        let (mut host_end, mut guest_end) = MemoryChannel::pair();
+        let guest = std::thread::spawn(move || {
+            guest_end.send_msg(&ToHost::Deck(deck())).unwrap();
+            assert!(matches!(
+                guest_end.recv_msg::<ToGuest>().unwrap(),
+                ToGuest::Welcome { .. }
+            ));
+            let ToGuest::PlayDraw(choice) = guest_end.recv_msg::<ToGuest>().unwrap() else {
+                panic!("choice");
+            };
+            assert_eq!(choice.chooser, PlayerId(1));
+            guest_end
+                .send_msg(&ToHost::PlayDraw {
+                    number: 2,
+                    play_first: false,
+                })
+                .unwrap();
+        });
+        let mut seat = Recorder::default();
+        let result = host_match(
+            &mut host_end,
+            settings(3),
+            deck(),
+            &Invented,
+            Seed([1; 32]),
+            &mut seat,
+        );
+        assert!(matches!(result, Err(SessionError::Unexpected(_))));
+        assert!(seat.starts.is_empty());
+        guest.join().unwrap();
+    }
+
+    #[test]
+    fn leaving_during_the_initial_choice_starts_no_game_and_agrees_remotely() {
+        struct Leave(Recorder);
+        impl Decide for Leave {
+            fn decide(&mut self, choice: &Choice, view: &PlayerView) -> Answer {
+                self.0.decide(choice, view)
+            }
+        }
+        impl Seat for Leave {
+            fn choose_play_first(&mut self, _: &PlayDrawChoice) -> bool {
+                self.0.leave_after_one = true;
+                false
+            }
+            fn has_left(&self) -> bool {
+                self.0.leave_after_one
+            }
+            fn begin_game(&mut self, _: &GameStart) {
+                panic!("no hand may be dealt after leaving");
+            }
+        }
+        let (mut host_end, mut guest_end) = MemoryChannel::pair();
+        let guest = std::thread::spawn(move || {
+            guest_match(&mut guest_end, deck(), &mut Recorder::default()).unwrap()
+        });
+        let end = host_match(
+            &mut host_end,
+            settings(3),
+            deck(),
+            &Invented,
+            Seed([0; 32]),
+            &mut Leave(Recorder::default()),
+        )
+        .unwrap();
+        assert_eq!(end.score, [0, 0]);
+        assert_eq!(end.winner, None);
+        assert_eq!(end.reason.as_deref(), Some("the host left"));
+        assert_eq!(guest.join().unwrap(), end);
+        let cards = GameCards::build([&deck()], &Invented).unwrap();
+        let local = play_local_match(
+            settings(3),
+            &cards,
+            [deck(), deck()],
+            Seed([0; 32]),
+            [&mut Leave(Recorder::default()), &mut Recorder::default()],
+        );
+        assert_eq!(local.winner, None);
+        assert_eq!(local.score, [0, 0]);
+        assert!(local.reason.is_some());
+    }
+
+    #[test]
     fn a_deck_the_host_cannot_resolve_is_rejected_with_a_reason() {
         let (mut host_end, mut guest_end) = MemoryChannel::pair();
         let guest = std::thread::spawn(move || {
@@ -768,5 +1284,303 @@ mod tests {
             panic!("rejected")
         };
         assert!(reason.contains("missing"), "{reason}");
+    }
+}
+
+#[cfg(test)]
+mod alpha_protocol_tests {
+    use super::*;
+    use crate::game::Format;
+    use mtg_engine::{Choice, PlayerView, choice::Answer};
+    use mtg_net::{session::HostMessage, wire::MemoryChannel};
+
+    #[derive(Default)]
+    struct Client {
+        starts: usize,
+        observations: usize,
+        sideboards: usize,
+        choices: usize,
+    }
+    impl Decide for Client {
+        fn observe(&mut self, _: &PlayerView) {
+            self.observations += 1;
+        }
+        fn decide(&mut self, _: &Choice, _: &PlayerView) -> Answer {
+            panic!("no decision expected")
+        }
+    }
+    impl Seat for Client {
+        fn choose_play_first(&mut self, _: &PlayDrawChoice) -> bool {
+            self.choices += 1;
+            true
+        }
+        fn begin_game(&mut self, _: &GameStart) {
+            self.starts += 1;
+        }
+        fn sideboard(&mut self, deck: &DeckSpec, _: &GameCards) -> DeckSpec {
+            self.sideboards += 1;
+            deck.clone()
+        }
+    }
+    fn welcome(channel: &mut MemoryChannel, best_of: u8) {
+        channel
+            .send_msg(&ToGuest::Welcome {
+                settings: MatchSettings {
+                    format: Format::Standard,
+                    best_of,
+                },
+                cards: Box::default(),
+            })
+            .unwrap();
+    }
+    fn start(channel: &mut MemoryChannel, number: u8, you: u8, score: Vec<u8>) {
+        channel
+            .send_msg(&ToGuest::PlayDraw(PlayDrawChoice {
+                number,
+                chooser: PlayerId(if score.first() > score.get(1) { 1 } else { 0 }),
+                score: score.clone(),
+            }))
+            .unwrap();
+        channel
+            .send_msg(&ToGuest::Game(GameStart {
+                number,
+                you: PlayerId(you),
+                first: PlayerId(0),
+                score,
+            }))
+            .unwrap();
+    }
+    fn game_over(channel: &mut MemoryChannel, winner: Option<u8>) {
+        channel.send_msg(&HostMessage::GameOver { winner }).unwrap();
+    }
+    #[test]
+    fn malformed_or_duplicate_play_draw_requests_do_not_reach_the_ui() {
+        for (number, chooser, score, duplicate) in [
+            (0, 1, vec![0, 0], false),
+            (1, 2, vec![0, 0], false),
+            (1, 1, vec![1, 0], false),
+            (1, 1, vec![0, 0, 0], false),
+            (1, 0, vec![0, 0], true),
+        ] {
+            let (mut host, mut guest) = MemoryChannel::pair();
+            welcome(&mut host, 3);
+            let request = ToGuest::PlayDraw(PlayDrawChoice {
+                number,
+                chooser: PlayerId(chooser),
+                score,
+            });
+            host.send_msg(&request).unwrap();
+            if duplicate {
+                host.send_msg(&request).unwrap();
+            }
+            let mut client = Client::default();
+            assert!(guest_match(&mut guest, DeckSpec::default(), &mut client).is_err());
+            assert_eq!(client.choices, 0);
+            assert_eq!(client.starts, 0);
+        }
+    }
+
+    #[test]
+    fn play_draw_requires_sideboarding_the_previous_loser_and_the_selected_starter() {
+        for case in 0..3 {
+            let (mut host, mut guest) = MemoryChannel::pair();
+            welcome(&mut host, 3);
+            start(&mut host, 1, 1, vec![0, 0]);
+            game_over(&mut host, Some(0));
+            if case != 0 {
+                host.send_msg(&ToGuest::Sideboard).unwrap();
+            }
+            host.send_msg(&ToGuest::PlayDraw(PlayDrawChoice {
+                number: 2,
+                chooser: PlayerId(if case == 1 { 0 } else { 1 }),
+                score: vec![1, 0],
+            }))
+            .unwrap();
+            if case == 2 {
+                // Guest chose play; the host must not start the opponent instead.
+                host.send_msg(&ToGuest::Game(GameStart {
+                    number: 2,
+                    you: PlayerId(1),
+                    first: PlayerId(0),
+                    score: vec![1, 0],
+                }))
+                .unwrap();
+            }
+            let mut client = Client::default();
+            assert!(guest_match(&mut guest, DeckSpec::default(), &mut client).is_err());
+            assert_eq!(client.starts, 1);
+            assert_eq!(client.choices, usize::from(case == 2));
+        }
+    }
+
+    #[test]
+    fn a_two_player_game_without_play_draw_agreement_is_rejected() {
+        let (mut host, mut guest) = MemoryChannel::pair();
+        welcome(&mut host, 1);
+        host.send_msg(&ToGuest::Game(GameStart {
+            number: 1,
+            you: PlayerId(1),
+            first: PlayerId(0),
+            score: vec![0, 0],
+        }))
+        .unwrap();
+        let mut client = Client::default();
+        assert!(guest_match(&mut guest, DeckSpec::default(), &mut client).is_err());
+        assert_eq!(client.starts, 0);
+    }
+
+    #[test]
+    fn an_early_best_of_three_lead_is_not_a_match_win() {
+        let (mut host, mut guest) = MemoryChannel::pair();
+        welcome(&mut host, 3);
+        start(&mut host, 1, 1, vec![0, 0]);
+        game_over(&mut host, Some(0));
+        host.send_msg(&ToGuest::MatchOver {
+            score: vec![1, 0],
+            reason: Some("the host left".into()),
+        })
+        .unwrap();
+        let result = guest_match(&mut guest, DeckSpec::default(), &mut Client::default()).unwrap();
+        assert_eq!(result.score, [1, 0]);
+        assert_eq!(result.winner, None);
+        assert_eq!(result.reason.as_deref(), Some("the host left"));
+    }
+    #[test]
+    fn an_unexplained_early_best_of_three_end_is_rejected() {
+        for winner in [None, Some(0)] {
+            let (mut host, mut guest) = MemoryChannel::pair();
+            welcome(&mut host, 3);
+            start(&mut host, 1, 1, vec![0, 0]);
+            game_over(&mut host, winner);
+            host.send_msg(&ToGuest::MatchOver {
+                score: if winner.is_some() {
+                    vec![1, 0]
+                } else {
+                    vec![0, 0]
+                },
+                reason: None,
+            })
+            .unwrap();
+            assert!(guest_match(&mut guest, DeckSpec::default(), &mut Client::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn the_guest_accepts_the_draw_limit_but_refuses_game_sixty_five() {
+        for extra_game in [false, true] {
+            let (mut host, mut guest) = MemoryChannel::pair();
+            welcome(&mut host, 3);
+            for number in 1..=MAX_MATCH_GAMES {
+                start(&mut host, number, 1, vec![0, 0]);
+                game_over(&mut host, None);
+                if number < MAX_MATCH_GAMES {
+                    host.send_msg(&ToGuest::Sideboard).unwrap();
+                }
+            }
+            if extra_game {
+                start(&mut host, MAX_MATCH_GAMES + 1, 1, vec![0, 0]);
+            } else {
+                host.send_msg(&ToGuest::MatchOver {
+                    score: vec![0, 0],
+                    reason: Some(
+                        "match stopped at the 64-game safety limit without a winner".into(),
+                    ),
+                })
+                .unwrap();
+            }
+            let mut client = Client::default();
+            let result = guest_match(&mut guest, DeckSpec::default(), &mut client);
+            assert_eq!(client.starts, MAX_MATCH_GAMES as usize);
+            assert_eq!(client.sideboards, (MAX_MATCH_GAMES - 1) as usize);
+            if extra_game {
+                assert!(result.is_err());
+            } else {
+                let end = result.unwrap();
+                assert_eq!(end.winner, None);
+                assert_eq!(end.score, [0, 0]);
+                assert!(end.reason.unwrap().contains("safety limit"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_best_of_one_draw_is_an_ordinary_completed_match() {
+        let (mut host, mut guest) = MemoryChannel::pair();
+        welcome(&mut host, 1);
+        start(&mut host, 1, 1, vec![0, 0]);
+        game_over(&mut host, None);
+        host.send_msg(&ToGuest::MatchOver {
+            score: vec![0, 0],
+            reason: None,
+        })
+        .unwrap();
+        let end = guest_match(&mut guest, DeckSpec::default(), &mut Client::default()).unwrap();
+        assert_eq!(end.winner, None);
+        assert_eq!(end.reason, None);
+    }
+
+    #[test]
+    fn a_changed_final_score_is_rejected() {
+        let (mut host, mut guest) = MemoryChannel::pair();
+        welcome(&mut host, 1);
+        start(&mut host, 1, 1, vec![0, 0]);
+        game_over(&mut host, Some(1));
+        host.send_msg(&ToGuest::MatchOver {
+            score: vec![1, 0],
+            reason: None,
+        })
+        .unwrap();
+        assert!(guest_match(&mut guest, DeckSpec::default(), &mut Client::default()).is_err());
+    }
+    #[test]
+    fn changed_seating_scores_game_numbers_and_omitted_sideboarding_are_rejected() {
+        for (number, you, score, sideboard) in [
+            (2, 0, vec![1, 0], true),
+            (2, 1, vec![0, 1], true),
+            (3, 1, vec![1, 0], true),
+            (2, 1, vec![1, 0], false),
+            (2, 2, vec![1, 0, 0], true),
+        ] {
+            let (mut host, mut guest) = MemoryChannel::pair();
+            welcome(&mut host, 3);
+            start(&mut host, 1, 1, vec![0, 0]);
+            game_over(&mut host, Some(0));
+            if sideboard {
+                host.send_msg(&ToGuest::Sideboard).unwrap();
+            }
+            start(&mut host, number, you, score);
+            let mut client = Client::default();
+            assert!(guest_match(&mut guest, DeckSpec::default(), &mut client).is_err());
+            assert_eq!(
+                client.starts, 1,
+                "bad next game is rejected before reaching the UI"
+            );
+        }
+    }
+    #[test]
+    fn unrequested_sideboarding_and_invalid_settings_do_not_reach_the_ui() {
+        for best_of in [0, 1, 2, 255] {
+            let (mut host, mut guest) = MemoryChannel::pair();
+            welcome(&mut host, best_of);
+            host.send_msg(&ToGuest::Sideboard).unwrap();
+            let mut client = Client::default();
+            assert!(guest_match(&mut guest, DeckSpec::default(), &mut client).is_err());
+            assert_eq!(client.sideboards, 0);
+        }
+    }
+    #[test]
+    fn a_snapshot_must_match_the_assigned_seat_before_observation() {
+        let (mut host, mut guest) = MemoryChannel::pair();
+        welcome(&mut host, 1);
+        start(&mut host, 1, 1, vec![0, 0]);
+        let engine = Engine::new(mtg_engine::state::GameState::new(&SEATS, 20));
+        host.send_msg(&HostMessage::Snapshot {
+            at_event: 0,
+            view_bytes: mtg_net::wire::encode(&engine.view_for(PlayerId(0))).unwrap(),
+        })
+        .unwrap();
+        let mut client = Client::default();
+        assert!(guest_match(&mut guest, DeckSpec::default(), &mut client).is_err());
+        assert_eq!(client.observations, 0);
     }
 }
