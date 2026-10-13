@@ -916,6 +916,26 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             .objects
             .get(&ctx.source)
             .is_some_and(|s| s.attached_to == Some(id)),
+        ObjectFilter::HasAttachment(subtype) => {
+            let mut attached = obj.attachments_on_exit.iter().any(|(card, face)| {
+                ctx.cards.face(*card, *face).is_some_and(|f| {
+                    f.printed_characteristics()
+                        .has_subtype(*subtype, |s| ctx.cards.subtype_name(s))
+                })
+            });
+            for attachment in ctx.state.objects.values() {
+                if attachment.zone.zone == Zone::Battlefield
+                    && attachment.attached_to == Some(id)
+                    && ctx
+                        .characteristics(attachment.id)?
+                        .has_subtype(*subtype, |s| ctx.cards.subtype_name(s))
+                {
+                    attached = true;
+                    break;
+                }
+            }
+            attached
+        }
         ObjectFilter::HasKeyword(k) => ctx.has_keyword(id, *k)?,
         ObjectFilter::ToughnessAtMost(v) => {
             ctx.characteristics(id)?.toughness.unwrap_or(0) <= value(ctx, v)?

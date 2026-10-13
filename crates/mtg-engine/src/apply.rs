@@ -87,6 +87,15 @@ pub fn apply_simultaneous(
     log: &mut Vec<StampedEvent>,
 ) {
     let at = state.bump();
+    let attachment_snapshots: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            let Event::ZoneChange { object, from, .. } = event else {
+                return None;
+            };
+            (from.zone == Zone::Battlefield).then(|| (*object, attachments_of(state, *object)))
+        })
+        .collect();
     let mut shuffles = Vec::new();
     for event in events {
         shuffles.extend(shuffled_instead(state, &event));
@@ -103,6 +112,11 @@ pub fn apply_simultaneous(
         });
     }
     shuffles.dedup();
+    for (object, attachments) in attachment_snapshots {
+        if let Some(last) = state.last_known.get_mut(&object) {
+            last.attachments_on_exit = attachments;
+        }
+    }
     for player in shuffles {
         apply(state, cause, Event::Shuffled { player }, log);
     }
@@ -609,11 +623,15 @@ fn perform(state: &mut GameState, event: &Event) {
                 // CR 112.2: the player under whose control a copy enters the stack owns it.
                 obj.owner = *controller;
                 obj.is_spell_copy = true;
+                // A copy wasn't cast, even when its original was cast from a graveyard.
+                obj.cast_from = None;
                 // CR 707.10: casting decisions are copied; mana is not an object
                 // used to pay a cost and was not spent to cast the copy.
                 obj.mana_spent.clear();
                 if let Some(cc) = obj.cast_context.as_mut() {
                     cc.mana_spent.clear();
+                    cc.cast_from = None;
+                    cc.uncounterable = false;
                 }
                 obj.timestamp = state.bump();
                 if let (Some(t), Some(cc)) = (targets, obj.cast_context.as_mut()) {
@@ -796,7 +814,14 @@ fn perform(state: &mut GameState, event: &Event) {
                 o.cast_later = Some((*player, *after_turn, cost.clone(), *sorcery));
             }
         }
-        Event::ExtraTurnAdded { player } => state.extra_turns.push(*player),
+        Event::ExtraTurnAdded { player, marker } => {
+            if let Some(marker) = marker {
+                state
+                    .extra_turn_markers
+                    .insert(state.extra_turns.len(), *marker);
+            }
+            state.extra_turns.push(*player);
+        }
         Event::TurnSkipAdded { player } => state.skipped_turns.push(*player),
         Event::AdditionalCombatAdded => state.extra_combats += 1,
         Event::ReflexiveTriggered { .. } => {}
@@ -985,7 +1010,9 @@ fn zone_change(
     // battlefield, keyed by the identity it had there. Recorded here because this is
     // the only moment both the old identity and its state exist together.
     if from.zone == Zone::Battlefield {
-        state.last_known.insert(object, obj.clone());
+        let mut last = obj.clone();
+        last.attachments_on_exit = attachments_of(state, object);
+        state.last_known.insert(object, last);
         if to.zone == Zone::Graveyard {
             state.died_this_turn.push(object);
         }
@@ -1025,6 +1052,7 @@ fn zone_change(
     obj.counters.clear();
     obj.attached_to = None;
     obj.was_attached_to = None;
+    obj.attachments_on_exit.clear();
     obj.cast_from = None;
     obj.regeneration_shields = 0;
     obj.cast_x = 0;
@@ -1069,6 +1097,15 @@ fn zone_change(
     }
 
     state.objects.insert(new_object, obj);
+}
+
+fn attachments_of(state: &GameState, object: ObjectId) -> Vec<(mtg_core::CardId, u8)> {
+    state
+        .objects
+        .values()
+        .filter(|o| o.zone.zone == Zone::Battlefield && o.attached_to == Some(object))
+        .map(|o| (o.card, o.face))
+        .collect()
 }
 
 /// What a permanent's leaving the battlefield undoes, however it left.

@@ -62,6 +62,28 @@ pub fn detect(
     let fresh = &log[state.scanned_upto.min(log.len())..];
     let mut fired_delayed: Vec<u32> = Vec::new();
     for (i, stamped) in fresh.iter().enumerate() {
+        let draw = match stamped.event {
+            Event::Drew { player, .. } => {
+                let later = fresh[i + 1..]
+                    .iter()
+                    .filter(|e| matches!(e.event, Event::Drew { player: p, .. } if p == player))
+                    .count() as u32;
+                DrawInfo {
+                    first_in_own_step: first_draw_in_own_step(
+                        state,
+                        &log[..log.len() - fresh.len() + i],
+                        player,
+                    ),
+                    ordinal: state
+                        .draws_this_turn
+                        .get(&player)
+                        .copied()
+                        .unwrap_or(0)
+                        .checked_sub(later),
+                }
+            }
+            _ => DrawInfo::default(),
+        };
         // Delayed triggers (CR 603.7): each fires once, the first time its event happens.
         for d in &state.delayed {
             if fired_delayed.contains(&d.id) {
@@ -74,7 +96,8 @@ pub fn detect(
                     _ => continue,
                 }
             } else {
-                let Some(b) = pattern_matches(state, cards, &d.on, stamped, d.controller, d.source)
+                let Some(b) =
+                    pattern_matches(state, cards, &d.on, stamped, d.controller, d.source, draw)
                 else {
                     continue;
                 };
@@ -188,7 +211,7 @@ pub fn detect(
             }
 
             let Some(bindings) =
-                pattern_matches(state, cards, &trigger.on, stamped, controller, source)
+                pattern_matches(state, cards, &trigger.on, stamped, controller, source, draw)
             else {
                 continue;
             };
@@ -196,19 +219,37 @@ pub fn detect(
             if limit_reached(state, source, ability_id, trigger.limit) {
                 continue;
             }
-            // "Your second card each turn": which draw this was, counting back from the
-            // turn's total past the draws logged after it.
-            if let (EventPattern::NthDraw { n, .. }, Event::Drew { player, .. }) =
-                (&trigger.on, &stamped.event)
-            {
-                let later = fresh[i + 1..]
-                    .iter()
-                    .filter(|e| matches!(&e.event, Event::Drew { player: p, .. } if p == player))
-                    .count() as u32;
-                let total = state.draws_this_turn.get(player).copied().unwrap_or(0);
-                if total.checked_sub(later) != Some(*n) {
+            // An intervening condition determines whether the ability triggers at
+            // all. A failed condition must not consume a limit within this scan.
+            if let Some(condition) = &trigger.intervening_if {
+                let chars = crate::eval::ComputedChars(cards);
+                let ctx = crate::eval::Ctx {
+                    state,
+                    cards,
+                    chars: &chars,
+                    source,
+                    controller,
+                    targets: &[],
+                    target_legal: &[],
+                    x: 0,
+                    bindings: &bindings,
+                };
+                if !crate::eval::condition(&ctx, condition).unwrap_or(true) {
                     continue;
                 }
+            }
+            if matches!(
+                trigger.limit,
+                Some(
+                    TriggerLimit::OncePerTurn
+                        | TriggerLimit::OncePerTurnPerSource
+                        | TriggerLimit::FirstEachTurn
+                )
+            ) && out
+                .iter()
+                .any(|t: &PendingTrigger| t.source == source && t.ability == ability_id)
+            {
+                continue;
             }
             // "One or more": already triggered for this batch.
             if trigger.limit == Some(TriggerLimit::OncePerBatch)
@@ -286,9 +327,15 @@ fn looking_back(
             {
                 continue;
             }
-            let Some(bindings) =
-                pattern_matches(state, cards, &trigger.on, stamped, old.controller, *object)
-            else {
+            let Some(bindings) = pattern_matches(
+                state,
+                cards,
+                &trigger.on,
+                stamped,
+                old.controller,
+                *object,
+                DrawInfo::default(),
+            ) else {
                 continue;
             };
             out.push(build(
@@ -527,7 +574,7 @@ fn same_batch(a: &StampedEvent, b: &StampedEvent) -> bool {
         )
 }
 
-fn limit_reached(
+pub(crate) fn limit_reached(
     state: &GameState,
     source: ObjectId,
     ability: AbilityId,
@@ -627,6 +674,30 @@ fn bind(subject: Option<Target>, other: Option<Target>) -> Bindings {
 }
 
 /// Whether a pattern matches an event. Returns the bindings the effect will need.
+#[derive(Clone, Copy, Default)]
+struct DrawInfo {
+    first_in_own_step: bool,
+    ordinal: Option<u32>,
+}
+
+/// Count actual draws, rather than draw attempts or draws made earlier in the turn.
+/// The event prefix also distinguishes every event of a multi-card draw in one batch.
+fn first_draw_in_own_step(state: &GameState, before: &[StampedEvent], player: PlayerId) -> bool {
+    for stamped in before.iter().rev() {
+        match stamped.event {
+            Event::StepBegan { active, step, .. } => {
+                return active == player && step == mtg_core::Step::Draw;
+            }
+            Event::StepEnded { .. } => return false,
+            Event::Drew {
+                player: earlier, ..
+            } if earlier == player => return false,
+            _ => {}
+        }
+    }
+    state.active_player == player && state.step == mtg_core::Step::Draw
+}
+
 fn pattern_matches(
     state: &GameState,
     cards: &dyn PrintedCards,
@@ -634,7 +705,22 @@ fn pattern_matches(
     stamped: &mtg_core::StampedEvent,
     controller: PlayerId,
     source: ObjectId,
+    draw: DrawInfo,
 ) -> Option<Bindings> {
+    // Apply qualifiers to each arm, including patterns nested in AnyOf.
+    if matches!(
+        pattern,
+        EventPattern::DealsDamage {
+            combat_only: true,
+            ..
+        } | EventPattern::TakesDamage {
+            combat_only: true,
+            ..
+        }
+    ) && stamped.cause != mtg_core::Cause::Combat
+    {
+        return None;
+    }
     let event = &stamped.event;
     // "This" across a zone change: a creature that dies is a new object in the graveyard
     // (CR 400.7), and that new object is the one carrying the trigger — but the event
@@ -672,6 +758,16 @@ fn pattern_matches(
     };
 
     match (pattern, event) {
+        (
+            EventPattern::ExtraTurnEnd { id },
+            Event::StepBegan {
+                active,
+                step: mtg_core::Step::End,
+                ..
+            },
+        ) if state.active_extra_turn == Some(*id) => {
+            Some(bind(Some(Target::Player(*active)), None))
+        }
         // ---- zone changes ----------------------------------------------
         (EventPattern::Enters { who }, Event::ZoneChange { new_object, to, .. })
             if to.zone == Zone::Battlefield =>
@@ -979,10 +1075,20 @@ fn pattern_matches(
             player_ok(whose, *player).then(|| bind(Some(Target::Player(*player)), None))
         }
         (
-            EventPattern::Draws { whose } | EventPattern::NthDraw { whose, .. },
+            EventPattern::Draws { whose, .. } | EventPattern::NthDraw { whose, .. },
             Event::Drew { player, object },
-        ) => player_ok(whose, *player)
-            .then(|| bind(Some(Target::Player(*player)), Some(Target::Object(*object)))),
+        ) if match pattern {
+            EventPattern::Draws {
+                except_first_in_own_draw_step,
+                ..
+            } => !except_first_in_own_draw_step || !draw.first_in_own_step,
+            EventPattern::NthDraw { n, .. } => draw.ordinal == Some(*n),
+            _ => false,
+        } =>
+        {
+            player_ok(whose, *player)
+                .then(|| bind(Some(Target::Player(*player)), Some(Target::Object(*object))))
+        }
         (
             EventPattern::Discards { whose },
             Event::ZoneChange {
@@ -1118,7 +1224,7 @@ fn pattern_matches(
         // "whenever X or Y" means.
         (EventPattern::AnyOf(arms), _) => arms
             .iter()
-            .find_map(|arm| pattern_matches(state, cards, arm, stamped, controller, source)),
+            .find_map(|arm| pattern_matches(state, cards, arm, stamped, controller, source, draw)),
 
         // A state trigger is not an event pattern; it is polled separately.
         (EventPattern::StateIs(_), _) => None,
@@ -1269,6 +1375,23 @@ fn eval_filter(
             lookup(state, *s)
                 .is_some_and(|o| o.attached_to == Some(id) || o.was_attached_to == Some(id))
         }),
+        ObjectFilter::HasAttachment(subtype) => {
+            obj.attachments_on_exit.iter().any(|(card, face)| {
+                cards.face(*card, *face).is_some_and(|f| {
+                    f.printed_characteristics()
+                        .has_subtype(*subtype, |s| cards.subtype_name(s))
+                })
+            }) || state.objects.values().any(|attachment| {
+                attachment.zone.zone == Zone::Battlefield
+                    && attachment.attached_to == Some(id)
+                    && cards
+                        .face(attachment.card, attachment.face)
+                        .is_some_and(|face| {
+                            face.printed_characteristics()
+                                .has_subtype(*subtype, |s| cards.subtype_name(s))
+                        })
+            })
+        }
         ObjectFilter::HasKeyword(k) => {
             chars.granted_keywords.contains(k)
                 || cards.face(obj.card, obj.face).is_some_and(|f| {

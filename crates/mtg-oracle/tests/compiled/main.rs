@@ -12,6 +12,7 @@ mod announced_mana_view;
 mod any_number;
 mod any_player_activates;
 mod arcane_denial;
+mod attachment_filters;
 mod audit;
 mod aura_protection;
 mod backup;
@@ -70,12 +71,14 @@ mod reveal_random;
 mod rift;
 mod search;
 mod search_alternatives;
+mod search_two_zones;
 mod shuffle_instead;
 mod shuffle_selected;
 mod split;
 mod tap_costs;
 mod tapped_dig;
 mod target_discount;
+mod tataru;
 mod tokens;
 mod triggers;
 mod two_quality_dig;
@@ -3793,3 +3796,25 @@ mod propaganda;
 mod chaos_warp;
 
 mod teferis_protection;
+
+mod conditional_color;
+
+mod resolving_mana_colors;
+
+mod sevinnes_reclamation;
+
+mod channel_reductions;
+
+mod wishclaw;
+
+mod halfling;
+
+mod derevi;
+
+mod bowmasters;
+
+mod ad_nauseam;
+
+mod tainted_pact;
+
+mod final_fortune;

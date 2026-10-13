@@ -239,6 +239,9 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::ExileIfDiesThisTurn { .. }
         | Effect::Reflexive { .. }
         | Effect::Choose { .. }
+        | Effect::ChoosePlayer { .. }
+        | Effect::RepeatMay { .. }
+        | Effect::ExileUntilRepeatedName { .. }
         | Effect::FlipCoin { .. }
         | Effect::ExileSelfWithCounters { .. }
         | Effect::RollDie { .. }
@@ -247,6 +250,7 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::AddManaAnyCombination { .. }
         | Effect::RevealRandom { .. }
         | Effect::SearchLibraryAndGraveyard { .. }
+        | Effect::SearchLibraryOrGraveyard { .. }
         | Effect::ExileLinked { .. }
         | Effect::ReturnExiledWith { .. }
         | Effect::MarkOnceEachTurn

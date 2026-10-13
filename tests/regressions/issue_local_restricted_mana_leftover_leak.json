@@ -247,7 +247,15 @@
                 }
               }
             ],
-            "mana_abilities": [],
+            "mana_abilities": [
+              {
+                "ActivateManaAbility": {
+                  "source": 1,
+                  "ability": 0,
+                  "color": null
+                }
+              }
+            ],
             "targets": []
           }
         }
@@ -932,7 +940,17 @@
                           }
                         }
                       ],
-                      "mana_abilities": [],
+                      "mana_abilities": [
+                        {
+                          "ActivateManaAbility": {
+                            "ability": 0,
+                            "color": null,
+                            "source": {
+                              "$ObjectId": 2
+                            }
+                          }
+                        }
+                      ],
                       "targets": [],
                       "who": 0
                     }
@@ -1293,7 +1311,7 @@
           ]
         }
       },
-      "expected_digest": "767af3351ba0cb53932ad29767edda7d4e04b8cd97285397b73025cd8c9bf43f"
+      "expected_digest": "fb80746db0f04c31fa242c9ce55ddae029040c4177a5f77f64a982378d4e8c27"
     },
     {
       "who": 0,

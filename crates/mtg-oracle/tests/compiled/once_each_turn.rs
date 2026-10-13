@@ -5,6 +5,52 @@ use mtg_core::Zone;
 use mtg_engine::{actions::Action, choice::Answer};
 
 #[test]
+fn a_draw_batch_and_a_declined_optional_effect_still_use_one_trigger() {
+    let mut table = Table::default();
+    let scholar = table.card(
+        "{0}",
+        "Enchantment",
+        None,
+        "Whenever an opponent draws a card, you may gain 1 life. This ability triggers only once each turn.",
+    );
+    let draw = table.card("{0}", "Instant", None, "Target player draws two cards.");
+    let mut game = Game::new(table);
+    game.put(scholar, P0, Zone::Battlefield);
+    let first = game.put(draw, P0, Zone::Hand);
+    let second = game.put(draw, P0, Zone::Hand);
+    let third = game.put(draw, P0, Zone::Hand);
+    game.main();
+    game.act(
+        Action::Cast { object: first },
+        &[mtg_core::Target::Player(P1)],
+        &[Answer::Bool(false)],
+    );
+    assert_eq!(game.life(P0), 20);
+    game.act(
+        Action::Cast { object: second },
+        &[mtg_core::Target::Player(P1)],
+        &[Answer::Bool(true)],
+    );
+    assert_eq!(
+        game.life(P0),
+        20,
+        "declining the effect still consumes the trigger limit"
+    );
+    game.until(P1, mtg_core::Step::PrecombatMain);
+    game.main();
+    game.act(
+        Action::Cast { object: third },
+        &[mtg_core::Target::Player(P1)],
+        &[Answer::Bool(true)],
+    );
+    assert_eq!(
+        game.life(P0),
+        21,
+        "a later turn resets the limit, including within a draw batch"
+    );
+}
+
+#[test]
 fn only_doing_it_counts_and_it_resets_each_turn() {
     let mut table = Table::default();
     let scholar = table.card(

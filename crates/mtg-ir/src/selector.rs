@@ -100,6 +100,7 @@ impl Binding {
     pub const DESTROYED: Self = Binding::Named(u16::MAX - 9);
     /// What was tapped to pay a cost: station's "equal to the tapped creature's power".
     pub const TAPPED: Self = Binding::Named(u16::MAX - 10);
+    pub const CHOSEN_PLAYER: Self = Binding::Named(u16::MAX - 11);
 }
 
 /// A predicate over objects. Composable so that printed text maps structurally.
@@ -128,6 +129,8 @@ pub enum ObjectFilter {
     /// The object this ability's source is attached to: "enchanted creature",
     /// "equipped creature", "fortified land".
     AttachedToSelf,
+    /// Has an attached permanent of this subtype ("enchanted" or "equipped").
+    HasAttachment(Subtype),
     /// Dealt damage this turn by this ability's source: "a creature dealt damage by this
     /// creature this turn".
     DealtDamageBySelfThisTurn,

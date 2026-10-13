@@ -23,6 +23,30 @@ pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
         .or_else(|| comparison(s, cx))
 }
 
+/// A color check on an announced target, rather than a color restriction on targeting.
+/// Pyroblast can target a nonblue spell; the color matters only when it resolves.
+pub fn target_color<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    let r = s
+        .strip_prefix("it's ")
+        .or_else(|| s.strip_prefix("it is "))?;
+    let (word, rest) = words::first_word(r);
+    let color = words::color(word)?;
+    let what @ Selector::Target { index } = cx.it.as_ref()? else {
+        return None;
+    };
+    let zone = cx.targets.get(*index as usize)?.zone;
+    Some((
+        Condition::Exists(Selector::Except(
+            Box::new(what.clone()),
+            Box::new(Selector::All {
+                zone,
+                filter: ObjectFilter::Not(Box::new(ObjectFilter::HasColor(color))),
+            }),
+        )),
+        rest,
+    ))
+}
+
 /// "you control an artifact and an enchantment" (Soul Transfer): both.
 fn control_both<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     let r = s.strip_prefix("you control ")?;
@@ -252,6 +276,15 @@ fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     }
     if let Some(r) = s.strip_prefix("it's not your turn") {
         return Some((Condition::Not(Box::new(Condition::YourTurn)), r));
+    }
+    if let Some(r) = s.strip_prefix("it isn't that player's turn") {
+        return Some((
+            Condition::Exists(Selector::Except(
+                Box::new(Selector::ActivePlayer),
+                Box::new(cx.that_player.clone()?),
+            )),
+            r,
+        ));
     }
     // Formidable: "creatures you control have total power 8 or greater".
     if let Some(r) = s.strip_prefix("creatures you control have total power ")

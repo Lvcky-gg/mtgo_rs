@@ -19,6 +19,9 @@ pub struct Cost {
     pub additional: Vec<AdditionalCost>,
     /// Restrictions on *when* this may be paid at all (CR 601.2 timing checks).
     pub timing: Vec<Condition>,
+    /// A reduction printed on this activated ability, evaluated before its costs are paid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_reduction: Option<Value>,
 }
 
 impl Cost {

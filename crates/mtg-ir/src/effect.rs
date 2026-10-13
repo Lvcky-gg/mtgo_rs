@@ -67,6 +67,12 @@ pub enum Effect {
         what: Selector,
         body: Box<Effect>,
     },
+    /// Choose one of the described players during resolution, binding CHOSEN_PLAYER.
+    /// This choice does not target the player.
+    ChoosePlayer {
+        from: Selector,
+        then: Box<Effect>,
+    },
     /// Repeat for each object a selector matches, binding `Binding::It`.
     ForEach {
         what: Selector,
@@ -76,6 +82,15 @@ pub enum Effect {
     Repeat {
         times: Value,
         body: Box<Effect>,
+    },
+    /// Perform the process once, then let its controller repeat it any number of times.
+    RepeatMay {
+        body: Box<Effect>,
+    },
+    /// Exile library cards one at a time, offering each unique name for the hand.
+    /// Stop on acceptance, a repeated name, or an empty library (Tainted Pact).
+    ExileUntilRepeatedName {
+        who: Selector,
     },
     /// Give the controller the option; `Nothing` if declined.
     MayPay {
@@ -325,6 +340,13 @@ pub enum Effect {
     SearchLibraryAndGraveyard {
         filter: crate::ObjectFilter,
     },
+    /// Choose which of the library and graveyard to search for one matching card.
+    /// Shuffle only when the library was searched, including a failed search.
+    SearchLibraryOrGraveyard {
+        filter: crate::ObjectFilter,
+        to: Zone,
+        reveal: bool,
+    },
     /// "Target opponent reveals a card at random from their hand": the card is chosen at
     /// random and bound as "it" ("that card's mana value") for what follows.
     RevealRandom {
@@ -400,6 +422,9 @@ pub enum Effect {
         /// and other costs.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         spells_only: bool,
+        /// A spell cast using this mana can't be countered.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        uncounterable: bool,
     },
     /// "If that creature would die this turn, exile it instead."
     ExileIfDiesThisTurn {
@@ -411,6 +436,8 @@ pub enum Effect {
     /// "Take an extra turn after this one" (CR 500.7).
     ExtraTurn {
         who: Selector,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lose_at_end: bool,
     },
     /// "You skip your next turn" (CR 614.10).
     SkipNextTurn {

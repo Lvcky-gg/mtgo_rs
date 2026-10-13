@@ -175,6 +175,7 @@ pub struct ResolveCtx {
     /// How many answers this run has consumed. Reset on every attempt.
     consumed: usize,
     mana_restrictions: Vec<(mtg_ir::ObjectFilter, bool)>,
+    mana_uncounterable: bool,
 }
 
 impl ResolveCtx {
@@ -191,6 +192,7 @@ impl ResolveCtx {
             modes: None,
             consumed: 0,
             mana_restrictions: Vec::new(),
+            mana_uncounterable: false,
         }
     }
 
@@ -438,15 +440,61 @@ fn resolve_inner(
             }
             Ok(())
         }
+        Effect::RepeatMay { body } => {
+            loop {
+                resolve(state, cards, log, body, rc)?;
+                if !ask_confirm(rc, rc.controller, "repeat this process?")? {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        Effect::ExileUntilRepeatedName { who } => {
+            let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+            for player in players {
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(top) = state
+                    .objects_in(ZoneRef::of(Zone::Library, player))
+                    .first()
+                    .copied()
+                {
+                    let card = state.objects[&top].card;
+                    let front = cards.face(card, 0).ok_or(EvalError::UnknownCard(top))?;
+                    let mut names = vec![front.name.clone()];
+                    if cards.layout(card) == mtg_ir::Layout::Split
+                        && let Some(back) = cards.face(card, 1)
+                    {
+                        names.push(back.name.clone());
+                    }
+                    let duplicate = names.iter().any(|name| seen.contains(name));
+                    seen.extend(names);
+                    let Some(exiled) = move_to(state, log, top, Zone::Exile, cause) else {
+                        break;
+                    };
+                    if duplicate {
+                        break;
+                    }
+                    if ask_confirm(rc, player, "put the exiled card into your hand?")? {
+                        move_to(state, log, exiled, Zone::Hand, cause);
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        }
 
         Effect::SpendOnly {
             only,
             spells_only,
+            uncounterable,
             effect,
         } => {
+            let prior = rc.mana_uncounterable;
+            rc.mana_uncounterable |= *uncounterable;
             rc.mana_restrictions.push((only.clone(), *spells_only));
             let result = resolve(state, cards, log, effect, rc);
             rc.mana_restrictions.pop();
+            rc.mana_uncounterable = prior;
             result
         }
         Effect::AddMana { who, produces } => {
@@ -474,7 +522,38 @@ fn resolve_inner(
                         }
                         other => other,
                     };
-                    let (color, amount) = resolve_output(out, rc);
+                    let (mut color, amount) = resolve_output(out, rc);
+                    // Targeted abilities and spells choose mana colors on resolution.
+                    // A mana ability's planner has already supplied its choice.
+                    let colors = out.possible_colors();
+                    if amount > 0 && colors.len() > 1 && rc.mana_choice.is_none() {
+                        let available = colors
+                            .iter()
+                            .map(|c| {
+                                match c {
+                                    mtg_core::Color::White => "white",
+                                    mtg_core::Color::Blue => "blue",
+                                    mtg_core::Color::Black => "black",
+                                    mtg_core::Color::Red => "red",
+                                    mtg_core::Color::Green => "green",
+                                }
+                                .into()
+                            })
+                            .collect();
+                        let picked = match rc.need(
+                            p,
+                            ChoiceKind::ChooseModes {
+                                available,
+                                count: 1,
+                                min: None,
+                            },
+                            "choose a color of mana to add",
+                        )? {
+                            Answer::Modes(m) => m.first().copied().unwrap_or(0) as usize,
+                            _ => 0,
+                        };
+                        color = colors.get(picked).copied();
+                    }
                     if amount > 0 {
                         let before = state.player(p).mana.amounts;
                         apply::apply(
@@ -496,7 +575,19 @@ fn resolve_inner(
                                     player: p,
                                     source: rc.source,
                                     amounts,
-                                    restrictions: rc.mana_restrictions.clone(),
+                                    restrictions: rc
+                                        .mana_restrictions
+                                        .iter()
+                                        .map(|(filter, spells_only)| {
+                                            (
+                                                crate::mana::freeze_mana_restriction(
+                                                    state, rc.source, filter,
+                                                ),
+                                                *spells_only,
+                                            )
+                                        })
+                                        .collect(),
+                                    uncounterable: rc.mana_uncounterable,
                                 });
                             }
                         }
@@ -1935,6 +2026,55 @@ fn resolve_inner(
             }
             Ok(())
         }
+        Effect::SearchLibraryOrGraveyard { filter, to, reveal } => {
+            let me = rc.controller;
+            let answer = rc.need(
+                me,
+                ChoiceKind::ChooseModes {
+                    available: ["library", "graveyard", "library and graveyard"]
+                        .map(Box::<str>::from)
+                        .to_vec(),
+                    count: 1,
+                    min: None,
+                },
+                "choose zones to search",
+            )?;
+            let mode = match answer {
+                Answer::Modes(m) => m.first().copied().unwrap_or(0),
+                _ => 0,
+            };
+            let library = mode != 1;
+            let graveyard = mode != 0;
+            let mut candidates = Vec::new();
+            for (zone, searched) in [(Zone::Library, library), (Zone::Graveyard, graveyard)] {
+                if !searched {
+                    continue;
+                }
+                for id in state.objects_in(ZoneRef::of(zone, me)) {
+                    if with_ctx(state, cards, rc, |ctx| eval::matches(ctx, filter, id))? {
+                        candidates.push(id);
+                    }
+                }
+            }
+            let chosen = if candidates.is_empty() {
+                Vec::new()
+            } else {
+                // A quality search of a hidden zone can fail to find. Searching
+                // only the public graveyard must find an available matching card.
+                let min = u32::from(!library || *filter == mtg_ir::ObjectFilter::Any);
+                ask_objects(rc, me, candidates, min, 1, "search for")?
+            };
+            for id in chosen {
+                if *reveal {
+                    apply::apply(state, cause, Event::Revealed { object: id }, log);
+                }
+                move_to(state, log, id, *to, cause);
+            }
+            if library {
+                apply::apply(state, cause, Event::Shuffled { player: me }, log);
+            }
+            Ok(())
+        }
         Effect::SearchLibraryAndGraveyard { filter } => {
             let me = rc.controller;
             let mut candidates = Vec::new();
@@ -2270,10 +2410,30 @@ fn resolve_inner(
             }
             Ok(())
         }
-        Effect::ExtraTurn { who } => {
+        Effect::ExtraTurn { who, lose_at_end } => {
             let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
             for player in players {
-                apply::apply(state, cause, Event::ExtraTurnAdded { player }, log);
+                let marker = if *lose_at_end {
+                    let id = state.next_delayed;
+                    let controller = rc.controller;
+                    rc.controller = player;
+                    let result = resolve(
+                        state,
+                        cards,
+                        log,
+                        &Effect::Delayed {
+                            on: mtg_ir::EventPattern::ExtraTurnEnd { id },
+                            effect: Box::new(Effect::LoseGame { who: Selector::You }),
+                        },
+                        rc,
+                    );
+                    rc.controller = controller;
+                    result?;
+                    Some(id)
+                } else {
+                    None
+                };
+                apply::apply(state, cause, Event::ExtraTurnAdded { player, marker }, log);
             }
             Ok(())
         }
@@ -2455,13 +2615,51 @@ fn resolve_inner(
             }
             Ok(())
         }
-        // Layer 2 (CR 613.1b): only "you" gain control here, which is what
-        // `layers::controller` reads.
+        Effect::ChoosePlayer { from, then } => {
+            let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, from))?;
+            if players.is_empty() {
+                return Ok(());
+            }
+            let picked = if players.len() == 1 {
+                players[0]
+            } else {
+                let available = players
+                    .iter()
+                    .map(|p| format!("Player {}", p.0 + 1).into())
+                    .collect();
+                let answer = rc.need(
+                    rc.controller,
+                    ChoiceKind::ChooseModes {
+                        available,
+                        count: 1,
+                        min: None,
+                    },
+                    "choose a player",
+                )?;
+                let index = match answer {
+                    Answer::Modes(m) => usize::from(m.first().copied().unwrap_or(0)),
+                    _ => 0,
+                };
+                players.get(index).copied().unwrap_or(players[0])
+            };
+            rc.bindings
+                .insert(Binding::CHOSEN_PLAYER, vec![Target::Player(picked)]);
+            resolve(state, cards, log, then, rc)
+        }
+        // Freeze the recipient when the effect resolves; later source control changes
+        // must not change who receives the permanent.
         Effect::GainControl {
             what,
-            who: Selector::You,
+            who,
             duration,
         } => {
+            let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+            let Some(controller) = players.first().copied() else {
+                return Ok(());
+            };
+            if players.len() != 1 {
+                return Err(ResolveError::Unsupported("multiple control recipients"));
+            }
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
             let ids: Vec<ObjectId> = ids
                 .into_iter()
@@ -2487,7 +2685,7 @@ fn resolve_inner(
                 duration: *duration,
                 timestamp,
                 ability: None,
-                controller: Some(rc.controller),
+                controller: Some(controller),
             });
             apply::apply(
                 state,
@@ -2500,7 +2698,6 @@ fn resolve_inner(
             );
             Ok(())
         }
-        Effect::GainControl { .. } => Err(ResolveError::Unsupported("control change")),
         Effect::ExchangeControl { a, b } => {
             let (a, b) = with_ctx(state, cards, rc, |ctx| {
                 Ok((
@@ -3068,12 +3265,13 @@ fn cast_during_resolution(
             }
         }
     }
+    let mut uncounterable = false;
     if let Some(cost) = cost {
         // Paying for a spell: mana restricted to some spells is checked against this one.
         let Some(plan) = crate::mana::plan_spell(state, cards, who, cost, 0, card) else {
             return Ok(false);
         };
-        pay_plan(state, cards, log, who, &plan);
+        uncounterable = pay_plan(state, cards, log, who, &plan);
     }
     let Some(on_stack) = move_to_at(
         state,
@@ -3097,6 +3295,7 @@ fn cast_during_resolution(
         cc.empty_slots = empty.clone();
         cc.modes = modes;
         cc.x = 0;
+        cc.uncounterable = uncounterable;
     }
     let mut targeted: Vec<Event> = Vec::new();
     for (i, t) in targets.iter().enumerate() {
@@ -3376,6 +3575,14 @@ fn counter_object(
 /// Whether a continuous effect makes this object impossible to counter.
 fn cant_be_countered(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) -> bool {
     use mtg_ir::effect::{Modification, Restriction};
+    if state
+        .objects
+        .get(&id)
+        .and_then(|o| o.cast_context.as_ref())
+        .is_some_and(|c| c.uncounterable)
+    {
+        return true;
+    }
     crate::layers::effects(state, cards).iter().any(|e| {
         matches!(
             &e.modification,
@@ -3581,7 +3788,7 @@ fn pay_plan(
     log: &mut Vec<StampedEvent>,
     who: PlayerId,
     plan: &crate::mana::Payment,
-) {
+) -> bool {
     for (object, ability, color) in &plan.activate {
         let taps = crate::abilities::find(state, cards, *object, *ability)
             .map(|a| match &a.kind {
@@ -3623,7 +3830,7 @@ fn pay_plan(
         }
     }
 
-    crate::mana::consume_restricted(state, who, plan);
+    let uncounterable = crate::mana::consume_restricted(state, who, plan);
     for (slot, amount) in plan.spend.iter().enumerate() {
         if *amount == 0 {
             continue;
@@ -3659,6 +3866,7 @@ fn pay_plan(
             log,
         );
     }
+    uncounterable
 }
 
 /// The CR 613 layer a modification belongs to.

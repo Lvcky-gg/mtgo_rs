@@ -16,6 +16,7 @@ fn scenario(amount: i32, spell_type: CardType) -> GameScenario {
     *effect = Effect::SpendOnly {
         only: ObjectFilter::HasType(CardType::Creature),
         spells_only: false,
+        uncounterable: false,
         effect: Box::new(Effect::AddMana {
             who: mtg_ir::Selector::You,
             produces: vec![ManaOutput::Repeated {
@@ -86,11 +87,11 @@ fn automatic_leftover_remains_restricted_after_eligible_spell_payment() {
 }
 
 #[test]
-fn unsupported_manual_restricted_activation_rejects_without_state_change() {
-    let s = scenario(2, CardType::Creature);
+fn manual_restricted_activation_floats_mana_without_losing_its_restriction() {
+    let mut s = scenario(2, CardType::Creature);
+    let instant = add_spell(&mut s, CardType::Instant, 1);
     let (mut engine, cards) = s.setup().unwrap();
     let choice = next_choice(&mut engine, &cards).unwrap().unwrap();
-    let before = mtg_verify::canonical::CanonicalGameState::from_engine(&engine);
     let result = engine.answer(
         &cards,
         choice.id,
@@ -100,15 +101,14 @@ fn unsupported_manual_restricted_activation_rejects_without_state_change() {
             color: None,
         }),
     );
-    assert!(result.is_err());
-    assert_eq!(
-        mtg_verify::canonical::CanonicalGameState::from_engine(&engine),
-        before
-    );
-    assert_eq!(
-        next_choice(&mut engine, &cards).unwrap().unwrap().id,
-        choice.id
-    );
+    assert!(result.is_ok());
+    let actions = legal(&mut engine, &cards);
+    assert!(actions.contains(&Action::Cast {
+        object: ObjectId(2)
+    }));
+    assert!(!actions.contains(&Action::Cast { object: instant }));
+    assert_eq!(engine.state.player(mtg_core::PlayerId(0)).mana.total(), 2);
+    assert_eq!(engine.state.restricted_mana.len(), 1);
 }
 
 #[test]
@@ -330,6 +330,7 @@ proptest::proptest! {
         engine.state.players.get_mut(&mtg_core::PlayerId(0)).unwrap().mana.amounts = [0,0,0,0,0,free + restricted];
         if restricted > 0 {
             engine.state.restricted_mana.push(mtg_engine::state::RestrictedMana {
+            uncounterable: false,
                 player: PlayerId(0), source: ObjectId(1), amounts: [0,0,0,0,0,restricted],
                 restrictions: vec![(ObjectFilter::HasType(if artifact_only {CardType::Artifact} else {CardType::Creature}), spells_only)],
             });
@@ -360,6 +361,7 @@ fn restriction_changes_digest_and_other_player_does_not_supply_capacity() {
         .state
         .restricted_mana
         .push(mtg_engine::state::RestrictedMana {
+            uncounterable: false,
             player: PlayerId(0),
             source: ObjectId(1),
             amounts: [0, 0, 0, 0, 0, 1],
@@ -384,6 +386,7 @@ fn restriction_changes_digest_and_other_player_does_not_supply_capacity() {
         .state
         .restricted_mana
         .push(mtg_engine::state::RestrictedMana {
+            uncounterable: false,
             player: PlayerId(1),
             source: ObjectId(1),
             amounts: [0, 0, 0, 0, 0, 1],
@@ -447,6 +450,7 @@ fn nested_restrictions_require_both_types() {
             .state
             .restricted_mana
             .push(mtg_engine::state::RestrictedMana {
+                uncounterable: false,
                 player: mtg_core::PlayerId(0),
                 source: ObjectId(1),
                 amounts: [0, 0, 0, 0, 0, 1],
@@ -476,6 +480,7 @@ fn invalid_provenance_cannot_pass_invariants() {
             .mana
             .add(None, 1);
         let mut record = mtg_engine::state::RestrictedMana {
+            uncounterable: false,
             player: mtg_core::PlayerId(0),
             source: ObjectId(1),
             amounts: [0, 0, 0, 0, 0, 1],

@@ -28,6 +28,11 @@ pub struct RestrictedMana {
     pub amounts: [u16; 6],
     /// Every restriction must hold; nesting intersects permissions.
     pub restrictions: Vec<(mtg_ir::ObjectFilter, bool)>,
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "std::ops::Not::not")
+    )]
+    pub uncounterable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +120,9 @@ pub struct GameState {
     /// Extra turns to come, the most recently created last (taken first, CR 500.7), and
     /// whose turn the ordinary rotation continues from once they are taken.
     pub extra_turns: Vec<PlayerId>,
+    /// Pending extra-turn slots with a delayed trigger tied to that particular turn.
+    pub extra_turn_markers: BTreeMap<usize, u32>,
+    pub active_extra_turn: Option<u32>,
     pub rotation_from: Option<PlayerId>,
     /// One entry per turn a player is to skip ("you skip your next turn").
     pub skipped_turns: Vec<PlayerId>,
@@ -292,6 +300,9 @@ pub struct GameObject {
     /// What this was attached to until that left the battlefield: last-known information
     /// for "when enchanted creature dies" (CR 603.10a).
     pub was_attached_to: Option<ObjectId>,
+    /// Copiable identities of attachments immediately before leaving the battlefield.
+    #[cfg_attr(feature = "verification", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub attachments_on_exit: Vec<(CardId, u8)>,
     /// For a permanent that was a spell: the zone it was cast from ("if you cast it").
     pub cast_from: Option<Zone>,
     /// What its controller chose as it entered ("the chosen color/type").
@@ -351,6 +362,7 @@ impl GameObject {
             monstrous: false,
             class_level: 0,
             was_attached_to: None,
+            attachments_on_exit: Vec::new(),
             cast_from: None,
             chosen_color: None,
             chosen_subtype: None,
@@ -519,6 +531,12 @@ pub struct CastContext {
     pub gains_haste: bool,
     /// The zone a spell was cast from (rebound asks whether it was the hand).
     pub cast_from: Option<Zone>,
+    /// A permission supplied by mana actually spent to cast this spell.
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "std::ops::Not::not")
+    )]
+    pub uncounterable: bool,
     /// How many spells had been cast this turn before this one (storm, CR 702.40a).
     pub cast_index: u32,
     /// The mana spent to cast this spell, by color (`None` colorless).
@@ -708,6 +726,8 @@ impl GameState {
             died_this_turn: Vec::new(),
             monarch: None,
             extra_turns: Vec::new(),
+            extra_turn_markers: BTreeMap::new(),
+            active_extra_turn: None,
             rotation_from: None,
             skipped_turns: Vec::new(),
             no_life_gain: Vec::new(),
@@ -856,6 +876,8 @@ impl serde::Serialize for DiagnosticState<'_> {
             died_this_turn: _,
             monarch: _,
             extra_turns: _,
+            extra_turn_markers: _,
+            active_extra_turn: _,
             rotation_from: _,
             skipped_turns: _,
             no_life_gain: _,
@@ -888,7 +910,9 @@ impl serde::Serialize for DiagnosticState<'_> {
         } = self.0;
         let mut out = serializer.serialize_struct(
             "GameStateDiagnostic",
-            63 + usize::from(!self.0.restricted_mana.is_empty()),
+            63 + usize::from(!self.0.restricted_mana.is_empty())
+                + usize::from(!self.0.extra_turn_markers.is_empty())
+                + usize::from(self.0.active_extra_turn.is_some()),
         )?;
         out.serialize_field("objects", &self.0.objects)?;
         out.serialize_field("zone_order", &self.0.zone_order)?;
@@ -947,6 +971,16 @@ impl serde::Serialize for DiagnosticState<'_> {
         out.serialize_field("died_this_turn", &self.0.died_this_turn)?;
         out.serialize_field("monarch", &self.0.monarch)?;
         out.serialize_field("extra_turns", &self.0.extra_turns)?;
+        if !self.0.extra_turn_markers.is_empty() {
+            out.serialize_field("extra_turn_markers", &self.0.extra_turn_markers)?;
+        } else {
+            out.skip_field("extra_turn_markers")?;
+        }
+        if self.0.active_extra_turn.is_some() {
+            out.serialize_field("active_extra_turn", &self.0.active_extra_turn)?;
+        } else {
+            out.skip_field("active_extra_turn")?;
+        }
         out.serialize_field("rotation_from", &self.0.rotation_from)?;
         out.serialize_field("skipped_turns", &self.0.skipped_turns)?;
         out.serialize_field("no_life_gain", &self.0.no_life_gain)?;

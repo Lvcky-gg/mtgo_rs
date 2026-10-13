@@ -5193,7 +5193,7 @@
                       "bindings": {
                         "$map": []
                       },
-                      "cast_from": "Hand",
+                      "cast_from": null,
                       "cast_index": 0,
                       "cost_choice": null,
                       "cost_override": null,
@@ -5458,7 +5458,7 @@
           "undo": []
         }
       },
-      "expected_digest": "3d0e76dadee2f93ab14e1d6818f96c187a0c66409058e281ed71717e3975652c"
+      "expected_digest": "21bad2fc8d3eb8d81b39351b6a17c304d9f2388610429d195cd7e18d4413706e"
     }
   ],
   "expected": {
@@ -5483,7 +5483,7 @@
         "count": 1
       }
     ],
-    "final_digest": "3d0e76dadee2f93ab14e1d6818f96c187a0c66409058e281ed71717e3975652c",
+    "final_digest": "21bad2fc8d3eb8d81b39351b6a17c304d9f2388610429d195cd7e18d4413706e",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -6079,7 +6079,7 @@
                     "bindings": {
                       "$map": []
                     },
-                    "cast_from": "Hand",
+                    "cast_from": null,
                     "cast_index": 0,
                     "cost_choice": null,
                     "cost_override": null,

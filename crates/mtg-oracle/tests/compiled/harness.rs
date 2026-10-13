@@ -70,6 +70,7 @@ const SUBTYPES: &[&str] = &[
     "Dinosaur",
     "Kithkin",
     "Golem",
+    "Orc",
 ];
 
 #[derive(Default)]

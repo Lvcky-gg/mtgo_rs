@@ -379,6 +379,42 @@ fn eligible_pool(
     (pool, eligible)
 }
 
+/// A source's chosen type/color is fixed when it produces restricted mana. The
+/// floating mana retains that choice if its source leaves or chooses something else.
+pub(crate) fn freeze_mana_restriction(
+    state: &GameState,
+    source: ObjectId,
+    filter: &mtg_ir::ObjectFilter,
+) -> mtg_ir::ObjectFilter {
+    use mtg_ir::ObjectFilter as F;
+    let obj = state
+        .objects
+        .get(&source)
+        .or_else(|| state.last_known.get(&source));
+    match filter {
+        F::HasChosenSubtype => obj
+            .and_then(|o| o.chosen_subtype)
+            .map_or_else(|| F::Not(Box::new(F::Any)), F::HasSubtype),
+        F::HasChosenColor => obj
+            .and_then(|o| o.chosen_color)
+            .map_or_else(|| F::Not(Box::new(F::Any)), F::HasColor),
+        F::And(parts) => F::And(
+            parts
+                .iter()
+                .map(|f| freeze_mana_restriction(state, source, f))
+                .collect(),
+        ),
+        F::Or(parts) => F::Or(
+            parts
+                .iter()
+                .map(|f| freeze_mana_restriction(state, source, f))
+                .collect(),
+        ),
+        F::Not(inner) => F::Not(Box::new(freeze_mana_restriction(state, source, inner))),
+        other => other.clone(),
+    }
+}
+
 fn annotate_payment(
     mut payment: Payment,
     state: &GameState,
@@ -393,8 +429,13 @@ fn annotate_payment(
 
 /// Remove only provenance for units authorized by this payment. Aggregate counts
 /// still flow through ManaSpent events, so the event log remains unchanged.
-pub(crate) fn consume_restricted(state: &mut GameState, player: PlayerId, payment: &Payment) {
+pub(crate) fn consume_restricted(
+    state: &mut GameState,
+    player: PlayerId,
+    payment: &Payment,
+) -> bool {
     let pool = state.player(player).mana.amounts;
+    let mut uncounterable = false;
     for (slot, total) in pool.iter().enumerate() {
         let restricted: u32 = state
             .restricted_mana
@@ -403,7 +444,24 @@ pub(crate) fn consume_restricted(state: &mut GameState, player: PlayerId, paymen
             .map(|bucket| u32::from(bucket.amounts[slot]))
             .sum();
         let unrestricted = u32::from(*total).saturating_sub(restricted);
-        let mut remaining = u32::from(payment.spend[slot]).saturating_sub(unrestricted);
+        let mut spend = u32::from(payment.spend[slot]);
+        // Prefer eligible mana carrying a benefit to ordinary units of the same color.
+        // Ineligible buckets are never consumed, even when their color matches.
+        for (index, bucket) in state.restricted_mana.iter_mut().enumerate() {
+            if bucket.player != player
+                || !bucket.uncounterable
+                || !(payment.eligible_restricted.contains(&index)
+                    || (index >= payment.prior_restricted
+                        && payment.eligible_sources.contains(&bucket.source)))
+            {
+                continue;
+            }
+            let used = spend.min(u32::from(bucket.amounts[slot]));
+            bucket.amounts[slot] -= used as u16;
+            spend -= used;
+            uncounterable |= used > 0;
+        }
+        let mut remaining = spend.saturating_sub(unrestricted);
         for (index, bucket) in state.restricted_mana.iter_mut().enumerate() {
             if bucket.player != player
                 || !(payment.eligible_restricted.contains(&index)
@@ -420,6 +478,7 @@ pub(crate) fn consume_restricted(state: &mut GameState, player: PlayerId, paymen
     state
         .restricted_mana
         .retain(|bucket| bucket.amounts.iter().any(|amount| *amount > 0));
+    uncounterable
 }
 
 /// The algorithm proper, separated from state so it can be tested directly.
@@ -1188,10 +1247,8 @@ pub fn manual_source(
     {
         return None;
     }
-    // Restricted mana can't float: it is made only as part of paying for a spell.
-    if spend_only(effect).is_some() {
-        return None;
-    }
+    // Manual activation uses the same resolver as automatic payment, retaining
+    // the output's restriction and any spending benefit in its floating provenance.
     if cost.mana.symbols.is_empty()
         && !announced(cost)
         && cost

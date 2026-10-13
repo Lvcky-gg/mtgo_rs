@@ -1,5 +1,36 @@
 # Current work
 
+Codex (2026-10-13, card coverage round 4 — COMPLETE): 17,567 → 17,592 / 34,914
+(50.4%), 25 additions and zero losses. Added library/graveyard zone choices and
+enchanted/equipped filters, including Finale of Devastation, Greater Auramancy,
+and Stone Haven Outfitter. Eight compiled-card regressions cover searches,
+bonuses, attachment removal, and simultaneous versus earlier attachment deaths.
+Workspace tests, corpus, all-target Clippy, formatting and diff checks pass.
+See [session](sessions/2026-10-13-card-coverage-round4.md).
+
+Codex (2026-10-13, card coverage round 3 — COMPLETE): 17,562 → 17,567 / 34,914
+(50.3%), five additions and zero losses. Tainted Pact, Final Fortune, Last Chance,
+Warrior's Oath, and Tataru Taru added with 14 compiled-card regressions. Fixed
+once-per-turn trigger limits for multiple events detected together.
+Workspace tests, corpus, all-target Clippy, formatting and diff checks pass.
+See [session](sessions/2026-10-13-card-coverage-round3.md).
+
+Codex (2026-10-13, card coverage round 2 — COMPLETE): 17,468 → 17,562 / 34,914
+(50.3%), 94 additions and zero losses. Wishclaw, Halfling, Cavern, Derevi,
+Bowmasters and Ad Nauseam added with 21 compiled-card regressions. Manual
+restricted mana now floats with provenance; reviewed its one affected fixture.
+Workspace tests, corpus, restricted-mana review, all-target Clippy, formatting
+and diff checks pass.
+See [session](sessions/2026-10-13-card-coverage-round2.md).
+
+Codex (2026-10-13, card coverage — COMPLETE): 17,424 → 17,468 / 34,914 (50.0%),
+44 additional playable cards, zero lost against a fresh HEAD build. Added Pyroblast,
+Hydroblast, Deathrite Shaman, Culling Ritual, Sevinne's Reclamation, Otawara and
+Boseiju, with 15 compiled-card Engine regressions. Corrected copied-spell casting
+provenance and reviewed the three affected copy fixtures. Workspace tests, corpus,
+all-target Clippy, formatting and diff checks pass. See
+[session](sessions/2026-10-13-card-coverage.md).
+
 Codex (2026-10-09, GitHub release publication fix — READY TO PUSH): both recent
 remote releases passed all platform builds/test jobs but failed at publication.
 The release-* artifact glob also selected verification evidence, causing dist/*

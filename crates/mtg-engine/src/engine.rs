@@ -2032,7 +2032,7 @@ impl Engine {
             // CR 603.4 — an "intervening if" clause is checked when the ability would
             // go on the stack, and again on resolution. Failing it here means the
             // ability simply never goes on the stack.
-            if !self.intervening_if_holds(cards, &t) {
+            if !self.trigger_can_be_placed(cards, &t) {
                 continue;
             }
 
@@ -2123,7 +2123,7 @@ impl Engine {
     /// Note this is *not* a cost and not a targeting requirement: it is a plain
     /// condition, and a trigger whose condition has stopped being true is simply
     /// discarded rather than fizzling on the stack.
-    fn intervening_if_holds(&self, cards: &dyn PrintedCards, t: &PendingTrigger) -> bool {
+    fn trigger_can_be_placed(&self, cards: &dyn PrintedCards, t: &PendingTrigger) -> bool {
         let Some(obj) = self
             .state
             .objects
@@ -2145,6 +2145,11 @@ impl Engine {
         let mtg_ir::AbilityKind::Triggered { trigger, .. } = &ability.kind else {
             return true;
         };
+        // Several events can be detected before any of their triggers are placed.
+        // Recheck the limit after earlier queued triggers have consumed it.
+        if crate::detect::limit_reached(&self.state, t.source, t.ability, trigger.limit) {
+            return false;
+        }
         let Some(cond) = &trigger.intervening_if else {
             return true;
         };
@@ -2956,11 +2961,18 @@ impl Engine {
             }
         }
 
-        // Activated abilities that work from the hand (cycling) or the graveyard (unearth),
-        // of cards in this player's hand and graveyard.
-        let hand_and_graveyard = [Zone::Hand, Zone::Graveyard]
+        // Printed abilities that explicitly function outside the battlefield, including
+        // Command-zone abilities. Shared-zone cards are offered only to their owner.
+        let hand_and_graveyard = [Zone::Hand, Zone::Graveyard, Zone::Command]
             .into_iter()
-            .flat_map(|z| self.state.objects_in(ZoneRef::of(z, who)));
+            .flat_map(|z| {
+                self.state.objects_in(if z.is_shared() {
+                    ZoneRef::shared(z)
+                } else {
+                    ZoneRef::of(z, who)
+                })
+            })
+            .filter(|id| self.state.objects[id].owner == who);
         for id in hand_and_graveyard.collect::<Vec<_>>() {
             let zone = self.state.objects[&id].zone.zone;
             let Some(face) = self
@@ -2973,7 +2985,6 @@ impl Engine {
             };
             for ability in &face.abilities {
                 let mtg_ir::AbilityKind::Activated {
-                    cost,
                     functions_from,
                     is_mana_ability: false,
                     is_loyalty_ability: false,
@@ -2986,7 +2997,11 @@ impl Engine {
                 if *functions_from != zone {
                     continue;
                 }
-                if !crate::cost::additional_payable(&self.state, cards, id, who, cost)
+                let Some(cost) = crate::cost::ability_cost(&self.state, cards, id, ability.id)
+                else {
+                    continue;
+                };
+                if !crate::cost::additional_payable(&self.state, cards, id, who, &cost)
                     || !crate::mana::can_pay(&self.state, cards, who, &cost.mana, 0)
                     || (timing.sorcery_only() && !sorcery_time)
                     || !timing.allows(self.state.active_player == who, self.state.step)
@@ -3200,7 +3215,6 @@ impl Engine {
             // Printed and granted alike (see `crate::abilities`).
             for ability in &crate::abilities::current(&self.state, cards, id) {
                 let mtg_ir::AbilityKind::Activated {
-                    cost,
                     is_mana_ability,
                     is_loyalty_ability,
                     timing,
@@ -3233,7 +3247,11 @@ impl Engine {
                 // Every part of the cost must be payable: a tap cost by something
                 // untapped and not summoning sick (CR 302.6), and nothing the engine
                 // cannot pay at all.
-                if !crate::cost::additional_payable(&self.state, cards, id, who, cost) {
+                let Some(cost) = crate::cost::ability_cost(&self.state, cards, id, ability.id)
+                else {
+                    continue;
+                };
+                if !crate::cost::additional_payable(&self.state, cards, id, who, &cost) {
                     continue;
                 }
                 if !crate::mana::can_pay(&self.state, cards, who, &cost.mana, 0) {
@@ -3347,7 +3365,12 @@ impl Engine {
     /// in the pool, and the cost is then taken out of the pool — there is no path by
     /// which a source pays a cost directly, which keeps a single place where mana is
     /// spent.
-    fn pay(&mut self, cards: &dyn PrintedCards, who: PlayerId, plan: &crate::mana::Payment) {
+    fn pay(
+        &mut self,
+        cards: &dyn PrintedCards,
+        who: PlayerId,
+        plan: &crate::mana::Payment,
+    ) -> bool {
         for (object, ability, color) in &plan.activate {
             if *ability == crate::mana::DELVE {
                 // Delve: exiling the card is the payment, as one generic mana.
@@ -3405,7 +3428,7 @@ impl Engine {
             }
             self.activate_mana_ability(cards, who, *object, *ability, *color);
         }
-        self.spend(who, plan);
+        self.spend(who, plan)
     }
 
     /// Activate one mana ability: pay its tap cost, then resolve it on the spot with the
@@ -3571,9 +3594,9 @@ impl Engine {
     }
 
     /// Take a planned payment out of the pool, and any life it calls for.
-    fn spend(&mut self, who: PlayerId, plan: &crate::mana::Payment) {
+    fn spend(&mut self, who: PlayerId, plan: &crate::mana::Payment) -> bool {
         // Spend the mana.
-        crate::mana::consume_restricted(&mut self.state, who, plan);
+        let uncounterable = crate::mana::consume_restricted(&mut self.state, who, plan);
         for (slot, amount) in plan.spend.iter().enumerate() {
             if *amount == 0 {
                 continue;
@@ -3610,6 +3633,7 @@ impl Engine {
                 &mut self.log,
             );
         }
+        uncounterable
     }
 
     // ---- resolution -----------------------------------------------------
@@ -4747,7 +4771,12 @@ impl Engine {
         if pay_cost {
             if let Some(plan) = payment {
                 let before = self.log.len();
-                self.pay(cards, controller, &plan);
+                let uncounterable = self.pay(cards, controller, &plan);
+                if uncounterable && let Some(o) = self.state.objects.get_mut(&object) {
+                    o.cast_context
+                        .get_or_insert_with(Default::default)
+                        .uncounterable = true;
+                }
                 // What was spent, for sunburst, converge and "if {R} was spent".
                 let mut mana: Vec<(Option<mtg_core::Color>, u16)> = Vec::new();
                 for e in &self.log[before..] {
@@ -7111,12 +7140,18 @@ impl Engine {
                 // player after whoever's ordinary turn this was.
                 let current = self.state.active_player;
                 let mut next;
+                let mut next_marker;
                 // A skipped turn is passed over and used up (CR 614.10); the guard only
                 // stops a loop if every turn were skipped forever.
                 let mut guard = self.state.skipped_turns.len() + 2;
                 loop {
+                    next_marker = None;
                     next = match self.state.extra_turns.pop() {
                         Some(p) => {
+                            next_marker = self
+                                .state
+                                .extra_turn_markers
+                                .remove(&self.state.extra_turns.len());
                             if self.state.player(p).has_lost {
                                 continue;
                             }
@@ -7142,6 +7177,7 @@ impl Engine {
                     }
                 }
                 self.state.active_player = next;
+                self.state.active_extra_turn = next_marker;
                 self.state.turn += 1;
                 self.state.step = Step::Untap;
                 self.state.priority = Some(next);

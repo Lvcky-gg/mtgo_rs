@@ -2270,6 +2270,9 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     if let Some((head, only, spells_only)) = spend
         && let Some(only) = only.strip_suffix('.')
     {
+        let (only, uncounterable) = only
+            .strip_suffix(", and that spell can't be countered")
+            .map_or((only, false), |only| (only, true));
         let only = only
             .strip_prefix("a ")
             .or_else(|| only.strip_prefix("an "))
@@ -2318,6 +2321,7 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
                     only,
                     effect: Box::new(effect),
                     spells_only,
+                    uncounterable,
                 },
                 functions_from,
                 is_mana_ability: true,
@@ -2349,7 +2353,7 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
                 _,
             ),
         ] = list.as_mut_slice()
-        && clauses::scale(effect, by)
+        && clauses::scale_mana_ability(effect, by)
     {
         return Some(Line::Abilities(list));
     }
@@ -2968,8 +2972,8 @@ fn mana_followup(effect: &Effect) -> bool {
 
 /// "{t}: add {g}.", "{t}: add {c}{c}.", "{t}: add {w} or {u}.", "{t}: add one mana of any
 /// color." — tap-only costs, because only those can pay for spells.
-/// "Add {B}{B}{B}." as an effect (a ritual, a chapter): fixed mana only — a choice of
-/// color during resolution has no prompt, so it is not compiled.
+/// "Add {B}{B}{B}." as an effect (a ritual, a chapter). Ambiguous outputs are chosen
+/// during resolution; mana abilities use the payment planner's color instead.
 pub(crate) fn add_mana_effect(s: &str) -> Option<(Effect, &str)> {
     let r = s.strip_prefix("add ")?;
     // "add two mana in any combination of colors": chosen as it resolves (not for a mana
@@ -2990,17 +2994,11 @@ pub(crate) fn add_mana_effect(s: &str) -> Option<(Effect, &str)> {
     let end = [" instead", " for each "]
         .iter()
         .filter_map(|w| r.find(w))
-        .filter(|i| *i < end && r[..*i].ends_with('}'))
+        .filter(|i| *i < end)
         .min()
         .unwrap_or(end);
     let (mana, rest) = r.split_at(end);
-    if !mana.starts_with('{') {
-        return None;
-    }
     let outputs = mana_line(&format!("{{t}}: add {mana}."))?;
-    if outputs.iter().any(|o| o.is_ambiguous()) {
-        return None;
-    }
     Some((
         Effect::AddMana {
             who: Selector::You,
@@ -3591,6 +3589,38 @@ fn other_creature(on: &EventPattern) -> Option<mtg_ir::selector::Binding> {
 
 /// "When ~ enters, …", "Whenever ~ attacks, …", "At the beginning of your upkeep, …".
 fn triggered(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
+    // Two trigger heads share one ability only when compiling the common body
+    // produces identical effects and target slots under both event contexts.
+    if (line.starts_with("when ") || line.starts_with("whenever "))
+        && let Some((first, second)) = line.split_once(" and whenever ")
+        && let Some((_, body)) = second.split_once(", ")
+    {
+        let mut left = cx.clone();
+        let mut right = cx.clone();
+        let a = triggered(&format!("{first}, {body}"), &mut left)?;
+        let b = triggered(&format!("whenever {second}"), &mut right)?;
+        let (
+            AbilityKind::Triggered {
+                mut trigger,
+                effect,
+            },
+            AbilityKind::Triggered {
+                trigger: other,
+                effect: other_effect,
+            },
+        ) = (a, b)
+        else {
+            return None;
+        };
+        let mut check = trigger.clone();
+        check.on = other.on.clone();
+        if check != other || effect != other_effect || left.targets != right.targets {
+            return None;
+        }
+        trigger.on = EventPattern::AnyOf(vec![trigger.on, other.on]);
+        *cx = left;
+        return Some(AbilityKind::Triggered { trigger, effect });
+    }
     // "This ability triggers only once each turn." (once per turn covers once per batch).
     let (line, once) = match line.strip_suffix(" this ability triggers only once each turn.") {
         Some(l) => (l, true),
@@ -3622,7 +3652,7 @@ fn triggered(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
         cx.that_player = Some(Selector::Bound(mtg_ir::selector::Binding::EventOther));
     }
     // "Whenever an opponent draws a card, that player …": the player the event happened to.
-    if let EventPattern::Draws { whose }
+    if let EventPattern::Draws { whose, .. }
     | EventPattern::SearchesLibrary { who: whose }
     | EventPattern::NthDraw { whose, .. }
     | EventPattern::Discards { whose }
@@ -4826,7 +4856,22 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
         ("a player draws a card", Selector::EachPlayer),
     ] {
         if let Some(r) = r.strip_prefix(prefix) {
-            return Some((EventPattern::Draws { whose }, normal, None, r));
+            let (except_first_in_own_draw_step, r) = [
+                " except the first one they draw in each of their draw steps",
+                " except the first one you draw in each of your draw steps",
+            ]
+            .iter()
+            .find_map(|p| r.strip_prefix(p))
+            .map_or((false, r), |r| (true, r));
+            return Some((
+                EventPattern::Draws {
+                    whose,
+                    except_first_in_own_draw_step,
+                },
+                normal,
+                None,
+                r,
+            ));
         }
     }
     if let Some(r) = r.strip_prefix("you gain life") {
@@ -5216,6 +5261,22 @@ pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     } else {
         cost(cost_text, cx)?
     };
+    let body = if let Some((body, reduction)) = body.split_once(" this ability costs ") {
+        let (mana, rest) = mana_cost(reduction)?;
+        let [mtg_core::ManaSymbol::Generic(n)] = mana.symbols.as_slice() else {
+            return None;
+        };
+        let rest = rest
+            .strip_prefix(" less to activate for each ")?
+            .strip_suffix('.')?;
+        let (count, "") = clauses::per(rest, cx)? else {
+            return None;
+        };
+        cost.activation_reduction = Some(Value::Product(vec![Value::Fixed(i32::from(*n)), count]));
+        body
+    } else {
+        body
+    };
     let (body, mut timing) = if let Some(b) = body.strip_suffix(" activate only as a sorcery.") {
         (b, ActivationTiming::SorcerySpeed)
     } else if let Some(b) = body.strip_suffix(" any player may activate this ability.") {
@@ -5313,20 +5374,7 @@ pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
             timing,
         });
     }
-    let effect = if loyalty.is_some() && body.starts_with("add ") {
-        let outputs = mana_line(&format!("{{t}}: {body}"))?;
-        // Colour choices during stack resolution need their own prompt; reject
-        // those until implemented rather than silently picking a colour.
-        if outputs.iter().any(|o| o.possible_colors().len() > 1) {
-            return None;
-        }
-        Effect::AddMana {
-            who: Selector::You,
-            produces: outputs,
-        }
-    } else {
-        clauses::effect(body, cx)?
-    };
+    let effect = clauses::effect(body, cx)?;
     // Mana made by an ability is a mana ability's, which can't ask what color it is.
     let asks_for_mana = |e: &Effect| match e {
         Effect::AddManaAnyCombination { .. } => true,
@@ -5370,10 +5418,17 @@ pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     if discards_self && (loyalty.is_some() || exiles_self || !graveyard_cost(&cost)) {
         return None;
     }
+    let from_command = body == "put ~ onto the battlefield from the command zone.";
+    if from_command && (loyalty.is_some() || exiles_self || discards_self || !graveyard_cost(&cost))
+    {
+        return None;
+    }
     Some(AbilityKind::Activated {
         cost,
         effect,
-        functions_from: if exiles_self {
+        functions_from: if from_command {
+            Zone::Command
+        } else if exiles_self {
             Zone::Graveyard
         } else if discards_self {
             Zone::Hand

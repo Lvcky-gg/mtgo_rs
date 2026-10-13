@@ -27,7 +27,13 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
 
     // Adjectives.
     loop {
-        if let Some(r) = rest.strip_prefix("attacking or blocking ") {
+        if let Some(r) = rest.strip_prefix("enchanted ") {
+            parts.push(ObjectFilter::HasAttachment(cx.subtype("aura")?));
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("equipped ") {
+            parts.push(ObjectFilter::HasAttachment(cx.subtype("equipment")?));
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("attacking or blocking ") {
             parts.push(ObjectFilter::AttackingOrBlocking);
             rest = r;
         } else if let Some(r) = rest.strip_prefix("attacking ") {
@@ -331,6 +337,20 @@ fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> 
 }
 
 fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> {
+    // Qualities on a later alternative belong only to that alternative:
+    // "artifact, enchantment, or nonbasic land" doesn't exclude basic artifacts.
+    if let Some(r) = s.strip_prefix("nonbasic ") {
+        let (head, zone, plural, rest) = one_head(r, cx)?;
+        return Some((
+            ObjectFilter::And(vec![
+                head,
+                not(ObjectFilter::HasSupertype(Supertype::Basic)),
+            ]),
+            zone,
+            plural,
+            rest,
+        ));
+    }
     let (word, rest) = words::first_word(s);
     let mut filter;
     let mut plural;
@@ -497,6 +517,13 @@ fn card_zone<'s>(
 
 /// "with flying", "with power 2 or less", "with mana value 3 or greater".
 pub fn with_clause<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
+    if let Some(rest) = s.strip_prefix("a basic land type") {
+        let types = ["plains", "island", "swamp", "mountain", "forest"]
+            .into_iter()
+            .map(|name| Some(ObjectFilter::HasSubtype(cx.subtype(name)?)))
+            .collect::<Option<Vec<_>>>()?;
+        return Some((ObjectFilter::Or(types), rest));
+    }
     if let Some((k, rest)) = words::keyword_prefix(s) {
         // "with flying or reach"
         if let Some(r) = rest.strip_prefix(" or ")
@@ -725,7 +752,7 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
         ("enchanted artifact", Some(CardType::Artifact)),
         ("enchanted permanent", None),
     ] {
-        if let Some(r) = s.strip_prefix(prefix) {
+        if let Some(r) = s.strip_prefix(prefix).filter(|r| !r.starts_with('s')) {
             let mut f = vec![ObjectFilter::AttachedToSelf];
             if let Some(t) = t {
                 f.push(ObjectFilter::HasType(t));

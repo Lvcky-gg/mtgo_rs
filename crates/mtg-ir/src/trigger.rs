@@ -70,6 +70,10 @@ pub enum TriggerLimit {
 /// import time, in `mtg-oracle`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum EventPattern {
+    /// The end step of one particular extra turn, identified when it was created.
+    ExtraTurnEnd {
+        id: u32,
+    },
     /// "Whenever <filter> enters" — a zone change ending on the battlefield.
     Enters {
         who: ObjectFilter,
@@ -164,6 +168,8 @@ pub enum EventPattern {
     },
     Draws {
         whose: Selector,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        except_first_in_own_draw_step: bool,
     },
     Discards {
         whose: Selector,

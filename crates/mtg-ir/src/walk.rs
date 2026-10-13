@@ -145,6 +145,7 @@ impl Visitor<'_> {
 
     fn pattern(&mut self, p: &mut EventPattern) {
         match p {
+            EventPattern::ExtraTurnEnd { .. } => {}
             EventPattern::Enters { who }
             | EventPattern::Leaves { who }
             | EventPattern::Dies { who }
@@ -210,7 +211,7 @@ impl Visitor<'_> {
             }
             EventPattern::LifeGained { whose }
             | EventPattern::LifeLost { whose }
-            | EventPattern::Draws { whose }
+            | EventPattern::Draws { whose, .. }
             | EventPattern::Discards { whose } => self.selector(whose),
             EventPattern::StateIs(c) => self.condition(c),
             EventPattern::AnyOf(ps) => {
@@ -523,7 +524,7 @@ impl Visitor<'_> {
                 self.selector(who);
                 self.filter(filter);
             }
-            Effect::ExtraTurn { who } | Effect::SkipNextTurn { who } => self.selector(who),
+            Effect::ExtraTurn { who, .. } | Effect::SkipNextTurn { who } => self.selector(who),
             Effect::AdditionalCombat => {}
             Effect::SpendOnly { only, effect, .. } => {
                 self.filter(only);
@@ -533,11 +534,18 @@ impl Visitor<'_> {
                 self.selector(what)
             }
             Effect::Choose { then, .. } => self.effect(then),
+            Effect::RepeatMay { body } => self.effect(body),
+            Effect::ExileUntilRepeatedName { who } => self.selector(who),
+            Effect::ChoosePlayer { from, then } => {
+                self.selector(from);
+                self.effect(then);
+            }
             Effect::ExileSelfWithCounters { .. } | Effect::MarkOnceEachTurn => {}
             Effect::OnceEachTurn { body } => self.effect(body),
             Effect::AddManaAnyCombination { amount } => self.value(amount),
             Effect::RevealRandom { who } => self.selector(who),
-            Effect::SearchLibraryAndGraveyard { filter } => self.filter(filter),
+            Effect::SearchLibraryAndGraveyard { filter }
+            | Effect::SearchLibraryOrGraveyard { filter, .. } => self.filter(filter),
             Effect::ExileLinked { what } => self.selector(what),
             Effect::ReturnExiledWith { .. } => {}
             Effect::AsPlayer { who, body } => {
@@ -698,6 +706,7 @@ impl Visitor<'_> {
             | ObjectFilter::AttackingAlone
             | ObjectFilter::Blocking
             | ObjectFilter::AttachedToSelf
+            | ObjectFilter::HasAttachment(_)
             | ObjectFilter::DealtDamageBySelfThisTurn
             | ObjectFilter::AttackedThisTurn
             | ObjectFilter::HasKeyword(_)

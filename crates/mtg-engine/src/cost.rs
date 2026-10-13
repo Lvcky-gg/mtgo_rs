@@ -524,7 +524,26 @@ pub fn ability_cost(
     ability: mtg_core::AbilityId,
 ) -> Option<mtg_ir::Cost> {
     match &crate::abilities::find(state, cards, source, ability)?.kind {
-        mtg_ir::AbilityKind::Activated { cost, .. } => Some(cost.clone()),
+        mtg_ir::AbilityKind::Activated { cost, .. } => {
+            let mut cost = cost.clone();
+            if let Some(amount) = &cost.activation_reduction {
+                let chars = ComputedChars(cards);
+                let ctx = Ctx {
+                    state,
+                    cards,
+                    chars: &chars,
+                    source,
+                    controller: state.objects.get(&source)?.controller,
+                    targets: &[],
+                    target_legal: &[],
+                    x: 0,
+                    bindings: crate::empty_bindings(),
+                };
+                let reduction = eval::value(&ctx, amount).ok()?.max(0);
+                cost.mana = apply_delta(cost.mana, 0, i64::from(reduction));
+            }
+            Some(cost)
+        }
         _ => None,
     }
 }

@@ -424,6 +424,8 @@ pub enum Event {
     /// CR 500.7 — `player` will take an extra turn after this one.
     ExtraTurnAdded {
         player: PlayerId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marker: Option<u32>,
     },
     /// "After this main phase, there is an additional combat phase followed by an
     /// additional main phase." (CR 500.8)
