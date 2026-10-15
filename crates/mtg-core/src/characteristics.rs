@@ -251,4 +251,6 @@ pub enum Keyword {
     /// CR 702.89 — umbra armor (an Aura's): if the enchanted creature would be destroyed,
     /// instead remove all damage from it and destroy the Aura.
     UmbraArmor,
+    /// Alternates phasing out and in during its controller's untap steps.
+    Phasing,
 }

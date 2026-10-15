@@ -93,6 +93,8 @@ pub struct GameState {
     pub owed_combat: bool,
     /// Players dealt damage this turn (bloodthirst).
     pub damaged_this_turn: BTreeSet<PlayerId>,
+    /// Players dealt combat damage this turn (Tymna the Weaver).
+    pub combat_damaged_this_turn: BTreeSet<PlayerId>,
     /// Players who lost life this turn, by damage or otherwise (CR 119.3).
     pub lost_life_this_turn: BTreeSet<PlayerId>,
     /// Players who gained life this turn.
@@ -109,6 +111,14 @@ pub struct GameState {
     /// Noncreature spells each player cast this turn ("their first noncreature spell
     /// each turn").
     pub noncreature_spells_by_player: BTreeMap<PlayerId, u32>,
+    /// The colors of the spells each player cast this turn ("if an opponent has cast a
+    /// blue or black spell this turn").
+    pub spell_colors_by_player: BTreeMap<PlayerId, mtg_core::ColorSet>,
+    /// How many turns each player has begun this game ("your first, second, or third
+    /// turn of the game").
+    pub turns_taken: BTreeMap<PlayerId, u32>,
+    /// Mana each player keeps as steps and phases end this turn (Birgi), by pool slot.
+    pub persistent_mana: BTreeMap<PlayerId, [u16; 6]>,
     /// Cards each player drew this turn ("your second card each turn").
     pub draws_this_turn: BTreeMap<PlayerId, u32>,
     /// Permanents put into a graveyard from the battlefield this turn, by the id they had
@@ -145,6 +155,14 @@ pub struct GameState {
     /// Permanents a static "if a creature … would die, exile it instead" currently covers,
     /// recomputed as the engine settles (event application has no card data).
     pub exile_if_dies_now: std::collections::BTreeSet<ObjectId>,
+    /// Players whose cards are exiled instead of going to their graveyard, and the counter
+    /// they get there ("instead exile it with a void counter on it") — refreshed with
+    /// `no_life_gain`.
+    pub graveyard_exiled: BTreeMap<PlayerId, Option<mtg_core::CounterKind>>,
+    /// Animate Dead and Necromancy: each Aura, and the creature it returned and enchants —
+    /// what its "enchant creature put onto the battlefield with this" allows, and what its
+    /// controller sacrifices when the Aura leaves.
+    pub reanimated: BTreeMap<ObjectId, ObjectId>,
     pub monarch_emblem: Option<ObjectId>,
     /// Prevention shields until cleanup, oldest first (see [`crate::prevention`]).
     pub damage_shields: Vec<mtg_core::DamageShield>,
@@ -232,6 +250,16 @@ pub struct GameObject {
     pub tapped: bool,
     pub face_down: bool,
     pub phased_out: bool,
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "Option::is_none")
+    )]
+    pub phased_with: Option<ObjectId>,
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "Option::is_none")
+    )]
+    pub phased_under: Option<PlayerId>,
     pub summoning_sick: bool,
     /// The turn this object last entered the battlefield, for "if ~ entered this turn".
     /// (Summoning sickness lasts until its controller's turn, which can be later.)
@@ -244,6 +272,12 @@ pub struct GameObject {
     /// creature.
     pub dealt_deathtouch_damage: bool,
     pub counters: BTreeMap<CounterKind, i32>,
+    /// Keyword counters receive a new timestamp whenever another of that kind is added.
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub keyword_counter_timestamps: BTreeMap<mtg_core::Keyword, Timestamp>,
     pub attached_to: Option<ObjectId>,
     /// CR 701.15 — regeneration shields, each replacing one destruction this turn.
     pub regeneration_shields: u32,
@@ -266,6 +300,19 @@ pub struct GameObject {
     /// "You may play that card this turn": who may, through which turn, and whether only
     /// as a spell. Lasts while this object stays where it is.
     pub may_play: Option<(PlayerId, u32, bool)>,
+    /// With `may_play`: "… without paying its mana cost" (Dauthi Voidwalker).
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "std::ops::Not::not")
+    )]
+    pub may_play_free: bool,
+    /// With `may_play`: mana of any type can be spent to cast it (Mnemonic Betrayal,
+    /// Opposition Agent).
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "std::ops::Not::not")
+    )]
+    pub may_play_any_mana: bool,
     /// Foretold or plotted: who may cast it after which turn, for what (`None`: free), and
     /// whether only as a sorcery.
     pub cast_later: Option<(PlayerId, u32, Option<mtg_core::ManaCost>, bool)>,
@@ -281,6 +328,11 @@ pub struct GameObject {
     /// characteristics and abilities — the layer system, triggers, costs — sees the copy
     /// without knowing copies exist.
     pub original: Option<(CardId, u8)>,
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "Option::is_none")
+    )]
+    pub token_size: Option<(i32, i32)>,
     /// "If it would leave the battlefield, exile it instead" applies to it (unearth).
     /// Lost with the zone change it replaces.
     pub exile_if_leaves: bool,
@@ -336,11 +388,14 @@ impl GameObject {
             tapped: false,
             face_down: false,
             phased_out: false,
+            phased_with: None,
+            phased_under: None,
             summoning_sick: false,
             entered_turn: None,
             damage: 0,
             dealt_deathtouch_damage: false,
             counters: BTreeMap::new(),
+            keyword_counter_timestamps: BTreeMap::new(),
             attached_to: None,
             regeneration_shields: 0,
             cast_x: 0,
@@ -353,8 +408,11 @@ impl GameObject {
             mana_spent: Vec::new(),
             cast_later: None,
             may_play: None,
+            may_play_free: false,
+            may_play_any_mana: false,
             adventure_player: None,
             original: None,
+            token_size: None,
             exile_if_leaves: false,
             is_spell_copy: false,
             controls_host: false,
@@ -407,6 +465,13 @@ pub struct Pregame {
     /// Once everyone has kept: index into `order` of the player now choosing which cards
     /// to begin the game with on the battlefield (CR 103.6).
     pub leylines: Option<usize>,
+    /// A player who began the game with a card that says "if you do, exile a card from
+    /// your hand", and how many cards they still exile.
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "Option::is_none")
+    )]
+    pub exile_from_hand: Option<(PlayerId, u32)>,
 }
 
 impl Pregame {
@@ -463,13 +528,30 @@ pub struct CommanderState {
     pub return_considered: BTreeSet<ObjectId>,
     /// Each player's commander.
     pub commanders: BTreeMap<PlayerId, CardId>,
+    /// A player's second commander, if paired. Primary and partner records stay
+    /// separate so older single-commander snapshots retain their representation.
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub partners: BTreeMap<PlayerId, CardId>,
     /// CR 903.8 — how many times each player has cast their commander from the command zone.
     pub casts: BTreeMap<PlayerId, u32>,
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub partner_casts: BTreeMap<PlayerId, u32>,
     /// Tax owed by a commander spell now on the stack, fixed when it was cast.
     pub tax_due: BTreeMap<ObjectId, u32>,
     /// CR 903.10a — combat damage dealt to a player by a commander, keyed by
     /// (player dealt damage, commander's owner).
     pub damage: BTreeMap<(PlayerId, PlayerId), u32>,
+    #[cfg_attr(
+        feature = "verification",
+        serde(skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub partner_damage: BTreeMap<(PlayerId, PlayerId), u32>,
 }
 
 impl CommanderState {
@@ -478,12 +560,29 @@ impl CommanderState {
 
     /// Whether `card`, owned by `owner`, is that player's commander.
     pub fn is_commander(&self, owner: PlayerId, card: CardId) -> bool {
-        self.commanders.get(&owner) == Some(&card)
+        self.commanders.get(&owner) == Some(&card) || self.partners.get(&owner) == Some(&card)
     }
 
     /// CR 903.8: {2} more for each previous cast from the command zone.
     pub fn tax(&self, owner: PlayerId) -> u32 {
         2 * self.casts.get(&owner).copied().unwrap_or(0)
+    }
+
+    pub fn tax_for(&self, owner: PlayerId, card: CardId) -> u32 {
+        if self.partners.get(&owner) == Some(&card) {
+            2 * self.partner_casts.get(&owner).copied().unwrap_or(0)
+        } else {
+            self.tax(owner)
+        }
+    }
+
+    pub fn record_cast(&mut self, owner: PlayerId, card: CardId) {
+        let casts = if self.partners.get(&owner) == Some(&card) {
+            &mut self.partner_casts
+        } else {
+            &mut self.casts
+        };
+        *casts.entry(owner).or_insert(0) += 1;
     }
 }
 
@@ -714,6 +813,8 @@ impl GameState {
             revealed_cards: Vec::new(),
             looked_at: Vec::new(),
             exile_if_dies_now: Default::default(),
+            graveyard_exiled: BTreeMap::new(),
+            reanimated: BTreeMap::new(),
             prevent_combat_damage: false,
             damage_unpreventable: false,
             prevent_damage_to: Vec::new(),
@@ -722,6 +823,9 @@ impl GameState {
             spells_by_player: BTreeMap::new(),
             spells_by_player_last_turn: BTreeMap::new(),
             noncreature_spells_by_player: BTreeMap::new(),
+            spell_colors_by_player: BTreeMap::new(),
+            turns_taken: BTreeMap::new(),
+            persistent_mana: BTreeMap::new(),
             draws_this_turn: BTreeMap::new(),
             died_this_turn: Vec::new(),
             monarch: None,
@@ -736,6 +840,7 @@ impl GameState {
             top_revealed: Vec::new(),
             monarch_emblem: None,
             damaged_this_turn: BTreeSet::new(),
+            combat_damaged_this_turn: BTreeSet::new(),
             lost_life_this_turn: BTreeSet::new(),
             gained_life_this_turn: BTreeSet::new(),
             life_gained_amount: BTreeMap::new(),
@@ -864,6 +969,7 @@ impl serde::Serialize for DiagnosticState<'_> {
             extra_combats: _,
             owed_combat: _,
             damaged_this_turn: _,
+            combat_damaged_this_turn: _,
             lost_life_this_turn: _,
             gained_life_this_turn: _,
             life_gained_amount: _,
@@ -872,6 +978,9 @@ impl serde::Serialize for DiagnosticState<'_> {
             spells_by_player: _,
             spells_by_player_last_turn: _,
             noncreature_spells_by_player: _,
+            spell_colors_by_player: _,
+            turns_taken: _,
+            persistent_mana: _,
             draws_this_turn: _,
             died_this_turn: _,
             monarch: _,
@@ -887,6 +996,8 @@ impl serde::Serialize for DiagnosticState<'_> {
             revealed_cards: _,
             looked_at: _,
             exile_if_dies_now: _,
+            graveyard_exiled: _,
+            reanimated: _,
             monarch_emblem: _,
             damage_shields: _,
             next_shield: _,
@@ -910,7 +1021,7 @@ impl serde::Serialize for DiagnosticState<'_> {
         } = self.0;
         let mut out = serializer.serialize_struct(
             "GameStateDiagnostic",
-            63 + usize::from(!self.0.restricted_mana.is_empty())
+            69 + usize::from(!self.0.restricted_mana.is_empty())
                 + usize::from(!self.0.extra_turn_markers.is_empty())
                 + usize::from(self.0.active_extra_turn.is_some()),
         )?;
@@ -947,6 +1058,11 @@ impl serde::Serialize for DiagnosticState<'_> {
         out.serialize_field("extra_combats", &self.0.extra_combats)?;
         out.serialize_field("owed_combat", &self.0.owed_combat)?;
         out.serialize_field("damaged_this_turn", &self.0.damaged_this_turn)?;
+        if self.0.combat_damaged_this_turn.is_empty() {
+            out.skip_field("combat_damaged_this_turn")?;
+        } else {
+            out.serialize_field("combat_damaged_this_turn", &self.0.combat_damaged_this_turn)?;
+        }
         out.serialize_field("lost_life_this_turn", &self.0.lost_life_this_turn)?;
         out.serialize_field("gained_life_this_turn", &self.0.gained_life_this_turn)?;
         out.serialize_field("life_gained_amount", &self.0.life_gained_amount)?;
@@ -966,6 +1082,21 @@ impl serde::Serialize for DiagnosticState<'_> {
                 "noncreature_spells_by_player",
                 &self.0.noncreature_spells_by_player,
             )?;
+        }
+        if self.0.persistent_mana.is_empty() {
+            out.skip_field("persistent_mana")?;
+        } else {
+            out.serialize_field("persistent_mana", &self.0.persistent_mana)?;
+        }
+        if self.0.turns_taken.is_empty() {
+            out.skip_field("turns_taken")?;
+        } else {
+            out.serialize_field("turns_taken", &self.0.turns_taken)?;
+        }
+        if self.0.spell_colors_by_player.is_empty() {
+            out.skip_field("spell_colors_by_player")?;
+        } else {
+            out.serialize_field("spell_colors_by_player", &self.0.spell_colors_by_player)?;
         }
         out.serialize_field("draws_this_turn", &self.0.draws_this_turn)?;
         out.serialize_field("died_this_turn", &self.0.died_this_turn)?;
@@ -990,6 +1121,16 @@ impl serde::Serialize for DiagnosticState<'_> {
         out.serialize_field("revealed_cards", &self.0.revealed_cards)?;
         out.serialize_field("looked_at", &self.0.looked_at)?;
         out.serialize_field("exile_if_dies_now", &self.0.exile_if_dies_now)?;
+        if self.0.reanimated.is_empty() {
+            out.skip_field("reanimated")?;
+        } else {
+            out.serialize_field("reanimated", &self.0.reanimated)?;
+        }
+        if self.0.graveyard_exiled.is_empty() {
+            out.skip_field("graveyard_exiled")?;
+        } else {
+            out.serialize_field("graveyard_exiled", &self.0.graveyard_exiled)?;
+        }
         out.serialize_field("monarch_emblem", &self.0.monarch_emblem)?;
         out.serialize_field("damage_shields", &self.0.damage_shields)?;
         out.serialize_field("next_shield", &self.0.next_shield)?;

@@ -18,6 +18,8 @@ pub enum Value {
     EventAmount,
     /// Sunburst, converge: how many colors of mana were spent to cast the source.
     ColorsSpent,
+    /// "The amount of mana spent to cast this creature" (Mockingbird): all of it.
+    ManaSpent,
     /// How many times the source's multikicker or replicate cost was paid (CR 702.33c).
     TimesKicked,
     /// The X the source permanent was cast with (CR 107.3m): ravenous's "if X is 5 or more".
@@ -39,6 +41,8 @@ pub enum Value {
     Count(Box<Selector>),
     /// Life total of the player a selector picks out.
     LifeTotal(Box<Selector>),
+    /// Lowest life total among the selected players; i32::MAX for an empty set.
+    LeastLifeTotal(Box<Selector>),
     /// Counters of one kind on the objects a selector picks out.
     Counters(Box<Selector>, CounterKind),
     /// A characteristic of an object, read through the layer system.
@@ -59,6 +63,8 @@ pub enum Value {
     GreatestPower(Box<Selector>),
     GreatestToughness(Box<Selector>),
     GreatestManaValue(Box<Selector>),
+    /// Largest number of selected objects owned by any one player; zero for none.
+    GreatestOwnedCount(Box<Selector>),
     /// How many card types there are among the objects a selector picks out (delirium).
     CardTypesAmong(Box<Selector>),
     /// CR 702.40a — how many spells were cast before the source spell this turn (storm).
@@ -97,8 +103,14 @@ pub enum Value {
     /// The most spells any one of these players has cast this turn ("if an opponent cast
     /// three or more spells this turn").
     MostSpellsCastThisTurn(Box<Selector>),
+    /// The most poison counters held by any one selected player, rather than
+    /// their combined total ("an opponent has three or more poison counters").
+    MostPoisonCounters(Box<Selector>),
     /// How many cards these players have drawn this turn.
     CardsDrawnThisTurn(Box<Selector>),
+    /// How many of these players were dealt combat damage this turn ("the number of
+    /// opponents that were dealt combat damage this turn").
+    CombatDamagedThisTurn(Box<Selector>),
     /// A number the controller announces on resolution, within bounds.
     ChosenByController {
         min: Box<Value>,

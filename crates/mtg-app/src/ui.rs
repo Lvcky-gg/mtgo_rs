@@ -35,8 +35,12 @@ const ATTACK: Color32 = Color32::from_rgb(220, 90, 80);
 /// A card image on the board, upright. Scryfall's images are 488×680.
 const ART_SIZE: Vec2 = Vec2::new(120.0, 120.0 * 680.0 / 488.0);
 
-/// A card in hand: the same size as on the board, so a card does not change size as it is played.
-const HAND_CARD: Vec2 = ART_SIZE;
+/// A card in hand: the size of a card on your own side of the board at full size, so a card
+/// does not change size as it is played.
+const HAND_CARD: Vec2 = Vec2::new(ART_SIZE.x * MY_BOARD, ART_SIZE.y * MY_BOARD);
+/// Your own permanents are drawn this much larger than an opponent's: they are the ones you
+/// read and click most.
+const MY_BOARD: f32 = 1.3;
 const HAND_GAP: f32 = 8.0;
 /// egui's "small" text size, which the board panels use.
 const SMALL_TEXT: f32 = 10.0;
@@ -614,68 +618,112 @@ impl GuiApp {
             });
             usize::from(!others.is_empty()) + usize::from(!lands.is_empty())
         };
-        let row_count = board.opponents.iter().map(rows).sum::<usize>() + rows(&board.mine);
+        // Rows down the screen, in opponent-sized rows: yours count larger, and seats side by
+        // side share the taller one's height.
+        let rows = |side: &board::Side| rows(side) as f32;
+        let mine = rows(&board.mine) * MY_BOARD;
+        let (row_count, panels) = match board.opponents.as_slice() {
+            [left, across, right] => (rows(left).max(rows(across)) + mine.max(rows(right)), 2),
+            [left, right] => (rows(left).max(rows(right)) + mine, 2),
+            opponents => (
+                opponents.iter().map(rows).sum::<f32>() + mine,
+                opponents.len() + 1,
+            ),
+        };
         let stack_height = if board.stack.is_empty() {
             36.0
         } else {
             ART_SIZE.y * 0.7 + 56.0
         };
-        let estimate =
-            76.0 * (board.opponents.len() + 1) as f32 + row_count as f32 * 22.0 + stack_height;
+        let estimate = 76.0 * panels as f32 + row_count.ceil() * 22.0 + stack_height;
         // The chrome measured last frame is exact for an unchanged board; the estimate covers
         // the first frame. Taking the larger keeps a growing board from overflowing for a frame.
         let headers = self.board_chrome.map_or(estimate, |m| m.max(estimate));
-        let per_row = (ui.available_height() - headers) / row_count.max(1) as f32;
+        let per_row = (ui.available_height() - headers) / row_count.max(1.0);
         self.board_scale = self
             .board_zoom
             .unwrap_or_else(|| (per_row / (ART_SIZE.y + 10.0)).clamp(0.45, 1.0));
-        let card_rows = row_count as f32 * ART_SIZE.y * self.board_scale;
+        let card_rows = row_count * ART_SIZE.y * self.board_scale;
 
-        let output = egui::ScrollArea::vertical().show(ui, |ui| {
-            for side in &board.opponents {
-                self.draw_side_panel(ui, view, side);
+        // Seated as at a table, in turn order going left: across from a single opponent; in a
+        // pod, the next player at the top left, then across at the top right, and the player
+        // to the right beside you, with the stack in the middle of the table.
+        let output = egui::ScrollArea::vertical().show(ui, |ui| match board.opponents.as_slice() {
+            [left, across, right] => {
+                self.draw_seats(ui, view, left, across);
                 ui.add_space(10.0);
+                self.draw_stack(ui, view, board);
+                ui.add_space(10.0);
+                self.draw_seats(ui, view, &board.mine, right);
             }
-
-            if board.stack.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("STACK").size(10.0).color(crate::theme::MUTED));
-                    ui.label(
-                        RichText::new("No spells or abilities waiting to resolve")
-                            .small()
-                            .color(crate::theme::MUTED),
-                    );
-                });
-            } else {
-                crate::theme::surface().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                RichText::new(format!("Stack · {}", board.stack.len())).strong(),
-                            );
-                            ui.label(
-                                RichText::new("First card resolves next")
-                                    .small()
-                                    .color(crate::theme::MUTED),
-                            );
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            let scale = std::mem::replace(&mut self.board_scale, 0.7);
-                            for id in board.stack.iter().rev() {
-                                let response = self.draw_card(ui, view, *id, false);
-                                if board::object(view, *id).is_some_and(|o| o.is_ability) {
-                                    tag(ui.painter(), response.rect, "ability", ACCENT);
-                                }
-                            }
-                            self.board_scale = scale;
-                        });
-                    });
-                });
+            [left, right] => {
+                self.draw_seats(ui, view, left, right);
+                ui.add_space(10.0);
+                self.draw_stack(ui, view, board);
+                ui.add_space(10.0);
+                self.draw_side_panel(ui, view, &board.mine);
             }
-            ui.add_space(10.0);
-            self.draw_side_panel(ui, view, &board.mine);
+            opponents => {
+                for side in opponents {
+                    self.draw_side_panel(ui, view, side);
+                    ui.add_space(10.0);
+                }
+                self.draw_stack(ui, view, board);
+                ui.add_space(10.0);
+                self.draw_side_panel(ui, view, &board.mine);
+            }
         });
         self.board_chrome = Some((output.content_size.y - card_rows).max(0.0));
+    }
+
+    /// Two seats side by side, each half the table's width.
+    fn draw_seats(
+        &mut self,
+        ui: &mut Ui,
+        view: &PlayerView,
+        left: &board::Side,
+        right: &board::Side,
+    ) {
+        ui.columns(2, |columns| {
+            self.draw_side_panel(&mut columns[0], view, left);
+            self.draw_side_panel(&mut columns[1], view, right);
+        });
+    }
+
+    fn draw_stack(&mut self, ui: &mut Ui, view: &PlayerView, board: &Board) {
+        if board.stack.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("STACK").size(10.0).color(crate::theme::MUTED));
+                ui.label(
+                    RichText::new("No spells or abilities waiting to resolve")
+                        .small()
+                        .color(crate::theme::MUTED),
+                );
+            });
+        } else {
+            crate::theme::surface().show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(format!("Stack · {}", board.stack.len())).strong());
+                        ui.label(
+                            RichText::new("First card resolves next")
+                                .small()
+                                .color(crate::theme::MUTED),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        let scale = std::mem::replace(&mut self.board_scale, 0.7);
+                        for id in board.stack.iter().rev() {
+                            let response = self.draw_card(ui, view, *id, false);
+                            if board::object(view, *id).is_some_and(|o| o.is_ability) {
+                                tag(ui.painter(), response.rect, "ability", ACCENT);
+                            }
+                        }
+                        self.board_scale = scale;
+                    });
+                });
+            });
+        }
     }
 
     fn draw_side_panel(&mut self, ui: &mut Ui, view: &PlayerView, side: &board::Side) {
@@ -695,7 +743,12 @@ impl GuiApp {
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.set_min_width(ui.available_width());
+                    let scale = self.board_scale;
+                    if side.player == view.viewer {
+                        self.board_scale *= MY_BOARD;
+                    }
                     self.draw_side(ui, view, side);
+                    self.board_scale = scale;
                 });
             });
     }
@@ -711,9 +764,8 @@ impl GuiApp {
         let command: Vec<ObjectId> = view
             .visible
             .values()
-            .filter(|o| {
-                o.zone.zone == mtg_core::Zone::Command && o.zone.player == Some(side.player)
-            })
+            // The command zone is shared (no zone owner); a card there is controlled by its owner.
+            .filter(|o| o.zone.zone == mtg_core::Zone::Command && o.controller == side.player)
             .map(|o| o.id)
             .collect();
         ui.horizontal_wrapped(|ui| {
@@ -779,10 +831,18 @@ impl GuiApp {
                 self.zone_view = Some((side.player, mtg_core::Zone::Library));
             }
             // Commander damage, the other way to lose a Commander game: 21 from one commander.
-            for n in side.commander_damage.values() {
-                let color = if *n >= 15 { ATTACK } else { TAPPED_EDGE };
-                ui.label(RichText::new(format!("commander damage {n}/21")).color(color))
+            for (label, damage) in [
+                ("commander", &side.commander_damage),
+                ("partner commander", &side.partner_commander_damage),
+            ] {
+                for (owner, n) in damage {
+                    let color = if *n >= 15 { ATTACK } else { TAPPED_EDGE };
+                    ui.label(
+                        RichText::new(format!("Player {} {label} damage {n}/21", owner.0 + 1))
+                            .color(color),
+                    )
                     .on_hover_text("21 combat damage from a single commander loses the game");
+                }
             }
             // Graveyard and exile open a window listing the cards.
             let available = match self.current.as_ref().map(|q| &q.choice.kind) {
@@ -903,7 +963,8 @@ impl GuiApp {
                     let tapped = board::object(view, *id).is_some_and(|object| object.tapped);
                     (if tapped { ART_SIZE.y } else { ART_SIZE.x }) * self.board_scale
                 })
-                .fold(166.0_f32, f32::max);
+                // A text panel is 150 wide at full size, plus its margin and edge.
+                .fold(166.0 * self.board_scale.max(0.75), f32::max);
             let gap = ui.spacing().item_spacing.x;
             let columns = ((ui.available_width() + gap) / (width + gap))
                 .floor()
@@ -1332,14 +1393,6 @@ impl GuiApp {
 
         let Some(i) = hovered else { return };
         let id = hand[i];
-        if let Some(text) = board::object(view, id)
-            .and_then(|object| self.texts.object_text(object))
-            .cloned()
-        {
-            response
-                .clone()
-                .on_hover_ui(|ui| self.card_details(ui, &text));
-        }
         let playable = plays.get(&id).cloned();
 
         // Enlarged on a foreground layer so it may rise out of the panel over the board, and
@@ -1357,6 +1410,43 @@ impl GuiApp {
             zoomed,
             playable.is_some() || offered(&id),
         );
+        // Its text in a panel beside it, not a tooltip at the pointer: down at the hand, a
+        // tooltip covered the enlarged card or fell off the bottom of the window.
+        if let Some(text) = board::object(view, id)
+            .and_then(|object| self.texts.object_text(object))
+            .cloned()
+        {
+            const TEXT_PANEL: f32 = 320.0;
+            // Beside the card, right or left; in a narrow window, above it.
+            let (pivot, at) = if zoomed.right() + 8.0 + TEXT_PANEL <= screen.right() {
+                (
+                    egui::Align2::LEFT_BOTTOM,
+                    zoomed.right_bottom() + Vec2::new(8.0, 0.0),
+                )
+            } else if zoomed.left() - 8.0 - TEXT_PANEL >= screen.left() {
+                (
+                    egui::Align2::RIGHT_BOTTOM,
+                    zoomed.left_bottom() - Vec2::new(8.0, 0.0),
+                )
+            } else {
+                let left = zoomed
+                    .left()
+                    .min(screen.right() - TEXT_PANEL)
+                    .max(screen.left());
+                (
+                    egui::Align2::LEFT_BOTTOM,
+                    egui::pos2(left, zoomed.top() - 8.0),
+                )
+            };
+            egui::Area::new(ui.id().with("hand-zoom-text"))
+                .order(egui::Order::Foreground)
+                .pivot(pivot)
+                .fixed_pos(at)
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    crate::theme::surface().show(ui, |ui| self.card_text(ui, &text));
+                });
+        }
 
         if let Some((_, max)) = &choosing
             && offered(&id)
@@ -1584,44 +1674,51 @@ impl GuiApp {
         } else {
             CARD_EDGE
         };
+        // Without art, the card is a text panel, sized with the board like an image would be.
+        let scale = self.board_scale.max(0.75);
+        let text_size = SMALL_TEXT * scale;
         let frame = egui::Frame::new()
             .fill(CARD_FILL)
             .stroke(Stroke::new(if actionable { 2.5 } else { 1.0 }, edge))
             .corner_radius(4.0)
             .inner_margin(6.0)
             .show(ui, |ui| {
-                ui.set_width(150.0);
+                ui.set_width(150.0 * scale);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         let name = text
                             .as_ref()
                             .map(|t| t.name.clone())
                             .unwrap_or_else(|| "(hidden)".into());
-                        ui.label(RichText::new(name).strong().small());
+                        ui.label(RichText::new(name).strong().size(text_size));
                         if let Some(t) = &text
                             && !t.cost.is_empty()
                         {
                             let weak = ui.visuals().weak_text_color();
-                            self.mana_label(ui, &t.cost, SMALL_TEXT, weak);
+                            self.mana_label(ui, &t.cost, text_size, weak);
                         }
                     });
 
                     if let Some(t) = &text {
-                        ui.label(RichText::new(&t.type_line).weak().small());
+                        ui.label(RichText::new(&t.type_line).weak().size(text_size));
                         if let Some(pt) = &t.power_toughness {
-                            ui.label(RichText::new(pt).small());
+                            ui.label(RichText::new(pt).size(text_size));
                         }
                         if let Some(rules) = &t.rules {
                             // Truncated on the card, readable in full on hover: a board full of
                             // paragraphs is unreadable, but the text still has to be reachable.
                             let weak = ui.visuals().weak_text_color();
-                            self.mana_label(ui, &mana_text::truncate(rules, 70), SMALL_TEXT, weak)
+                            self.mana_label(ui, &mana_text::truncate(rules, 70), text_size, weak)
                                 .on_hover_ui(|ui| self.card_details(ui, t));
                         }
                     }
 
                     if !notes.is_empty() {
-                        ui.label(RichText::new(notes.join(" · ")).color(TAPPED_EDGE).small());
+                        ui.label(
+                            RichText::new(notes.join(" · "))
+                                .color(TAPPED_EDGE)
+                                .size(text_size),
+                        );
                     }
                 });
             });

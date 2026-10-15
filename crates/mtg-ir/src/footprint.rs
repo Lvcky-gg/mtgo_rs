@@ -225,6 +225,8 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             Footprint::unanalysable()
         }
         Effect::Nothing => Footprint::default(),
+        Effect::FreezeValues { effect } => analyse(effect, r),
+        Effect::ForEachExiledWith { .. } => Footprint::unanalysable(),
         Effect::Ascend => {
             Footprint::reading(Resource::ObjectClass).with(Footprint::writing(Resource::TurnState))
         }
@@ -240,8 +242,19 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         | Effect::Reflexive { .. }
         | Effect::Choose { .. }
         | Effect::ChoosePlayer { .. }
+        | Effect::ChooseRecipient { .. }
         | Effect::RepeatMay { .. }
         | Effect::ExileUntilRepeatedName { .. }
+        | Effect::ExileUntilNamed { .. }
+        | Effect::GrantEncore { .. }
+        | Effect::ExchangeOrSacrifice { .. }
+        | Effect::ShuffleInAndRevealSelfName
+        | Effect::SearchExileMayCast { .. }
+        | Effect::ReanimateAttach { .. }
+        | Effect::PersistMana { .. }
+        | Effect::BounceChain { .. }
+        | Effect::SacrificeReanimated
+        | Effect::SearchAndSplit { .. }
         | Effect::FlipCoin { .. }
         | Effect::ExileSelfWithCounters { .. }
         | Effect::RollDie { .. }
@@ -384,6 +397,18 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
         }
 
         Effect::CopyCounters { from, to } => objects_read(from, r).with(objects_write(to, r)),
+        Effect::AddCounterKinds { what, counters } => {
+            let mut f = objects_write(what, r);
+            for (kind, amount) in counters {
+                if let Some(ids) = r.resolve_objects(what) {
+                    for id in ids {
+                        f.writes.insert(Resource::Counters(id, *kind));
+                    }
+                }
+                f.merge(value_footprint(amount, r));
+            }
+            f
+        }
         Effect::AddCounters { what, kind, amount }
         | Effect::RemoveCounters { what, kind, amount } => {
             let mut f = objects_write(what, r);
@@ -498,6 +523,7 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
         | C::YouAreAttacked
         | C::OpponentLostLifeThisTurn
         | C::YouGainedLifeThisTurn
+        | C::YouLostLifeThisTurn
         | C::CastFor(_)
         | C::Renowned
         | C::YouAttackedThisTurn
@@ -511,6 +537,9 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
         | C::NoSpellsLastTurn
         | C::PlayerCastTwoLastTurn => Footprint::default(),
         C::HasCityBlessing => Footprint::reading(Resource::TurnState),
+        C::CastColorThisTurn { .. } | C::YourEarlyTurn(_) => {
+            Footprint::reading(Resource::TurnState)
+        }
         // Only read while the spell's cost is determined (CR 601.2f).
         C::TargetsMatching(_) => Footprint::default(),
         C::CountAtLeast { what, at_least } => {
@@ -523,6 +552,7 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
             value_footprint(lhs, r).with(value_footprint(rhs, r))
         }
         C::Exists(s) => selector_read(s, r),
+        C::AnyMatches { .. } => Footprint::unanalysable(),
         C::Not(inner) => condition_footprint(inner, r),
         C::And(cs) | C::Or(cs) => cs.iter().fold(Footprint::default(), |acc, c| {
             acc.with(condition_footprint(c, r))
@@ -538,6 +568,7 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         Value::X
         | Value::EventAmount
         | Value::ColorsSpent
+        | Value::ManaSpent
         | Value::TimesKicked
         | Value::ManaSpentOfColor(_) => Footprint::default(),
         // Fixed as the spell was cast.
@@ -559,14 +590,19 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         | Value::BasicLandTypesAmong(s)
         | Value::SpellsCastThisTurn(s)
         | Value::MostSpellsCastThisTurn(s)
-        | Value::CardsDrawnThisTurn(s) => selector_read(s, r),
+        | Value::CardsDrawnThisTurn(s)
+        | Value::CombatDamagedThisTurn(s) => selector_read(s, r),
+        // Poison changes can eliminate opponents and change the selected set.
+        // Keep ordering conservative, as for effects that give poison.
+        Value::MostPoisonCounters(_) => Footprint::unanalysable(),
         Value::Power(s)
         | Value::Toughness(s)
         | Value::LeastToughness(s)
         | Value::GreatestPower(s)
         | Value::GreatestToughness(s)
-        | Value::GreatestManaValue(s) => objects_read(s, r),
-        Value::LifeTotal(s) => players_read(s, r, Resource::Life),
+        | Value::GreatestManaValue(s)
+        | Value::GreatestOwnedCount(s) => objects_read(s, r),
+        Value::LifeTotal(s) | Value::LeastLifeTotal(s) => players_read(s, r, Resource::Life),
         Value::Counters(s, kind) => {
             let mut f = objects_read(s, r);
             if let Some(ids) = r.resolve_objects(s) {
@@ -657,6 +693,7 @@ fn life_change(who: &Selector, amount: &Value, r: &dyn SelectorResolver, up: boo
         Value::X
         | Value::EventAmount
         | Value::ColorsSpent
+        | Value::ManaSpent
         | Value::TimesKicked
         | Value::ManaSpentOfColor(_) => Some(up),
         _ => None,

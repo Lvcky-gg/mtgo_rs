@@ -148,6 +148,9 @@ pub struct Payment {
     /// Sources to activate, and which colour each should make. `None` means
     /// colorless, or that the source has no choice to make.
     pub activate: Vec<(ObjectId, AbilityId, Option<Color>)>,
+    /// For a source making mana "in any combination" of colors, the color of each of its
+    /// units this payment spends, in order. What it makes beyond them is its first color.
+    pub splits: Vec<(ObjectId, AbilityId, Vec<Color>)>,
     /// Mana to remove from the pool once the activations have happened, by colour
     /// slot. This covers both mana that was already floating and mana the
     /// activations produce, because produced mana goes to the pool first — there is
@@ -558,6 +561,10 @@ fn source_units(source: &ManaSource) -> usize {
             ManaOutput::Repeated {
                 amount: mtg_ir::Value::Fixed(n),
                 ..
+            }
+            | ManaOutput::Combination {
+                amount: mtg_ir::Value::Fixed(n),
+                ..
             } => (*n).max(0) as usize,
             _ => 1,
         })
@@ -821,6 +828,21 @@ fn charge(payment: &mut Payment, unit: &Unit, sources: &[ManaSource], color: Opt
         {
             payment.activate.push((s.object, s.ability, color));
         }
+        // Each unit of an "any combination" source is its own color.
+        if let Some(color) = color
+            && s.outputs
+                .iter()
+                .any(|o| matches!(o, ManaOutput::Combination { .. }))
+        {
+            match payment
+                .splits
+                .iter_mut()
+                .find(|(o, a, _)| *o == s.object && *a == s.ability)
+            {
+                Some((_, _, colors)) => colors.push(color),
+                None => payment.splits.push((s.object, s.ability, vec![color])),
+            }
+        }
     }
 }
 
@@ -915,6 +937,10 @@ fn build_units(sources: &[ManaSource], pool: [u16; 6]) -> Vec<Unit> {
                 // evaluation, so it contributes one unit conservatively. Better to
                 // understate available mana than to offer an unpayable spell.
                 ManaOutput::Repeated {
+                    amount: mtg_ir::Value::Fixed(n),
+                    ..
+                }
+                | ManaOutput::Combination {
                     amount: mtg_ir::Value::Fixed(n),
                     ..
                 } => (*n).max(0) as usize,
@@ -1086,7 +1112,12 @@ pub fn mana_sources(
                     }
                 )
             });
-            let understood = cost.mana.symbols.is_empty()
+            // "{0}: Add …" costs nothing.
+            let understood = cost
+                .mana
+                .symbols
+                .iter()
+                .all(|s| *s == mtg_core::ManaSymbol::Generic(0))
                 && cost.additional.len() == usize::from(taps) + usize::from(sacrifices);
             if !understood {
                 continue;
@@ -1312,6 +1343,27 @@ pub(crate) fn counted(
     out: ManaOutput,
 ) -> ManaOutput {
     match out {
+        ManaOutput::Combination { amount, colors }
+            if !matches!(amount, mtg_ir::Value::Fixed(_)) =>
+        {
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source,
+                controller: player,
+                targets: &[],
+                target_legal: &[],
+                x,
+                bindings: crate::empty_bindings(),
+            };
+            let n = crate::eval::value(&ctx, &amount).unwrap_or(0).max(0);
+            ManaOutput::Combination {
+                amount: mtg_ir::Value::Fixed(n),
+                colors,
+            }
+        }
         ManaOutput::Repeated { amount, output } if !matches!(amount, mtg_ir::Value::Fixed(_)) => {
             let chars = crate::eval::ComputedChars(cards);
             let ctx = crate::eval::Ctx {
@@ -1458,6 +1510,27 @@ pub(crate) fn concrete_output(
             amount: amount.clone(),
             output: Box::new(concrete_output(state, cards, source, player, output)),
         },
+        ManaOutput::Conditional {
+            cond,
+            then,
+            otherwise,
+        } => {
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source,
+                controller: player,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            let holds = crate::eval::condition(&ctx, cond).unwrap_or(false);
+            let chosen = if holds { then } else { otherwise };
+            concrete_output(state, cards, source, player, chosen)
+        }
         other => other.clone(),
     }
 }
@@ -1566,16 +1639,20 @@ pub fn commander_identity(
     cards: &dyn PrintedCards,
     player: PlayerId,
 ) -> Vec<Color> {
-    let Some(card) = state.commander.commanders.get(&player) else {
-        return Vec::new();
-    };
     let mut colors: Vec<Color> = Vec::new();
     let mut add = |c: Color| {
         if !colors.contains(&c) {
             colors.push(c);
         }
     };
-    for face in (0..=1).filter_map(|f| cards.face(*card, f)) {
+    for face in state
+        .commander
+        .commanders
+        .get(&player)
+        .into_iter()
+        .chain(state.commander.partners.get(&player))
+        .flat_map(|card| (0..=1).filter_map(move |f| cards.face(*card, f)))
+    {
         for symbol in &face.mana_cost.symbols {
             symbol_colors(symbol, &mut add);
         }

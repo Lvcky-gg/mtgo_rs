@@ -16,7 +16,7 @@ pub fn normalise(text: &str, name: &str) -> String {
     let mut s = strip_reminder(text);
     if !name.is_empty() {
         s = s.replace(name, "~");
-        if let Some((short, _)) = name.split_once(", ")
+        if let Some((short, _)) = name.split_once(", ").or_else(|| name.split_once(" the "))
             && short.len() >= 3
         {
             s = s.replace(short, "~");
@@ -157,6 +157,7 @@ pub fn energy(s: &str) -> Option<(i32, &str)> {
 pub fn keyword(word: &str) -> Option<Keyword> {
     Some(match word {
         "flying" => Keyword::Flying,
+        "phasing" => Keyword::Phasing,
         "reach" => Keyword::Reach,
         "first strike" => Keyword::FirstStrike,
         "double strike" => Keyword::DoubleStrike,
@@ -202,7 +203,15 @@ pub fn keyword(word: &str) -> Option<Keyword> {
 
 /// A keyword at the start of `s`, longest spelling first.
 pub fn keyword_prefix(s: &str) -> Option<(Keyword, &str)> {
+    if let Some(r) = s.strip_prefix("toxic ") {
+        let (n, rest) = number(r)?;
+        if (1..=255).contains(&n) {
+            return Some((Keyword::Toxic(n as u8), rest));
+        }
+        return None;
+    }
     const ALL: &[&str] = &[
+        "split second",
         "horsemanship",
         "changeling",
         "wither",
@@ -321,6 +330,7 @@ pub fn strip_ability_word(line: &str) -> &str {
         "adamant",
         "addendum",
         "alliance",
+        "avoidance",
         "battalion",
         "bloodrush",
         "celebration",
@@ -541,10 +551,33 @@ const PLAIN_COUNTERS: &[&str] = &[
     // Appended: indices are the counters' identities.
     "lore",
     "level",
+    "burden",
 ];
 
 /// "+1/+1 counter", "-1/-1 counter", "charge counter", "loyalty counter".
 pub fn counter(s: &str) -> Option<(CounterKind, &str)> {
+    for (name, keyword) in [
+        ("flying", Keyword::Flying),
+        ("first strike", Keyword::FirstStrike),
+        ("double strike", Keyword::DoubleStrike),
+        ("deathtouch", Keyword::Deathtouch),
+        ("lifelink", Keyword::Lifelink),
+        ("hexproof", Keyword::Hexproof),
+        ("indestructible", Keyword::Indestructible),
+        ("menace", Keyword::Menace),
+        ("reach", Keyword::Reach),
+        ("trample", Keyword::Trample),
+        ("vigilance", Keyword::Vigilance),
+        ("haste", Keyword::Haste),
+        ("shadow", Keyword::Shadow),
+    ] {
+        if let Some(rest) = s
+            .strip_prefix(name)
+            .and_then(|r| r.strip_prefix(" counter"))
+        {
+            return Some((CounterKind::Keyword(keyword), rest));
+        }
+    }
     if let Some(r) = s.strip_prefix("+1/+1 counter") {
         return Some((CounterKind::PlusOnePlusOne, r));
     }
@@ -615,5 +648,19 @@ mod tests {
             keyword_list("first strike and trample.").map(|(k, _)| k),
             Some(vec![Keyword::FirstStrike, Keyword::Trample])
         );
+        assert_eq!(
+            keyword_list("flying and toxic 2 until end of turn"),
+            Some((
+                vec![Keyword::Flying, Keyword::Toxic(2)],
+                " until end of turn"
+            ))
+        );
+        assert_eq!(
+            keyword_prefix("toxic 255."),
+            Some((Keyword::Toxic(255), "."))
+        );
+        for invalid in ["toxic", "toxic 0", "toxic -1", "toxic 256", "toxic 2foo"] {
+            assert_eq!(keyword_prefix(invalid), None, "{invalid}");
+        }
     }
 }

@@ -19,12 +19,14 @@ use crate::state::GameState;
 /// Append an event to the log and apply it.
 pub fn apply(state: &mut GameState, cause: Cause, event: Event, log: &mut Vec<StampedEvent>) {
     let shuffles = shuffled_instead(state, &event);
+    let void = void_counter(state, &event);
     let event = replace(state, event);
     let at = state.bump();
     let id = state.next_event.advance();
     perform(state, &event);
     settle_controller(state, cause, &event);
     record_commander_damage(state, cause, &event);
+    record_combat_damage(state, cause, &event);
     log.push(StampedEvent {
         id,
         at,
@@ -34,6 +36,39 @@ pub fn apply(state: &mut GameState, cause: Cause, event: Event, log: &mut Vec<St
     if let Some(player) = shuffles {
         apply(state, cause, Event::Shuffled { player }, log);
     }
+    if let Some((object, kind)) = void {
+        apply(
+            state,
+            cause,
+            Event::CountersChanged {
+                object,
+                kind,
+                delta: 1,
+            },
+            log,
+        );
+    }
+}
+
+/// A card that would go to a graveyard whose owner's cards are exiled instead
+/// (`GameState::graveyard_exiled`): whether it is, and the counter it gets in exile.
+fn graveyard_exiled(state: &GameState, event: &Event) -> Option<Option<mtg_core::CounterKind>> {
+    let Event::ZoneChange { object, to, .. } = event else {
+        return None;
+    };
+    let o = state.objects.get(object)?;
+    if to.zone != Zone::Graveyard || o.is_token || o.is_spell_copy {
+        return None;
+    }
+    state.graveyard_exiled.get(&o.owner).copied()
+}
+
+/// The new object and counter for "instead exile it with a void counter on it".
+fn void_counter(state: &GameState, event: &Event) -> Option<(ObjectId, mtg_core::CounterKind)> {
+    let Event::ZoneChange { new_object, .. } = event else {
+        return None;
+    };
+    Some((*new_object, graveyard_exiled(state, event)??))
 }
 
 /// Who controls an object that just changed zones: the player casting it, for a card put
@@ -51,6 +86,16 @@ fn settle_controller(state: &mut GameState, cause: Cause, event: &Event) {
         (Zone::Stack, Cause::PlayerAction(caster)) => obj.controller = caster,
         (Zone::Stack | Zone::Battlefield, _) => {}
         _ => obj.controller = obj.owner,
+    }
+}
+
+/// Players dealt combat damage this turn (Tymna the Weaver).
+fn record_combat_damage(state: &mut GameState, cause: Cause, event: &Event) {
+    if cause == Cause::Combat
+        && let Event::DamageDealtToPlayer { player, amount, .. } = event
+        && *amount > 0
+    {
+        state.combat_damaged_this_turn.insert(*player);
     }
 }
 
@@ -97,13 +142,16 @@ pub fn apply_simultaneous(
         })
         .collect();
     let mut shuffles = Vec::new();
+    let mut voids = Vec::new();
     for event in events {
         shuffles.extend(shuffled_instead(state, &event));
+        voids.extend(void_counter(state, &event));
         let event = replace(state, event);
         let id = state.next_event.advance();
         perform(state, &event);
         settle_controller(state, cause, &event);
         record_commander_damage(state, cause, &event);
+        record_combat_damage(state, cause, &event);
         log.push(StampedEvent {
             id,
             at,
@@ -116,6 +164,18 @@ pub fn apply_simultaneous(
         if let Some(last) = state.last_known.get_mut(&object) {
             last.attachments_on_exit = attachments;
         }
+    }
+    for (object, kind) in voids {
+        apply(
+            state,
+            cause,
+            Event::CountersChanged {
+                object,
+                kind,
+                delta: 1,
+            },
+            log,
+        );
     }
     for player in shuffles {
         apply(state, cause, Event::Shuffled { player }, log);
@@ -143,6 +203,23 @@ fn replace(state: &GameState, event: Event) -> Event {
             || state.exile_if_dies_now.contains(&object))
     {
         let _ = index;
+        return Event::ZoneChange {
+            object,
+            new_object,
+            from,
+            to: ZoneRef::shared(Zone::Exile),
+            index: None,
+        };
+    }
+    // "If a card would be put into an opponent's graveyard from anywhere, instead exile it."
+    if let Event::ZoneChange {
+        object,
+        new_object,
+        from,
+        ..
+    } = event
+        && graveyard_exiled(state, &event).is_some()
+    {
         return Event::ZoneChange {
             object,
             new_object,
@@ -290,7 +367,12 @@ fn record_commander_damage(state: &mut GameState, cause: Cause, event: &Event) {
     };
     let (owner, card) = (obj.owner, obj.card);
     if state.commander.is_commander(owner, card) {
-        *state.commander.damage.entry((*player, owner)).or_insert(0) += amount;
+        let damage = if state.commander.partners.get(&owner) == Some(&card) {
+            &mut state.commander.partner_damage
+        } else {
+            &mut state.commander.damage
+        };
+        *damage.entry((*player, owner)).or_insert(0) += amount;
     }
 }
 
@@ -354,6 +436,7 @@ fn perform(state: &mut GameState, event: &Event) {
         Event::Cycled { .. }
         | Event::Sacrificed { .. }
         | Event::Scried { .. }
+        | Event::Proliferated { .. }
         | Event::CoinFlipped { .. }
         | Event::DieRolled { .. }
         | Event::Clashed { .. } => {}
@@ -548,6 +631,14 @@ fn perform(state: &mut GameState, event: &Event) {
                 if *e <= 0 {
                     o.counters.remove(kind);
                 }
+                if let mtg_core::CounterKind::Keyword(keyword) = kind {
+                    if !o.counters.contains_key(kind) {
+                        o.keyword_counter_timestamps.remove(keyword);
+                    } else if *delta > 0 {
+                        o.keyword_counter_timestamps
+                            .insert(*keyword, state.generation);
+                    }
+                }
             }
         }
 
@@ -561,9 +652,23 @@ fn perform(state: &mut GameState, event: &Event) {
             }
         }
 
-        Event::PhasedOut { object, out } => {
+        Event::PhasedOut {
+            object,
+            out,
+            with,
+            under,
+        } => {
             if let Some(o) = state.objects.get_mut(object) {
                 o.phased_out = *out;
+                o.phased_with = if *out { *with } else { None };
+                o.phased_under = out.then_some(under.unwrap_or(o.controller));
+            }
+            if *out {
+                state.combat.attackers.remove(object);
+                state.combat.blocks.remove(object);
+                for blockers in state.combat.blocks.values_mut() {
+                    blockers.retain(|blocker| blocker != object);
+                }
             }
         }
 
@@ -683,11 +788,24 @@ fn perform(state: &mut GameState, event: &Event) {
             }
         }
 
-        Event::StepEnded { .. } => {
+        Event::StepEnded { step, .. } => {
             state.restricted_mana.clear();
-            // CR 500.4: mana pools empty as a step or phase ends.
-            for p in state.players.values_mut() {
-                p.mana.clear();
+            // CR 500.4: mana pools empty as a step or phase ends — except mana that is
+            // kept until end of turn (Birgi), as much of it as is still there.
+            if *step == mtg_core::Step::Cleanup {
+                state.persistent_mana.clear();
+            }
+            for (id, p) in state.players.iter_mut() {
+                let kept = state.persistent_mana.get_mut(id);
+                match kept {
+                    Some(kept) => {
+                        for (slot, n) in kept.iter_mut().enumerate() {
+                            *n = (*n).min(p.mana.amounts[slot]);
+                        }
+                        p.mana.amounts = *kept;
+                    }
+                    None => p.mana.clear(),
+                }
             }
         }
 
@@ -862,9 +980,13 @@ fn perform(state: &mut GameState, event: &Event) {
             player,
             until_turn,
             cast_only,
+            free,
+            any_mana,
         } => {
             if let Some(o) = state.objects.get_mut(object) {
                 o.may_play = Some((*player, *until_turn, *cast_only));
+                o.may_play_free = *free;
+                o.may_play_any_mana = *any_mana;
             }
         }
         Event::BecameMonarch {
@@ -952,6 +1074,15 @@ fn perform(state: &mut GameState, event: &Event) {
                 o.exile_if_leaves = true;
             }
         }
+        Event::TokenSizeSet {
+            object,
+            power,
+            toughness,
+        } => {
+            if let Some(o) = state.objects.get_mut(object) {
+                o.token_size = Some((*power, *toughness));
+            }
+        }
         Event::BecameCopy { object, card, face } => {
             if let Some(o) = state.objects.get_mut(object) {
                 if o.original.is_none() {
@@ -959,6 +1090,7 @@ fn perform(state: &mut GameState, event: &Event) {
                 }
                 o.card = *card;
                 o.face = *face;
+                o.token_size = None;
             }
         }
         Event::DamageShieldCreated { shield } => {
@@ -1017,9 +1149,15 @@ fn zone_change(
             state.died_this_turn.push(object);
         }
     }
-    // A spell leaving the stack is remembered too: it may have just dealt damage, and
-    // "whenever you're dealt damage" looks at its source after it has resolved.
-    if from.zone == Zone::Stack {
+    // A spell may have just dealt damage. An ability on the stack may also
+    // need a source that changes zones as a cost, including one in a hand or
+    // graveyard (channel, encore, eternalize, scavenge).
+    let ability_source = state.objects.values().any(|o| {
+        o.cast_context
+            .as_ref()
+            .is_some_and(|cast| cast.source == Some(object))
+    });
+    if from.zone != Zone::Battlefield && (from.zone == Zone::Stack || ability_source) {
         state.last_known.insert(object, obj.clone());
     }
 
@@ -1047,9 +1185,14 @@ fn zone_change(
         obj.card = card;
         obj.face = face;
     }
+    obj.token_size = None;
     obj.damage = 0;
     obj.dealt_deathtouch_damage = false;
     obj.counters.clear();
+    obj.keyword_counter_timestamps.clear();
+    obj.phased_out = false;
+    obj.phased_with = None;
+    obj.phased_under = None;
     obj.attached_to = None;
     obj.was_attached_to = None;
     obj.attachments_on_exit.clear();
@@ -1070,6 +1213,8 @@ fn zone_change(
     obj.cast_context = None;
     obj.adventure_player = None;
     obj.may_play = None;
+    obj.may_play_free = false;
+    obj.may_play_any_mana = false;
     obj.cast_later = None;
     obj.exile_if_dies = None;
     obj.attached_player = None;

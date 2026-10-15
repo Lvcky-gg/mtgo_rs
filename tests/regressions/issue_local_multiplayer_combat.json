@@ -13921,6 +13921,9 @@
                 }
               ]
             },
+            "combat_damaged_this_turn": [
+              3
+            ],
             "commander": {
               "casts": {
                 "$map": []
@@ -14595,7 +14598,7 @@
           "undo": []
         }
       },
-      "expected_digest": "2ce735e8cbbb942d94a0e9453295368a5f3f55dc0b5d5ce52d89284a35990553"
+      "expected_digest": "a0f859bfb8ea73068dbfb610d10d5c9975bbe13fd1f79e583f214601da144624"
     }
   ],
   "expected": {
@@ -14619,7 +14622,7 @@
         }
       }
     ],
-    "final_digest": "2ce735e8cbbb942d94a0e9453295368a5f3f55dc0b5d5ce52d89284a35990553",
+    "final_digest": "a0f859bfb8ea73068dbfb610d10d5c9975bbe13fd1f79e583f214601da144624",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -15189,6 +15192,9 @@
               }
             ]
           },
+          "combat_damaged_this_turn": [
+            3
+          ],
           "commander": {
             "casts": {
               "$map": []

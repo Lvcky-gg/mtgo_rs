@@ -332,6 +332,7 @@ pub struct Draft {
     pub main: BTreeMap<u32, u32>,
     pub side: BTreeMap<u32, u32>,
     pub commander: Option<u32>,
+    pub partner: Option<u32>,
     /// Display details for every card in the deck.
     pub cards: BTreeMap<u32, DraftCard>,
     /// Artwork preference for each oracle identity; rules and counts stay oracle based.
@@ -460,6 +461,7 @@ struct DeckContents {
     main: BTreeMap<u32, u32>,
     side: BTreeMap<u32, u32>,
     commander: Option<u32>,
+    partner: Option<u32>,
 }
 
 /// Opening-hand practice, independent from the match engine and saved deck.
@@ -582,10 +584,14 @@ impl Draft {
                         .ok_or_else(|| format!("card #{oracle} has too many copies to edit"))?;
                 }
                 Section::Commander => {
-                    if count != 1 || draft.commander.is_some() {
-                        return Err("the builder currently supports exactly one commander per Commander deck".into());
+                    if count != 1 || draft.partner.is_some() {
+                        return Err("each commander must have exactly one copy, with at most two commanders".into());
                     }
-                    draft.commander = Some(oracle);
+                    if draft.commander.is_none() {
+                        draft.commander = Some(oracle);
+                    } else {
+                        draft.partner = Some(oracle);
+                    }
                 }
             }
         }
@@ -703,8 +709,27 @@ impl Draft {
         if let Some(o) = oracle {
             self.know(store, o);
             self.main.remove(&o);
+            self.side.remove(&o);
         }
         self.commander = oracle;
+        if oracle.is_none() || oracle == self.partner {
+            self.partner = None;
+        }
+        self.refresh_dirty();
+    }
+
+    /// Assign the second commander; legality is checked with the whole deck.
+    pub fn set_partner(&mut self, store: &Store, oracle: Option<u32>) {
+        if self.commander.is_none() || oracle == self.commander || oracle == self.partner {
+            return;
+        }
+        self.remember();
+        if let Some(o) = oracle {
+            self.know(store, o);
+            self.main.remove(&o);
+            self.side.remove(&o);
+        }
+        self.partner = oracle;
         self.refresh_dirty();
     }
 
@@ -715,6 +740,7 @@ impl Draft {
             main: self.main.clone(),
             side: self.side.clone(),
             commander: self.commander,
+            partner: self.partner,
         }
     }
 
@@ -755,6 +781,7 @@ impl Draft {
         self.main = contents.main;
         self.side = contents.side;
         self.commander = contents.commander;
+        self.partner = contents.partner;
         self.refresh_dirty();
     }
 
@@ -835,6 +862,7 @@ impl Draft {
             .main
             .keys()
             .chain(&self.commander)
+            .chain(&self.partner)
             .filter_map(|o| self.cards.get(o))
             .map(|c| c.identity.as_str())
             .collect();
@@ -854,7 +882,12 @@ impl Draft {
         let mut entries: Vec<(u32, u32, Section)> = Vec::new();
         entries.extend(self.main.iter().map(|(o, n)| (*o, *n, Section::Main)));
         entries.extend(self.side.iter().map(|(o, n)| (*o, *n, Section::Sideboard)));
-        entries.extend(self.commander.map(|o| (o, 1, Section::Commander)));
+        entries.extend(
+            self.commander
+                .into_iter()
+                .chain(self.partner)
+                .map(|o| (o, 1, Section::Commander)),
+        );
         self.profile.validate()?;
         let profile_json = serde_json::to_string(&self.profile).map_err(|e| e.to_string())?;
         let printings: Vec<_> = self
@@ -889,7 +922,12 @@ impl Draft {
                 .iter()
                 .map(|(o, n)| (*o, *n, "main"))
                 .chain(self.side.iter().map(|(o, n)| (*o, *n, "sideboard")))
-                .chain(self.commander.map(|o| (o, 1, "commander")))
+                .chain(
+                    self.commander
+                        .into_iter()
+                        .chain(self.partner)
+                        .map(|o| (o, 1, "commander")),
+                )
                 .collect();
             if format == DeckExportFormat::Json {
                 let entries: Vec<_> = entries
@@ -928,6 +966,9 @@ impl Draft {
                 if let Some(c) = self.commander {
                     out.push("Commander".into());
                     out.push(line(&c, &1));
+                    if let Some(partner) = self.partner {
+                        out.push(line(&partner, &1));
+                    }
                     out.push(String::new());
                     out.push("Deck".into());
                 }
@@ -954,12 +995,18 @@ impl Draft {
                     out.push(String::new());
                     out.push("Commander".into());
                     out.push(line(&c, &1));
+                    if let Some(partner) = self.partner {
+                        out.push(line(&partner, &1));
+                    }
                 }
             }
             DeckExportFormat::Mtgo => {
                 if let Some(c) = self.commander {
                     out.push("Commander".into());
                     out.push(line(&c, &1));
+                    if let Some(partner) = self.partner {
+                        out.push(line(&partner, &1));
+                    }
                     out.push(String::new());
                     out.push("Deck".into());
                 }
@@ -976,6 +1023,9 @@ impl Draft {
                 if let Some(c) = self.commander {
                     out.push("Commander".into());
                     out.push(line(&c, &1));
+                    if let Some(partner) = self.partner {
+                        out.push(line(&partner, &1));
+                    }
                     out.push(String::new());
                 }
                 out.push("Deck".into());
@@ -992,6 +1042,9 @@ impl Draft {
                 if let Some(c) = self.commander {
                     out.push("Commander".into());
                     out.push(arch_line(&c, &1, "Commander"));
+                    if let Some(partner) = self.partner {
+                        out.push(arch_line(&partner, &1, "Commander"));
+                    }
                     out.push(String::new());
                 }
                 out.push("Deck".into());
@@ -1041,6 +1094,7 @@ impl Draft {
             main: self.main.iter().map(entry).collect::<Result<_, _>>()?,
             side: self.side.iter().map(entry).collect::<Result<_, _>>()?,
             commander: self.commander.as_ref().map(key).transpose()?,
+            partner: self.partner.as_ref().map(key).transpose()?,
         })
     }
 
@@ -1596,6 +1650,14 @@ impl Builder {
                                                 self.problems = None;
                                                 ui.close();
                                             }
+                                            if self.draft.commander.is_some()
+                                                && ui.button("Set as partner commander").clicked()
+                                            {
+                                                self.draft.set_partner(store, Some(oracle));
+                                                self.format = Format::Commander;
+                                                self.problems = None;
+                                                ui.close();
+                                            }
                                             if ui.button("Set as commander").clicked() {
                                                 self.draft.set_commander(store, Some(oracle));
                                                 self.format = Format::Commander;
@@ -1666,6 +1728,7 @@ impl Builder {
         u64::from(self.draft.main.get(&oracle).copied().unwrap_or(0))
             + u64::from(self.draft.side.get(&oracle).copied().unwrap_or(0))
             + u64::from(self.draft.commander == Some(oracle))
+            + u64::from(self.draft.partner == Some(oracle))
     }
 
     fn refresh_suggestions(&mut self, store: &Store) {
@@ -1700,7 +1763,14 @@ impl Builder {
 
     fn synergy_tags_for_deck(&self, limit: usize) -> Vec<String> {
         let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-        for oracle in self.draft.main.keys().copied().chain(self.draft.commander) {
+        for oracle in self
+            .draft
+            .main
+            .keys()
+            .copied()
+            .chain(self.draft.commander)
+            .chain(self.draft.partner)
+        {
             if let Some(card) = self.draft.cards.get(&oracle) {
                 for token in synergy_tokens(&card.type_line) {
                     *counts.entry(token).or_insert(0) += 2;
@@ -1742,9 +1812,11 @@ impl Builder {
         let colors = if self.format == Format::Commander {
             self.draft
                 .commander
-                .and_then(|o| self.draft.cards.get(&o))
-                .map(|card| card.identity.clone())
-                .unwrap_or_else(|| self.draft.colors())
+                .into_iter()
+                .chain(self.draft.partner)
+                .filter_map(|o| self.draft.cards.get(&o))
+                .map(|card| card.identity.as_str())
+                .collect::<String>()
         } else {
             self.draft.colors()
         };
@@ -1790,9 +1862,7 @@ impl Builder {
         let mut existing = BTreeSet::new();
         existing.extend(self.draft.main.keys().copied());
         existing.extend(self.draft.side.keys().copied());
-        if let Some(commander) = self.draft.commander {
-            existing.insert(commander);
-        }
+        existing.extend(self.draft.commander.into_iter().chain(self.draft.partner));
 
         let mut picks = Vec::new();
         for (oracle, name) in candidates {
@@ -1993,6 +2063,7 @@ impl Builder {
             .chain(self.draft.side.keys())
             .copied()
             .chain(self.draft.commander)
+            .chain(self.draft.partner)
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -2242,8 +2313,21 @@ impl Builder {
 
         let mut changed = false;
         ui.scope(|ui| {
-            if let Some(commander) = self.draft.commander {
-                ui.label(RichText::new("Commander").strong());
+            for (is_partner, commander) in self
+                .draft
+                .commander
+                .map(|c| (false, c))
+                .into_iter()
+                .chain(self.draft.partner.map(|c| (true, c)))
+            {
+                ui.label(
+                    RichText::new(if is_partner {
+                        "Partner commander"
+                    } else {
+                        "Commander"
+                    })
+                    .strong(),
+                );
                 let name = self.draft.name_of(commander).to_string();
                 ui.horizontal(|ui| {
                     self.sidebar_card(ui, store, art, commander, &name, 1);
@@ -2259,7 +2343,11 @@ impl Builder {
                         );
                     }
                     if ui.small_button("✖").on_hover_text("no commander").clicked() {
-                        self.draft.set_commander(store, None);
+                        if is_partner {
+                            self.draft.set_partner(store, None);
+                        } else {
+                            self.draft.set_commander(store, None);
+                        }
                         changed = true;
                     }
                 });
@@ -2373,6 +2461,13 @@ impl Builder {
                     changed = true;
                     ui.close();
                 }
+                if self.draft.commander.is_some() && ui.button("Set as partner commander").clicked()
+                {
+                    self.draft.set_partner(store, Some(oracle));
+                    self.format = Format::Commander;
+                    changed = true;
+                    ui.close();
+                }
                 if ui.button("Set as commander").clicked() {
                     self.draft.set_commander(store, Some(oracle));
                     self.format = Format::Commander;
@@ -2458,6 +2553,7 @@ impl Builder {
             .chain(self.draft.side.keys())
             .copied()
             .chain(self.draft.commander)
+            .chain(self.draft.partner)
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -3666,8 +3762,71 @@ mod tests {
     }
 
     #[test]
+    fn partner_commanders_survive_save_exports_and_undo() {
+        let (mut store, [land, bear, idea]) = store();
+        let mut d = Draft::new("Partners");
+        d.add(&store, land, false);
+        d.add(&store, idea, false);
+        d.set_commander(&store, Some(bear));
+        d.set_partner(&store, Some(idea));
+        assert!(!d.main.contains_key(&idea));
+        assert_eq!(d.partner, Some(idea));
+        d.undo();
+        assert_eq!(d.partner, None);
+        assert_eq!(d.main[&idea], 1);
+        d.redo();
+        assert_eq!(d.partner, Some(idea));
+        let id = d.save(&mut store).unwrap();
+        let loaded = Draft::load(&store, id).unwrap();
+        assert_eq!(
+            loaded
+                .commander
+                .into_iter()
+                .chain(loaded.partner)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([bear, idea])
+        );
+        let spec = crate::decks::deck_spec(Some(&store), crate::decks::DeckId::Stored(id)).unwrap();
+        assert_eq!(spec.commanders().count(), 2);
+        assert_eq!(spec.keys().count(), 3);
+        for oracle in [land, bear, idea] {
+            let card = store.card(oracle).unwrap().unwrap();
+            store
+                .put_card(&card, &[mtg_deck::resolve::normalise(&card.name)])
+                .unwrap();
+        }
+        for format in DeckExportFormat::ALL {
+            let text = d.to_text_with_format(format);
+            crate::decks::import_deck(&mut store, "Imported partners", &text).unwrap();
+            let id = store
+                .deck_list()
+                .unwrap()
+                .into_iter()
+                .find(|(_, n)| n == "Imported partners")
+                .unwrap()
+                .0;
+            let loaded = Draft::load(&store, id).unwrap();
+            assert_eq!(
+                loaded
+                    .commander
+                    .into_iter()
+                    .chain(loaded.partner)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([bear, idea]),
+                "{}",
+                format.label()
+            );
+            assert_eq!(loaded.main, d.main);
+        }
+        d.set_partner(&store, Some(bear));
+        assert_eq!(d.partner, Some(idea), "cannot partner a card with itself");
+        d.set_commander(&store, None);
+        assert!(d.partner.is_none());
+    }
+
+    #[test]
     fn loaded_decks_merge_duplicate_rows_without_losing_counts_or_commanders() {
-        let (mut store, [land, bear, _]) = store();
+        let (mut store, [land, bear, idea]) = store();
         let id = store
             .put_deck(
                 "Duplicates",
@@ -3687,7 +3846,11 @@ mod tests {
         for entries in [
             vec![(land, u32::MAX, Section::Main), (land, 1, Section::Main)],
             vec![(land, 2, Section::Commander)],
-            vec![(land, 1, Section::Commander), (bear, 1, Section::Commander)],
+            vec![
+                (land, 1, Section::Commander),
+                (bear, 1, Section::Commander),
+                (idea, 1, Section::Commander),
+            ],
         ] {
             let id = store.put_deck("Invalid", None, &entries).unwrap();
             assert!(Draft::load(&store, id).is_err());

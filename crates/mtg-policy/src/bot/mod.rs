@@ -229,6 +229,13 @@ pub struct Bot {
     loyalty: BTreeMap<(CardId, u8, AbilityId), LoyaltyAbility>,
     targeting: BTreeMap<(CardId, u8, Option<AbilityId>), TargetPreference>,
     combat_prevention: BTreeSet<(CardId, u8)>,
+    /// Spells that do something only to a target of one color — Pyroblast's "if it's
+    /// blue" — so they wait for one.
+    color_gated: BTreeMap<(CardId, u8), mtg_core::Color>,
+    /// Printed colors, for matching a color-gated spell to its target.
+    colors: BTreeMap<(CardId, u8), mtg_core::ColorSet>,
+    /// Spells that can counter a spell, held to answer the opponent's.
+    counterspells: BTreeSet<(CardId, u8)>,
     policy: Policy,
 }
 
@@ -243,6 +250,9 @@ impl Bot {
         let mut loyalty = BTreeMap::new();
         let mut targeting = BTreeMap::new();
         let mut combat_prevention = BTreeSet::new();
+        let mut color_gated = BTreeMap::new();
+        let mut colors = BTreeMap::new();
+        let mut counterspells = BTreeSet::new();
         for id in ids {
             layouts.insert(id, cards.layout(id));
             let count = if matches!(
@@ -260,6 +270,7 @@ impl Bot {
                 let Some(face) = cards.face(id, index) else {
                     continue;
                 };
+                colors.insert((id, index), face.printed_characteristics().colors);
                 for a in &face.abilities {
                     match &a.kind {
                         AbilityKind::Activated {
@@ -285,6 +296,12 @@ impl Bot {
                             if matches!(effect, Effect::PreventAllCombatDamage) {
                                 combat_prevention.insert((id, index));
                             }
+                            if let Some(color) = gating_color(effect) {
+                                color_gated.insert((id, index), color);
+                            }
+                            if counters_a_spell(effect) {
+                                counterspells.insert((id, index));
+                            }
                             targeting.insert((id, index, None), target_preference(effect));
                         }
                         AbilityKind::Triggered { effect, .. } => {
@@ -301,6 +318,9 @@ impl Bot {
             loyalty,
             targeting,
             combat_prevention,
+            color_gated,
+            colors,
+            counterspells,
             policy: Policy::default(),
         }
     }
@@ -383,6 +403,17 @@ impl Bot {
             _ => None,
         };
         answer.unwrap_or_else(|| crate::well_formed(choice, view))
+    }
+
+    /// Whether a visible object is printed with `color`.
+    fn has_color(&self, view: &PlayerView, target: Target, color: mtg_core::Color) -> bool {
+        let Target::Object(id) = target else {
+            return false;
+        };
+        view.visible
+            .get(&id)
+            .and_then(|o| self.colors.get(&(o.card?, o.face)))
+            .is_some_and(|colors| colors.contains(color))
     }
 
     fn hand(&self, view: &PlayerView) -> Vec<ObjectId> {
@@ -518,6 +549,12 @@ impl Bot {
             Some(Answer::Targets(picks)) => picks.iter().map(Vec::len).collect(),
             _ => vec![1; slots.len()],
         };
+        // A blast hits the opponent's thing of its color; never one of the bot's own.
+        let gate = stack
+            .ability
+            .is_none()
+            .then(|| self.color_gated.get(&(stack.card?, stack.face)).copied())
+            .flatten();
         Some(Answer::Targets(
             slots
                 .iter()
@@ -535,7 +572,10 @@ impl Bot {
                             ),
                         };
                         let friendly = controller == Some(view.viewer);
+                        let colored = gate.is_some_and(|c| self.has_color(view, *target, c));
                         (
+                            std::cmp::Reverse(colored && !friendly),
+                            colored && friendly,
                             std::cmp::Reverse(match preference {
                                 TargetPreference::Friendly => friendly,
                                 TargetPreference::Hostile => controller.is_some() && !friendly,
@@ -575,20 +615,87 @@ fn target_preference(effect: &Effect) -> TargetPreference {
         Effect::PreventDamage { to } if targeted(to) => Friendly,
         Effect::PreventDamageShield { to: Some(to), .. } if targeted(to) => Friendly,
         Effect::PreventDamageShield { by: Some(by), .. } if targeted(by) => Hostile,
-        Effect::Sequence(items) => {
-            let known: Vec<_> = items
-                .iter()
-                .map(target_preference)
-                .filter(|p| *p != Unknown)
-                .collect();
-            known
-                .first()
-                .copied()
-                .filter(|first| known.iter().all(|p| p == first))
-                .unwrap_or(Unknown)
+        Effect::CounterSpell { what, .. } | Effect::CounterUnlessPays { what, .. }
+            if targeted(what) =>
+        {
+            Hostile
         }
+        Effect::Tap { what } if targeted(what) => Hostile,
+        Effect::Sequence(items) => agreed(items.iter()),
+        // "Destroy target permanent if it's blue": the branches, taken together.
+        Effect::If {
+            then, otherwise, ..
+        } => agreed([&**then, &**otherwise].into_iter()),
+        // Pyroblast's modes all point at the opponent's things.
+        Effect::Modal { modes, .. } => agreed(modes.iter().map(|(_, e)| e)),
+        Effect::Let { body, .. } => target_preference(body),
+        Effect::FreezeValues { effect } => target_preference(effect),
         _ => Unknown,
     }
+}
+
+/// The color a spell's effect depends on: "destroy target permanent if it's blue", in every
+/// mode. Against a target without it the spell does nothing.
+fn gating_color(effect: &Effect) -> Option<mtg_core::Color> {
+    use mtg_ir::{selector::ObjectFilter, trigger::Condition};
+    match effect {
+        Effect::If {
+            cond: Condition::Exists(Selector::Except(what, all)),
+            otherwise,
+            ..
+        } if matches!(**what, Selector::Target { .. })
+            && matches!(**otherwise, Effect::Nothing) =>
+        {
+            match &**all {
+                Selector::All {
+                    filter: ObjectFilter::Not(inner),
+                    ..
+                } => match **inner {
+                    ObjectFilter::HasColor(color) => Some(color),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        Effect::Modal { modes, .. } => {
+            let mut colors = modes.iter().map(|(_, e)| gating_color(e));
+            let first = colors.next()??;
+            colors.all(|c| c == Some(first)).then_some(first)
+        }
+        Effect::Let { body, .. } => gating_color(body),
+        Effect::FreezeValues { effect } => gating_color(effect),
+        _ => None,
+    }
+}
+
+/// Whether a spell can counter a target spell, in some mode or branch.
+fn counters_a_spell(effect: &Effect) -> bool {
+    match effect {
+        Effect::CounterSpell { what, .. } | Effect::CounterUnlessPays { what, .. } => {
+            matches!(what, Selector::Target { .. })
+        }
+        Effect::Sequence(items) => items.iter().any(counters_a_spell),
+        Effect::If {
+            then, otherwise, ..
+        } => counters_a_spell(then) || counters_a_spell(otherwise),
+        Effect::Modal { modes, .. } => modes.iter().any(|(_, e)| counters_a_spell(e)),
+        Effect::Let { body, .. } => counters_a_spell(body),
+        Effect::FreezeValues { effect } => counters_a_spell(effect),
+        _ => false,
+    }
+}
+
+/// The one preference every recognised part shares, or `Unknown` when they disagree.
+fn agreed<'e>(effects: impl Iterator<Item = &'e Effect>) -> TargetPreference {
+    let known: Vec<_> = effects
+        .map(target_preference)
+        .filter(|p| *p != TargetPreference::Unknown)
+        .collect();
+    known
+        .first()
+        .copied()
+        .filter(|first| known.iter().all(|p| p == first))
+        .unwrap_or(TargetPreference::Unknown)
 }
 
 #[cfg(test)]
@@ -748,6 +855,9 @@ mod tests {
             loyalty: BTreeMap::new(),
             targeting: BTreeMap::new(),
             combat_prevention: BTreeSet::new(),
+            color_gated: BTreeMap::new(),
+            colors: BTreeMap::new(),
+            counterspells: BTreeSet::new(),
             policy: Policy::default(),
         }
     }
@@ -765,6 +875,7 @@ mod tests {
             graveyard: Vec::new(),
             mana: [0; 6],
             commander_damage: Default::default(),
+            partner_commander_damage: Default::default(),
         };
         PlayerView {
             revealed_cards: Vec::new(),

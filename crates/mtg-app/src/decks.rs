@@ -35,6 +35,7 @@ pub fn demo_deck() -> DeckSpec {
         ],
         side: Vec::new(),
         commander: None,
+        partner: None,
     }
 }
 
@@ -88,8 +89,10 @@ pub fn deck_spec(store: Option<&Store>, id: DeckId) -> Result<DeckSpec, String> 
         ..Default::default()
     };
     for (oracle, count, section) in row.entries {
-        if section == Section::Commander && (count != 1 || spec.commander.is_some()) {
-            return Err("play currently supports exactly one commander per Commander deck".into());
+        if section == Section::Commander && (count != 1 || spec.partner.is_some()) {
+            return Err(
+                "each commander must have exactly one copy, with at most two commanders".into(),
+            );
         }
         let key = uuid(oracle)?;
         let count = u8::try_from(count).map_err(|_| {
@@ -100,7 +103,13 @@ pub fn deck_spec(store: Option<&Store>, id: DeckId) -> Result<DeckSpec, String> 
         match section {
             Section::Main => spec.main.push((key, count)),
             Section::Sideboard => spec.side.push((key, count)),
-            Section::Commander => spec.commander = Some(key),
+            Section::Commander => {
+                if spec.commander.is_none() {
+                    spec.commander = Some(key);
+                } else {
+                    spec.partner = Some(key);
+                }
+            }
         }
     }
     Ok(spec)
@@ -159,8 +168,13 @@ pub fn import_deck(store: &mut Store, name: &str, text: &str) -> Result<ImportSu
         .filter(|entry| entry.section == mtg_deck::Section::Commander)
         .map(|entry| u64::from(entry.count))
         .sum();
-    if commanders > 1 {
-        return Err("multiple commanders are not supported yet; the deck was not saved".into());
+    if commanders > 2
+        || parsed
+            .entries
+            .iter()
+            .any(|e| e.section == mtg_deck::Section::Commander && e.count > 1)
+    {
+        return Err("multiple commanders require one copy each and at most two cards; the deck was not saved".into());
     }
     let resolved = mtg_deck::resolve::resolve(&parsed, &StoreResolver(store));
 
@@ -410,6 +424,35 @@ mod tests {
     }
 
     #[test]
+    fn a_matchs_card_texts_include_the_tokens_its_cards_make() {
+        let store = Store::in_memory().unwrap();
+        let card = mtg_store::StoredCard {
+            oracle_uuid: "token-maker".into(),
+            name: "Token Maker".into(),
+            layout: "normal".into(),
+            faces: vec![mtg_store::FaceRow {
+                name: "Token Maker".into(),
+                mana_cost: "{1}{W}".into(),
+                type_line: "Sorcery".into(),
+                oracle_text: Some("Create a 1/1 white Soldier creature token.".into()),
+                ..Default::default()
+            }],
+        };
+        store.put_card(&card, &[]).unwrap();
+        let source = LocalSource::new(Some(store));
+        let deck = DeckSpec {
+            main: vec![(CardKey::Oracle(card.oracle_uuid, None), 60)],
+            ..Default::default()
+        };
+        let cards = GameCards::build([&deck], &source).unwrap();
+        let token = cards.token_ids().next().expect("a Soldier token face");
+        let texts = crate::cards_text::CardTexts::for_match(&cards);
+        let text = texts.get(token).expect("the token has text");
+        assert_eq!(text.name, "Soldier");
+        assert_eq!(text.power_toughness.as_deref(), Some("1/1"));
+    }
+
+    #[test]
     fn standard_legality_is_catalog_driven_and_preserved_over_the_wire() {
         for legal in [false, true] {
             let store = Store::in_memory().unwrap();
@@ -485,7 +528,7 @@ mod tests {
         let original = store.deck(id).unwrap();
         for (text, message) in [
             (
-                "Commander\n1 First Captain\n1 Second Captain\nDeck\n60 Field",
+                "Commander\n1 First Captain\n1 Second Captain\n1 Third Captain\nDeck\n60 Field",
                 "multiple commanders",
             ),
             (
@@ -546,7 +589,7 @@ mod tests {
         assert!(
             deck_spec(Some(&store), DeckId::Stored(id))
                 .unwrap_err()
-                .contains("exactly one commander")
+                .contains("exactly one copy")
         );
     }
 

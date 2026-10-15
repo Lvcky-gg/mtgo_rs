@@ -22,6 +22,15 @@ pub struct Noun {
 
 /// A class of objects. `other` has already been consumed by the caller if present.
 pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
+    noun_with_conjunction(s, cx, false)
+}
+
+/// Counting lists use singular nouns after "each": "each Aura and Equipment".
+pub fn counted_noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
+    noun_with_conjunction(s, cx, true)
+}
+
+fn noun_with_conjunction<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(Noun, &'s str)> {
     let mut parts: Vec<ObjectFilter> = Vec::new();
     let mut rest = s;
 
@@ -102,7 +111,7 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
     }
 
     // The head noun, possibly "X or Y".
-    let (head, zone, plural, r) = head(rest, cx)?;
+    let (head, zone, plural, r) = head(rest, cx, counting)?;
     parts.push(head);
     rest = r;
 
@@ -126,6 +135,11 @@ pub fn noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
                 .or_else(|| rest.strip_prefix(" target opponent controls"))
         {
             parts.push(ObjectFilter::ControlledBy(Box::new(who)));
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix(" that player controls") {
+            parts.push(ObjectFilter::ControlledBy(Box::new(
+                cx.that_player.clone()?,
+            )));
             rest = r;
         } else if let Some(r) = rest.strip_prefix(" other than ~") {
             // "target creature other than this creature"
@@ -243,11 +257,14 @@ fn negated<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
     None
 }
 
-/// "red ", "white and blue "? — only a single colour, or "X or Y" colours.
+/// Color adjectives: "red", "white and blue", "black and/or red".
 fn color_adjective(s: &str) -> Option<(ObjectFilter, &str)> {
     let (w, rest) = words::first_word(s);
     let c = words::color(w)?;
-    if let Some(r) = rest.strip_prefix(" or ") {
+    if let Some(r) = rest
+        .strip_prefix(" or ")
+        .or_else(|| rest.strip_prefix(" and/or "))
+    {
         let (w2, rest2) = words::first_word(r);
         let c2 = words::color(w2)?;
         let rest2 = rest2.strip_prefix(' ')?;
@@ -256,11 +273,19 @@ fn color_adjective(s: &str) -> Option<(ObjectFilter, &str)> {
             rest2,
         ));
     }
+    if let Some(r) = rest.strip_prefix(" and ") {
+        let (w2, rest2) = words::first_word(r);
+        let c2 = words::color(w2)?;
+        return Some((
+            ObjectFilter::And(vec![ObjectFilter::HasColor(c), ObjectFilter::HasColor(c2)]),
+            rest2.strip_prefix(' ')?,
+        ));
+    }
     Some((ObjectFilter::HasColor(c), rest.strip_prefix(' ')?))
 }
 
 /// The head noun: a type, "permanent", "spell", a subtype, or "card", with "X or Y".
-fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> {
+fn head<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(ObjectFilter, Zone, bool, &'s str)> {
     let (first, zone, plural, rest) = one_head(s, cx)?;
     // "creature or planeswalker", "artifact or enchantment", "instant or sorcery spell" —
     // and, for a plural, "instant and sorcery spells", "artifacts and enchantments",
@@ -271,7 +296,7 @@ fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> 
         .or_else(|| rest.strip_prefix(" and/or "))
         .or_else(|| {
             rest.strip_prefix(" and ").filter(|r| {
-                one_head(r, cx).is_some_and(|(_, _, plural2, _)| plural2)
+                counting || one_head(r, cx).is_some_and(|(_, _, plural2, _)| plural2)
                 // "for each instant and sorcery card in your graveyard": Oracle's singular
                 // for the pair, meaning either.
                 || (s.starts_with("instant") && r.starts_with("sorcery "))
@@ -303,7 +328,7 @@ fn head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s str)> 
         let last = tail
             .strip_prefix(", or ")
             .or_else(|| tail.strip_prefix(", and/or "))
-            .or_else(|| tail.strip_prefix(", and ").filter(|_| plural));
+            .or_else(|| tail.strip_prefix(", and ").filter(|_| plural || counting));
         if let Some(r) = last {
             let Some((last, last_zone, last_plural, left)) = one_head(r, cx) else {
                 break;
@@ -357,11 +382,14 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
     if let Some((t, p)) = words::card_type(word) {
         filter = ObjectFilter::HasType(t);
         plural = p;
+    } else if word == "commander" || word == "commanders" {
+        filter = ObjectFilter::IsCommander;
+        plural = word == "commanders";
     } else if word == "permanent" || word == "permanents" {
         // "permanent card": a card of a permanent type, somewhere other than the battlefield.
         if let Some(r) = rest
-            .strip_prefix(" card")
-            .or_else(|| rest.strip_prefix(" cards"))
+            .strip_prefix(" cards")
+            .or_else(|| rest.strip_prefix(" card"))
         {
             let plural = rest.starts_with(" cards");
             let permanent = ObjectFilter::Or(
@@ -383,6 +411,13 @@ fn one_head<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, Zone, bool, &'s st
             ObjectFilter::Any,
             Zone::Battlefield,
             word.ends_with('s'),
+            rest,
+        ));
+    } else if word == "ability" || word == "abilities" {
+        return Some((
+            ObjectFilter::IsAbility,
+            Zone::Stack,
+            word == "abilities",
             rest,
         ));
     } else if word == "activated" || word == "triggered" {
@@ -576,10 +611,71 @@ pub fn with_clause<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
             return Some((f, r));
         }
     }
+    // "mana cost {0} or {1}": exactly those printed costs.
+    if let Some(r) = s.strip_prefix("mana cost ") {
+        let mut costs = Vec::new();
+        let mut r = r;
+        loop {
+            let (cost, rest) = super::mana_cost(r)?;
+            costs.push(ObjectFilter::ManaCostIs(cost));
+            match rest.strip_prefix(" or ") {
+                Some(next) if next.starts_with('{') => r = next,
+                _ => {
+                    r = rest;
+                    break;
+                }
+            }
+        }
+        let f = if costs.len() == 1 {
+            costs.pop()?
+        } else {
+            ObjectFilter::Or(costs)
+        };
+        return Some((f, r));
+    }
     for (prefix, kind) in [("power ", 0u8), ("toughness ", 1), ("mana value ", 2)] {
         let Some(r) = s.strip_prefix(prefix) else {
             continue;
         };
+        for (phrase, lower, inclusive) in [
+            ("less than or equal to ", true, true),
+            ("greater than or equal to ", false, true),
+            ("less than ", true, false),
+            ("greater than ", false, false),
+        ] {
+            let Some(after) = r.strip_prefix(phrase) else {
+                continue;
+            };
+            // "its power" would require a value relative to each filtered object.
+            // Named source and controller values are already explicit selectors.
+            if after.starts_with("its ") || after.starts_with("their ") {
+                return None;
+            }
+            let (value, rest) = super::clauses::value_phrase(after, cx)
+                .or_else(|| super::clauses::amount(after, cx))?;
+            let at_most = match kind {
+                0 => ObjectFilter::PowerAtMost(value.clone()),
+                1 => ObjectFilter::ToughnessAtMost(value.clone()),
+                _ => ObjectFilter::ManaValueAtMost(value.clone()),
+            };
+            let at_least = match kind {
+                0 => ObjectFilter::PowerAtLeast(value),
+                1 => not(ObjectFilter::ToughnessAtMost(Value::Sum(vec![
+                    value,
+                    Value::Fixed(-1),
+                ]))),
+                _ => ObjectFilter::ManaValueAtLeast(value),
+            };
+            return Some((
+                match (lower, inclusive) {
+                    (true, true) => at_most,
+                    (true, false) => not(at_least),
+                    (false, true) => at_least,
+                    (false, false) => not(at_most),
+                },
+                rest,
+            ));
+        }
         let (v, r) = super::clauses::amount(r, cx)?;
         let below = match &v {
             Value::Fixed(n) => Value::Fixed(n - 1),
@@ -693,9 +789,10 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
     {
         return Some((cx.it.clone()?, false, r));
     }
-    // "them": what an earlier step made or moved ("create two tokens … exile them").
+    // "them" / "they": what an earlier step made or moved.
     if let Some(r) = s
         .strip_prefix("them")
+        .or_else(|| s.strip_prefix("they"))
         .filter(|r| !r.starts_with(|c: char| c.is_alphanumeric()))
         && cx.it == Some(Selector::Bound(mtg_ir::selector::Binding::It))
     {
@@ -785,7 +882,23 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
         }
     }
 
-    // "target player's graveyard", "your graveyard", "each opponent's graveyard".
+    // Whole graveyards, including every opponent's without choosing a target.
+    for (prefix, who) in [
+        ("each opponent's graveyard", Selector::Opponents),
+        ("all opponents' graveyards", Selector::Opponents),
+        ("each player's graveyard", Selector::EachPlayer),
+    ] {
+        if let Some(r) = s.strip_prefix(prefix) {
+            return Some((
+                Selector::All {
+                    zone: Zone::Graveyard,
+                    filter: ObjectFilter::OwnedBy(Box::new(who)),
+                },
+                true,
+                r,
+            ));
+        }
+    }
     for (prefix, whose) in [
         ("target player's graveyard", None),
         ("target opponent's graveyard", Some(Selector::Opponents)),

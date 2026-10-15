@@ -109,9 +109,15 @@ pub fn check(state: &GameState, cards: &dyn PrintedCards) -> Check {
                 player: *p,
                 reason: LossReason::PoisonCounters,
             });
-        } else if state.commander.damage.iter().any(|((victim, _), n)| {
-            victim == p && *n >= crate::state::CommanderState::LETHAL_DAMAGE
-        }) {
+        } else if state
+            .commander
+            .damage
+            .iter()
+            .chain(&state.commander.partner_damage)
+            .any(|((victim, _), n)| {
+                victim == p && *n >= crate::state::CommanderState::LETHAL_DAMAGE
+            })
+        {
             out.actions.push(Sba::PlayerLoses {
                 player: *p,
                 reason: LossReason::CommanderDamage,
@@ -214,9 +220,17 @@ pub fn check(state: &GameState, cards: &dyn PrintedCards) -> Check {
         let on_player = obj
             .attached_player
             .is_some_and(|p| state.players.get(&p).is_some_and(|s| !s.has_lost));
+        // "Enchant creature card in a graveyard" (Animate Dead): legal there too.
+        let in_graveyard = obj.attached_to.is_some_and(|to| {
+            state
+                .objects
+                .get(&to)
+                .is_some_and(|o| o.zone.zone == Zone::Graveyard)
+                && enchant_zone(cards, obj) == Some(Zone::Graveyard)
+        });
         if (is_aura || obj.bestowed())
             && !on_player
-            && !(attached_legally(state, obj.attached_to)
+            && !((attached_legally(state, obj.attached_to) || in_graveyard)
                 && enchant_allows(state, cards, id, obj.attached_to)
                 && !obj
                     .attached_to
@@ -393,6 +407,10 @@ fn enchant_allows(
     let (Some(to), Some(obj)) = (to, state.objects.get(&aura)) else {
         return false;
     };
+    // "Enchant creature put onto the battlefield with this Aura."
+    if let Some(returned) = state.reanimated.get(&aura) {
+        return *returned == to;
+    }
     let Some(spec) = cards.face(obj.card, obj.face).and_then(|f| {
         if obj.bestowed() {
             return crate::targeting::bestow_targets(f).first().cloned();
@@ -417,6 +435,17 @@ fn enchant_allows(
         bindings: crate::empty_bindings(),
     };
     crate::eval::matches(&ctx, &spec.filter, to).unwrap_or(false)
+}
+
+/// The zone an Aura's printed enchant ability looks in.
+fn enchant_zone(cards: &dyn PrintedCards, obj: &crate::state::GameObject) -> Option<Zone> {
+    cards
+        .face(obj.card, obj.face)?
+        .abilities
+        .iter()
+        .find(|a| matches!(a.kind, mtg_ir::AbilityKind::Enchant))
+        .and_then(|a| a.targets.first())
+        .map(|t| t.zone)
 }
 
 fn attached_to_creature(state: &GameState, cards: &dyn PrintedCards, to: Option<ObjectId>) -> bool {

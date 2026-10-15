@@ -212,3 +212,117 @@ fn each_player_sees_the_commander_damage_they_have_taken() {
         "P0 has taken none"
     );
 }
+
+#[test]
+fn partner_commanders_have_independent_cast_counts_and_tax() {
+    let cards = TestCards::default();
+    let mut state = board();
+    state.commander.partners.insert(P0, DUMMY);
+    state.commander.casts.insert(P0, 3);
+    let primary = state.place(LEGEND, P0, ZoneRef::shared(Zone::Command));
+    let partner = state.place(DUMMY, P0, ZoneRef::shared(Zone::Command));
+    let mut engine = Engine::new(state);
+    let choice = main_phase(&mut engine, &cards);
+    let ChoiceKind::Priority { legal } = &choice.kind else {
+        panic!("priority")
+    };
+    assert!(!legal.actions.contains(&Action::Cast { object: primary }));
+    assert!(legal.actions.contains(&Action::Cast { object: partner }));
+    engine
+        .answer(
+            &cards,
+            choice.id,
+            Answer::Action(Action::Cast { object: partner }),
+        )
+        .unwrap();
+    assert_eq!(engine.state.commander.casts[&P0], 3);
+    assert_eq!(engine.state.commander.partner_casts[&P0], 1);
+    assert_eq!(engine.state.commander.tax_for(P0, LEGEND), 6);
+    assert_eq!(engine.state.commander.tax_for(P0, DUMMY), 2);
+}
+
+#[test]
+fn partner_combat_damage_is_separate_and_either_commander_can_be_lethal() {
+    let mut state = board();
+    state.commander.partners.insert(P0, DUMMY);
+    let primary = state.place(LEGEND, P0, ZoneRef::shared(Zone::Battlefield));
+    let partner = state.place(DUMMY, P0, ZoneRef::shared(Zone::Battlefield));
+    let mut engine = Engine::new(state);
+    for source in [primary, partner] {
+        mtg_engine::apply::apply(
+            &mut engine.state,
+            Cause::Combat,
+            Event::DamageDealtToPlayer {
+                source,
+                player: P1,
+                amount: 12,
+                counters: false,
+            },
+            &mut engine.log,
+        );
+    }
+    assert_eq!(engine.state.commander.damage[&(P1, P0)], 12);
+    assert_eq!(engine.state.commander.partner_damage[&(P1, P0)], 12);
+    let cards = TestCards::default();
+    let choice = main_phase(&mut engine, &cards);
+    assert!(
+        !engine.state.player(P1).has_lost,
+        "24 combined is not lethal"
+    );
+    let view = mtg_engine::view::project(&engine.state, P1);
+    assert_eq!(view.players[&P1].commander_damage[&P0], 12);
+    assert_eq!(view.players[&P1].partner_commander_damage[&P0], 12);
+    mtg_engine::apply::apply(
+        &mut engine.state,
+        Cause::Combat,
+        Event::DamageDealtToPlayer {
+            source: partner,
+            player: P1,
+            amount: 9,
+            counters: false,
+        },
+        &mut engine.log,
+    );
+    engine.answer(&cards, choice.id, Answer::Pass).unwrap();
+    for _ in 0..100 {
+        match engine.advance(&cards) {
+            Progress::GameOver { winners } => {
+                assert_eq!(winners, vec![P0]);
+                return;
+            }
+            Progress::NeedsChoice(c) => engine
+                .answer(&cards, c.id, c.default.clone().unwrap_or(Answer::Pass))
+                .unwrap(),
+            Progress::Continue => {}
+        }
+    }
+    panic!("21 from the partner should lose the game");
+}
+
+#[test]
+fn either_partner_can_return_from_the_graveyard_or_exile() {
+    for zone in [Zone::Graveyard, Zone::Exile] {
+        let mut state = board();
+        state.commander.partners.insert(P0, DUMMY);
+        let location = if zone.is_shared() {
+            ZoneRef::shared(zone)
+        } else {
+            ZoneRef::of(zone, P0)
+        };
+        state.place(LEGEND, P0, location);
+        state.place(DUMMY, P0, location);
+        let mut engine = Engine::new(state);
+        main_phase(&mut engine, &TestCards::default());
+        let command = engine.state.objects_in(ZoneRef::shared(Zone::Command));
+        assert_eq!(command.len(), 2);
+        for id in command {
+            let object = &engine.state.objects[&id];
+            assert!(
+                engine
+                    .state
+                    .commander
+                    .is_commander(object.owner, object.card)
+            );
+        }
+    }
+}

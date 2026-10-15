@@ -371,6 +371,9 @@ pub fn state_triggers(state: &GameState, cards: &dyn PrintedCards) -> Vec<Pendin
     let mut out = Vec::new();
 
     for obj in state.objects.values() {
+        if obj.phased_out && obj.zone.zone == Zone::Battlefield {
+            continue;
+        }
         let Some(face) = cards.face(obj.card, obj.face) else {
             continue;
         };
@@ -540,6 +543,9 @@ fn functions_here(
     let Some(obj) = lookup(state, source) else {
         return false;
     };
+    if trigger.functions_from == Zone::Battlefield && obj.phased_out {
+        return false;
+    }
 
     if obj.zone.zone == trigger.functions_from {
         return true;
@@ -609,7 +615,7 @@ fn build(
     let card = lookup(state, source)
         .map(|o| o.card)
         .unwrap_or(mtg_core::CardId(0));
-    let granted = if ability == AbilityId::DISGUISE_WARD {
+    let mut granted = if ability == AbilityId::DISGUISE_WARD {
         Some(Box::new(disguise_ward()))
     } else {
         ability
@@ -617,6 +623,59 @@ fn build(
             .and_then(|_| crate::abilities::find(state, cards, source, ability))
             .map(|a| Box::new(a.into_owned()))
     };
+    // Self-death triggers retain the new zone identity for self-return effects,
+    // but source power/toughness refer to the permanent as it last existed.
+    if let Event::ZoneChange {
+        object,
+        new_object,
+        from,
+        ..
+    } = &stamped.event
+        && *new_object == source
+        && from.zone == Zone::Battlefield
+        && let Some(ch) = crate::eval::CharacteristicsSource::characteristics(
+            &crate::eval::ComputedChars(cards),
+            state,
+            *object,
+        )
+        && let Some(mut snapshot) = granted.as_deref().cloned().or_else(|| {
+            cards
+                .face(card, face)?
+                .abilities
+                .iter()
+                .find(|a| a.id == ability)
+                .cloned()
+        })
+    {
+        let mut changed = false;
+        let mut rewrite = |value: &mut mtg_ir::Value| {
+            let fixed = match value {
+                mtg_ir::Value::Power(who) if **who == Selector::SelfSource => ch.power,
+                mtg_ir::Value::Toughness(who) if **who == Selector::SelfSource => ch.toughness,
+                _ => None,
+            };
+            if let Some(n) = fixed {
+                *value = mtg_ir::Value::Fixed(n);
+                changed = true;
+            }
+        };
+        // Only target bounds refer to this departed source here. Nested granted
+        // abilities have their own source and must retain their relative values.
+        let kind = std::mem::replace(
+            &mut snapshot.kind,
+            AbilityKind::SpellEffect(mtg_ir::Effect::Nothing),
+        );
+        mtg_ir::walk::Visitor {
+            filter: &mut |_| {},
+            token: &mut |_| {},
+            value: &mut rewrite,
+        }
+        .ability(&mut snapshot);
+        snapshot.kind = kind;
+        if changed {
+            granted = Some(Box::new(snapshot));
+        }
+    }
     let effect = match &granted {
         Some(a) => Some(&**a),
         None => cards
@@ -979,6 +1038,9 @@ fn pattern_matches(
         ) if surveil == did => {
             player_ok(whose, *player).then(|| bind(Some(Target::Player(*player)), None))
         }
+        (EventPattern::Proliferated { whose }, Event::Proliferated { player }) => {
+            player_ok(whose, *player).then(|| bind(Some(Target::Player(*player)), None))
+        }
         (EventPattern::Sacrificed { who, by }, Event::Sacrificed { player, object }) => {
             (subject_ok(who, *object) && player_ok(by, *player))
                 .then(|| bind(Some(Target::Object(*object)), Some(Target::Player(*player))))
@@ -1112,18 +1174,34 @@ fn pattern_matches(
         ) => (*l == *level && subject_ok(&ObjectFilter::IsSelf, *object))
             .then(|| bind(Some(Target::Object(*object)), None)),
         (
-            EventPattern::NthSpellCast { n, by, noncreature },
+            EventPattern::NthSpellCast {
+                n,
+                by,
+                noncreature,
+                at_least,
+                opponents_turn,
+            },
             Event::SpellCast {
                 object,
                 controller: caster,
             },
         ) if player_ok(by, *caster) => {
+            if *opponents_turn && state.active_player == *caster {
+                return None;
+            }
+            let number_matches = |count: u32| if *at_least { count >= *n } else { count == *n };
             let nth = if *noncreature {
                 crate::layers::compute(state, cards, *object)
                     .is_some_and(|c| !c.has_type(mtg_core::CardType::Creature))
-                    && state.noncreature_spells_by_player.get(caster).copied() == Some(*n)
+                    && number_matches(
+                        state
+                            .noncreature_spells_by_player
+                            .get(caster)
+                            .copied()
+                            .unwrap_or(0),
+                    )
             } else {
-                state.spells_by_player.get(caster).copied().unwrap_or(0) == *n
+                number_matches(state.spells_by_player.get(caster).copied().unwrap_or(0))
             };
             nth.then(|| bind(Some(Target::Object(*object)), Some(Target::Player(*caster))))
         }
@@ -1142,6 +1220,19 @@ fn pattern_matches(
         }
 
         // ---- permanents --------------------------------------------------
+        (
+            EventPattern::TappedForMana { who },
+            Event::AbilityActivated {
+                source, ability, ..
+            },
+        ) => {
+            let tapped_for_mana = crate::abilities::find(state, cards, *source, *ability).is_some_and(|a| {
+                matches!(&a.kind, AbilityKind::Activated { cost, is_mana_ability: true, .. }
+                    if cost.additional.iter().any(|part| matches!(part, mtg_ir::AdditionalCost::Tap { what: Selector::SelfSource })))
+            });
+            (tapped_for_mana && subject_ok(who, *source))
+                .then(|| bind(Some(Target::Object(*source)), None))
+        }
         (EventPattern::BecomesTapped { who }, Event::TapChanged { object, tapped }) if *tapped => {
             subject_ok(who, *object).then(|| bind(Some(Target::Object(*object)), None))
         }
@@ -1316,9 +1407,24 @@ fn eval_filter(
     selves: &[Option<ObjectId>],
 ) -> bool {
     let recur = |f: &ObjectFilter| eval_filter(state, cards, f, obj, chars, id, controller, selves);
+    let value_of = |value: &mtg_ir::Value| {
+        let context = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &crate::eval::ComputedChars(cards),
+            source: selves.first().copied().flatten().unwrap_or(id),
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        crate::eval::value(&context, value).ok()
+    };
 
     match filter {
         ObjectFilter::Any => true,
+        ObjectFilter::NoManaSpent => obj.mana_spent.iter().all(|(_, n)| *n == 0),
         // The event's object is the trigger's own source, under either of the identities
         // it has in this event (see `pattern_matches`).
         ObjectFilter::IsSelf => selves.contains(&Some(id)),
@@ -1334,6 +1440,21 @@ fn eval_filter(
         ObjectFilter::Token => obj.is_token,
         ObjectFilter::AttachedToSource => {
             selves.iter().flatten().any(|s| obj.attached_to == Some(*s))
+        }
+        ObjectFilter::AttachedTo(host) => {
+            let context = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &crate::eval::ComputedChars(cards),
+                source: selves.first().copied().flatten().unwrap_or(id),
+                controller,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            crate::eval::objects(&context, host)
+                .is_ok_and(|hosts| obj.attached_to.is_some_and(|host| hosts.contains(&host)))
         }
         ObjectFilter::Named(name) => cards
             .face(obj.card, obj.face)
@@ -1401,8 +1522,12 @@ fn eval_filter(
                     })
                 })
         }
-        ObjectFilter::ToughnessAtMost(v) => chars.toughness.unwrap_or(0) <= static_value(v),
-        ObjectFilter::ManaValueAtLeast(v) => chars.mana_cost.mana_value() as i32 >= static_value(v),
+        ObjectFilter::ToughnessAtMost(v) => {
+            value_of(v).is_some_and(|v| chars.toughness.unwrap_or(0) <= v)
+        }
+        ObjectFilter::ManaValueAtLeast(v) => {
+            value_of(v).is_some_and(|v| chars.mana_cost.mana_value() as i32 >= v)
+        }
         ObjectFilter::ControlledBy(sel) => selector_covers_player(
             state,
             sel,
@@ -1419,9 +1544,12 @@ fn eval_filter(
         ),
         // Not something a trigger's event filter asks.
         ObjectFilter::SharesColorWith(_) | ObjectFilter::SharesCreatureTypeWith(_) => false,
-        ObjectFilter::PowerAtLeast(v) => chars.power.unwrap_or(0) >= static_value(v),
-        ObjectFilter::PowerAtMost(v) => chars.power.unwrap_or(0) <= static_value(v),
-        ObjectFilter::ManaValueAtMost(v) => chars.mana_cost.mana_value() as i32 <= static_value(v),
+        ObjectFilter::PowerAtLeast(v) => value_of(v).is_some_and(|v| chars.power.unwrap_or(0) >= v),
+        ObjectFilter::PowerAtMost(v) => value_of(v).is_some_and(|v| chars.power.unwrap_or(0) <= v),
+        ObjectFilter::ManaValueAtMost(v) => {
+            value_of(v).is_some_and(|v| chars.mana_cost.mana_value() as i32 <= v)
+        }
+        ObjectFilter::ManaCostIs(cost) => chars.mana_cost == *cost,
         ObjectFilter::HasCounter(kind) => obj.counters.get(kind).copied().unwrap_or(0) > 0,
         ObjectFilter::HasAnyCounter => obj.counters.values().any(|n| *n > 0),
         ObjectFilter::DealtDamageThisTurn => {
@@ -1481,13 +1609,6 @@ fn eval_filter(
 /// Values inside a trigger's filter must be static: evaluating a dynamic one would
 /// need a live object and the full evaluator, which is exactly what this path cannot
 /// assume. A dynamic value reads as 0, which fails closed.
-fn static_value(v: &mtg_ir::Value) -> i32 {
-    match v {
-        mtg_ir::Value::Fixed(n) => *n,
-        _ => 0,
-    }
-}
-
 /// How much happened in an event, for a triggered ability's "that much" (CR 603.3a): the
 /// damage dealt, or the life gained or lost.
 pub fn event_amount(event: &Event) -> u32 {

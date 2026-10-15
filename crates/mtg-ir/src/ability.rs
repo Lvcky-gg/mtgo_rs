@@ -209,6 +209,14 @@ pub enum AbilityKind {
     /// the battlefield." (leylines)
     BeginOnBattlefield,
 
+    /// Gemstone Caverns (CR 103.6): "If this card is in your opening hand and you're not
+    /// the starting player, you may begin the game with ~ on the battlefield with a luck
+    /// counter on it. If you do, exile a card from your hand."
+    BeginOnBattlefieldNotStarting {
+        counter: mtg_core::CounterKind,
+        exile_from_hand: bool,
+    },
+
     /// CR 701.43 — "You may exert this creature as it attacks. When you do, …": chosen as
     /// attackers are declared (CR 508.1). Exerting it resolves `effect` — the "when you
     /// do" part as an `Effect::Reflexive`, or `Nothing` — on top of its not untapping
@@ -374,6 +382,9 @@ pub enum ActivationTiming {
     AnyPlayerSorcery,
     /// CR 702.177 — exhaust: each such ability of an object may be activated only once.
     Exhaust,
+    /// CR 702.142 — boast: once each turn (twice on your turn under Birgi), and only if
+    /// the creature attacked this turn (a cost condition beside it).
+    Boast,
 }
 
 impl ActivationTiming {
@@ -407,12 +418,15 @@ impl ActivationTiming {
         }
     }
     pub fn once_per_turn(self) -> bool {
-        matches!(self, Self::InstantOncePerTurn | Self::SorceryOncePerTurn)
+        matches!(
+            self,
+            Self::InstantOncePerTurn | Self::SorceryOncePerTurn | Self::Boast
+        )
     }
     /// How many times each turn it may be activated, when that is limited.
     pub fn per_turn(self) -> Option<u32> {
         match self {
-            Self::InstantOncePerTurn | Self::SorceryOncePerTurn => Some(1),
+            Self::InstantOncePerTurn | Self::SorceryOncePerTurn | Self::Boast => Some(1),
             Self::InstantTwicePerTurn => Some(2),
             _ => None,
         }
@@ -428,4 +442,64 @@ pub use mtg_core::Keyword;
 pub struct Conditional {
     pub cond: Condition,
     pub value: Value,
+}
+
+/// CR 702.141a — encore for `mana`: "Exile this card from your graveyard and pay its cost:
+/// for each opponent, create a token copy of it that attacks that opponent this turn if
+/// able. They gain haste. Sacrifice them at the beginning of the next end step. Activate
+/// only as a sorcery." Printed ("encore {5}{R}") or granted (Araumi of the Dead Tide).
+pub fn encore(mana: ManaCost) -> AbilityKind {
+    use crate::{
+        AdditionalCost, Cost, Effect, EventPattern, ObjectFilter, Selector, Value,
+        effect::{Duration, Modification, Restriction},
+    };
+    let made = || Selector::Bound(crate::selector::Binding::It);
+    AbilityKind::Activated {
+        cost: Cost {
+            mana,
+            additional: vec![AdditionalCost::ExileFrom {
+                zone: Zone::Graveyard,
+                filter: ObjectFilter::IsSelf,
+                count: Value::ONE,
+            }],
+            ..Cost::free()
+        },
+        effect: Effect::Sequence(vec![
+            Effect::CreateTokenCopy {
+                of: Selector::SelfSource,
+                count: Value::Count(Box::new(Selector::Opponents)),
+                controller: Selector::You,
+            },
+            Effect::Continuous {
+                what: made(),
+                modification: Modification::GrantAbility(Box::new(Ability {
+                    id: AbilityId(0),
+                    kind: AbilityKind::Keyword(mtg_core::Keyword::Haste),
+                    targets: Vec::new(),
+                    source_text: None,
+                })),
+                duration: Duration::Permanent,
+            },
+            // Two players: "attacks that opponent" is attacking the only one there is.
+            Effect::Continuous {
+                what: made(),
+                modification: Modification::Restriction(Restriction::MustAttackIfAble),
+                duration: Duration::UntilEndOfTurn,
+            },
+            Effect::Delayed {
+                on: EventPattern::StepBegins {
+                    step: mtg_core::Step::End,
+                    whose: Selector::EachPlayer,
+                },
+                effect: Box::new(Effect::Sacrifice {
+                    who: Selector::You,
+                    what: made(),
+                }),
+            },
+        ]),
+        functions_from: Zone::Graveyard,
+        is_mana_ability: false,
+        is_loyalty_ability: false,
+        timing: ActivationTiming::SorcerySpeed,
+    }
 }

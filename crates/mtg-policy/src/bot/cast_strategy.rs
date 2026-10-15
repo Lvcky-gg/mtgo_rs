@@ -92,6 +92,11 @@ impl Bot {
         {
             return Answer::Action(action.clone());
         }
+        // An opponent's spell on top of the stack: counter it when a counterspell is offered
+        // and, for a blast, the spell is of its color.
+        if let Some(action) = self.counter(actions, view) {
+            return Answer::Action(action);
+        }
         let my_main = view.active_player == view.viewer
             && matches!(
                 view.step,
@@ -140,6 +145,22 @@ impl Bot {
                     return None;
                 }
                 let card = view.visible.get(&object)?.card?;
+                // Counterspells wait for a spell to counter; a blast for a permanent of its
+                // color, or it would be cast for nothing.
+                if self.counterspells.contains(&(card, face))
+                    && !self.color_gated.contains_key(&(card, face))
+                {
+                    return None;
+                }
+                if let Some(color) = self.color_gated.get(&(card, face))
+                    && !view.visible.values().any(|o| {
+                        o.zone.zone == mtg_core::Zone::Battlefield
+                            && o.controller != view.viewer
+                            && self.has_color(view, mtg_core::Target::Object(o.id), *color)
+                    })
+                {
+                    return None;
+                }
                 // Get both uses of an adventurer when its Adventure is legal.
                 if face == 0
                     && self.layouts.get(&card) == Some(&mtg_ir::Layout::Adventure)
@@ -155,6 +176,35 @@ impl Bot {
             Some((_, action)) => Answer::Action(action.clone()),
             None => Answer::Pass,
         }
+    }
+}
+
+impl Bot {
+    /// A counterspell for the opponent's spell on top of the stack, if one is offered.
+    fn counter(&self, actions: &[Action], view: &PlayerView) -> Option<Action> {
+        let top = view.visible.get(view.stack.last()?)?;
+        if top.is_ability || top.controller == view.viewer {
+            return None;
+        }
+        actions
+            .iter()
+            .filter(|a| {
+                a.play().is_some_and(|(object, face, land)| {
+                    !land
+                        && view
+                            .visible
+                            .get(&object)
+                            .and_then(|o| o.card)
+                            .is_some_and(|card| {
+                                self.counterspells.contains(&(card, face))
+                                    && self.color_gated.get(&(card, face)).is_none_or(|c| {
+                                        self.has_color(view, mtg_core::Target::Object(top.id), *c)
+                                    })
+                            })
+                })
+            })
+            .min_by_key(|a| action_object(a))
+            .cloned()
     }
 }
 

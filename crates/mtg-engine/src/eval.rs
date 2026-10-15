@@ -85,7 +85,12 @@ impl CharacteristicsSource for PrintedChars<'_> {
         {
             self.0.split_characteristics(obj.card)
         } else {
-            Some(self.0.face(obj.card, obj.face)?.printed_characteristics())
+            let mut ch = self.0.face(obj.card, obj.face)?.printed_characteristics();
+            if let Some((power, toughness)) = obj.token_size {
+                ch.power = Some(power);
+                ch.toughness = Some(toughness);
+            }
+            Some(ch)
         }
     }
 }
@@ -149,6 +154,29 @@ impl Ctx<'_> {
             .ok_or(EvalError::UnknownCard(id))
     }
 
+    /// CR 202.3e: X contributes its announced value while a spell is on the
+    /// stack, including when last-known information describes that spell.
+    fn mana_value(&self, id: ObjectId) -> Eval<i32> {
+        let cost = self.characteristics(id)?.mana_cost;
+        let x = self
+            .state
+            .objects
+            .get(&id)
+            .or_else(|| self.state.last_known.get(&id))
+            .filter(|o| o.zone.zone == Zone::Stack)
+            .and_then(|o| o.cast_context.as_ref())
+            .map_or(0, |cast| cast.x);
+        let variables = cost
+            .symbols
+            .iter()
+            .filter(|s| **s == mtg_core::ManaSymbol::Variable)
+            .count() as u32;
+        Ok(cost
+            .mana_value()
+            .saturating_add(x.saturating_mul(variables))
+            .min(i32::MAX as u32) as i32)
+    }
+
     /// Whether an object has a keyword, looked up through its *current* ability
     /// list so that granted and removed keywords are respected.
     pub fn has_keyword(&self, id: ObjectId, kw: Keyword) -> Eval<bool> {
@@ -156,6 +184,7 @@ impl Ctx<'_> {
             .state
             .objects
             .get(&id)
+            .or_else(|| self.state.last_known.get(&id))
             .ok_or(EvalError::NoSuchObject(id))?;
         let face = self
             .cards
@@ -425,6 +454,11 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             .first()
             .map(|p| ctx.state.player(*p).life)
             .unwrap_or(0),
+        Value::LeastLifeTotal(sel) => players(ctx, sel)?
+            .iter()
+            .map(|p| ctx.state.player(*p).life)
+            .min()
+            .unwrap_or(i32::MAX),
         Value::Counters(sel, kind) => objects(ctx, sel)?
             .iter()
             .map(|id| {
@@ -448,7 +482,7 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
                 let n = match v {
                     Value::GreatestPower(_) => c.power.unwrap_or(0),
                     Value::GreatestToughness(_) => c.toughness.unwrap_or(0),
-                    _ => c.mana_cost.mana_value() as i32,
+                    _ => ctx.mana_value(id)?,
                 };
                 most = most.max(n);
             }
@@ -473,6 +507,10 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             }
             types.len() as i32
         }
+        Value::CombatDamagedThisTurn(who) => players(ctx, who)?
+            .iter()
+            .filter(|p| ctx.state.combat_damaged_this_turn.contains(p))
+            .count() as i32,
         Value::CardsDrawnThisTurn(who) => players(ctx, who)?
             .iter()
             .map(|p| ctx.state.draws_this_turn.get(p).copied().unwrap_or(0) as i32)
@@ -495,6 +533,12 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
         Value::MostSpellsCastThisTurn(who) => players(ctx, who)?
             .iter()
             .map(|p| ctx.state.spells_by_player.get(p).copied().unwrap_or(0) as i32)
+            .max()
+            .unwrap_or(0),
+        Value::MostPoisonCounters(who) => players(ctx, who)?
+            .iter()
+            .filter_map(|p| ctx.state.players.get(p))
+            .map(|p| i32::try_from(p.poison).unwrap_or(i32::MAX))
             .max()
             .unwrap_or(0),
         Value::BasicLandTypesAmong(sel) => {
@@ -528,7 +572,7 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             }
             party(&fills, 0, &mut vec![false; fills.len()])
         }
-        Value::ColorsSpent | Value::ManaSpentOfColor(_) => {
+        Value::ColorsSpent | Value::ManaSpentOfColor(_) | Value::ManaSpent => {
             let spent = ctx
                 .state
                 .objects
@@ -541,6 +585,7 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
                     .filter(|(x, _)| *x == Some(*c))
                     .map(|(_, n)| i32::from(*n))
                     .sum(),
+                Value::ManaSpent => spent.iter().map(|(_, n)| i32::from(*n)).sum(),
                 _ => spent.iter().filter(|(c, n)| c.is_some() && *n > 0).count() as i32,
             }
         }
@@ -655,10 +700,24 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             .get(&ctx.source)
             .and_then(|o| o.cast_context.as_ref())
             .map_or(0, |c| c.cast_index as i32),
+        Value::GreatestOwnedCount(sel) => {
+            let mut counts = BTreeMap::<PlayerId, i32>::new();
+            for id in objects(ctx, sel)? {
+                if let Some(o) = ctx
+                    .state
+                    .objects
+                    .get(&id)
+                    .or_else(|| ctx.state.last_known.get(&id))
+                {
+                    *counts.entry(o.owner).or_default() += 1;
+                }
+            }
+            counts.into_values().max().unwrap_or(0)
+        }
         Value::ManaValue(sel) => {
             let mut total = 0;
             for id in objects(ctx, sel)? {
-                total += ctx.characteristics(id)?.mana_cost.mana_value() as i32;
+                total += ctx.mana_value(id)?;
             }
             total
         }
@@ -736,6 +795,7 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
             .state
             .objects
             .get(&ctx.source)
+            .or_else(|| ctx.state.last_known.get(&ctx.source))
             .and_then(|o| {
                 o.cast_from
                     .or_else(|| o.cast_context.as_ref().and_then(|c| c.cast_from))
@@ -770,11 +830,26 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
         Condition::YouGainedLifeThisTurn => {
             ctx.state.gained_life_this_turn.contains(&ctx.controller)
         }
+        Condition::YouLostLifeThisTurn => ctx.state.lost_life_this_turn.contains(&ctx.controller),
         Condition::OpponentLostLifeThisTurn => ctx
             .state
             .lost_life_this_turn
             .iter()
             .any(|p| *p != ctx.controller),
+        Condition::YourEarlyTurn(n) => {
+            ctx.state.active_player == ctx.controller
+                && ctx
+                    .state
+                    .turns_taken
+                    .get(&ctx.controller)
+                    .is_some_and(|t| t <= n)
+        }
+        Condition::CastColorThisTurn { who, colors } => players(ctx, who)?.iter().any(|p| {
+            ctx.state
+                .spell_colors_by_player
+                .get(p)
+                .is_some_and(|seen| colors.iter().any(|c| seen.contains(*c)))
+        }),
         Condition::OpponentDamagedThisTurn => ctx
             .state
             .damaged_this_turn
@@ -828,6 +903,13 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
         Condition::ValueAtLeast { lhs, rhs } => value(ctx, lhs)? >= value(ctx, rhs)?,
         Condition::ValueEquals { lhs, rhs } => value(ctx, lhs)? == value(ctx, rhs)?,
         Condition::Exists(sel) => !objects(ctx, sel)?.is_empty() || !players(ctx, sel)?.is_empty(),
+        Condition::AnyMatches { what, filter } => {
+            let mut matched = false;
+            for object in objects(ctx, what)? {
+                matched |= matches(ctx, filter, object)?;
+            }
+            matched
+        }
         Condition::Not(inner) => !condition(ctx, inner)?,
         Condition::And(cs) => {
             for c in cs {
@@ -875,6 +957,10 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             .objects
             .get(&id)
             .is_some_and(|o| o.attached_to == Some(ctx.source)),
+        ObjectFilter::AttachedTo(host) => {
+            let hosts = objects(ctx, host)?;
+            obj.attached_to.is_some_and(|host| hosts.contains(&host))
+        }
         ObjectFilter::Named(name) => ctx
             .cards
             .face(obj.card, obj.face)
@@ -940,9 +1026,7 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
         ObjectFilter::ToughnessAtMost(v) => {
             ctx.characteristics(id)?.toughness.unwrap_or(0) <= value(ctx, v)?
         }
-        ObjectFilter::ManaValueAtLeast(v) => {
-            ctx.characteristics(id)?.mana_cost.mana_value() as i32 >= value(ctx, v)?
-        }
+        ObjectFilter::ManaValueAtLeast(v) => ctx.mana_value(id)? >= value(ctx, v)?,
 
         ObjectFilter::ControlledBy(sel) => {
             let who = players(ctx, sel)?;
@@ -991,9 +1075,14 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
         ObjectFilter::PowerAtLeast(v) => {
             ctx.characteristics(id)?.power.unwrap_or(0) >= value(ctx, v)?
         }
-        ObjectFilter::ManaValueAtMost(v) => {
-            ctx.characteristics(id)?.mana_cost.mana_value() as i32 <= value(ctx, v)?
-        }
+        ObjectFilter::ManaValueAtMost(v) => ctx.mana_value(id)? <= value(ctx, v)?,
+        ObjectFilter::ManaCostIs(cost) => ctx.characteristics(id)?.mana_cost == *cost,
+        ObjectFilter::NoManaSpent => ctx
+            .state
+            .objects
+            .get(&id)
+            .or_else(|| ctx.state.last_known.get(&id))
+            .is_some_and(|o| o.mana_spent.iter().all(|(_, n)| *n == 0)),
 
         ObjectFilter::HasCounter(kind) => obj.counters.get(kind).copied().unwrap_or(0) > 0,
         ObjectFilter::HasAnyCounter => obj.counters.values().any(|n| *n > 0),
@@ -1037,6 +1126,7 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
                 && !(ctx.has_keyword(id, Keyword::Hexproof)?
                     && crate::layers::controller(ctx.state, id) != Some(ctx.controller))
                 && !protected_from(ctx.state, ctx.cards, id, ctx.source)
+                && !hexproof_from(ctx, id)?
         }
 
         ObjectFilter::CastFromZone(zone) => {
@@ -1130,6 +1220,25 @@ pub fn net_pt_counters(state: &GameState, id: ObjectId) -> i32 {
 /// CR 702.16 — whether `protected` has protection from `source`: a printed "protection
 /// from …" whose quality `source` has. Evaluated from the protected object's side, so
 /// "protection from creatures" reads the source's types.
+/// Granted "hexproof from blue" (CR 702.11d): a source with that quality, controlled by
+/// an opponent of the object's controller, can't target it.
+fn hexproof_from(ctx: &Ctx, id: ObjectId) -> Eval<bool> {
+    if crate::layers::controller(ctx.state, id) == Some(ctx.controller) {
+        return Ok(false);
+    }
+    for e in crate::layers::effects(ctx.state, ctx.cards) {
+        if let mtg_ir::effect::Modification::Restriction(mtg_ir::effect::Restriction::HexproofFrom(
+            from,
+        )) = &e.modification
+            && crate::layers::applies(ctx.state, ctx.cards, &e, id)
+            && matches(ctx, from, ctx.source)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn protected_from(
     state: &GameState,
     cards: &dyn PrintedCards,

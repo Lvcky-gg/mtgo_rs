@@ -27,8 +27,8 @@ pub enum Format {
     Constructed,
     /// Constructed deck sizes plus Standard legality from the imported catalog.
     Standard,
-    /// A commander and 99 others, one of each but basic lands, all within the commander's
-    /// colour identity; 40 life (CR 903).
+    /// One commander and 99 other cards, or two partners and 98, singleton except
+    /// basic lands and within the commanders' combined identity; 40 life (CR 903).
     Commander,
 }
 
@@ -87,6 +87,9 @@ pub struct DeckSpec {
     pub side: Vec<(CardKey, u8)>,
     /// Commander only.
     pub commander: Option<CardKey>,
+    /// A second commander paired with the first. Absent in older deck files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner: Option<CardKey>,
 }
 
 impl DeckSpec {
@@ -97,6 +100,11 @@ impl DeckSpec {
             .chain(&self.side)
             .map(|(k, _)| k)
             .chain(&self.commander)
+            .chain(&self.partner)
+    }
+
+    pub fn commanders(&self) -> impl Iterator<Item = &CardKey> {
+        self.commander.iter().chain(&self.partner)
     }
 
     pub fn main_count(&self) -> u32 {
@@ -113,7 +121,9 @@ impl DeckSpec {
             }
             m
         }
-        all(self) == all(other) && self.commander == other.commander
+        all(self) == all(other)
+            && self.commander == other.commander
+            && self.partner == other.partner
     }
 }
 
@@ -255,6 +265,12 @@ impl GameCards {
         (0..self.keys.len() as u32).map(CardId)
     }
 
+    /// The faces of the tokens this table's cards can create, numbered from
+    /// [`mtg_ir::walk::TOKEN_CARD_BASE`].
+    pub fn token_ids(&self) -> impl Iterator<Item = CardId> {
+        (0..self.tokens.len() as u32).map(|i| CardId(mtg_ir::walk::TOKEN_CARD_BASE + i))
+    }
+
     pub fn color_identity(&self, id: CardId) -> &str {
         self.identities
             .get(id.0 as usize)
@@ -362,25 +378,43 @@ pub fn deck_problems(format: Format, deck: &DeckSpec, cards: &GameCards) -> Vec<
                 problems.push("a Commander deck needs a commander".into());
                 return problems;
             };
-            let legendary_creature = face(commander).is_some_and(|f| {
-                f.supertypes.contains(&Supertype::Legendary)
-                    && f.card_types.contains(&CardType::Creature)
-            });
-            if !legendary_creature {
-                problems.push(format!("{} is not a legendary creature", name(commander)));
+            for commander in deck.commanders() {
+                let legendary_creature = face(commander).is_some_and(|f| {
+                    f.supertypes.contains(&Supertype::Legendary)
+                        && f.card_types.contains(&CardType::Creature)
+                });
+                if !legendary_creature {
+                    problems.push(format!("{} is not a legendary creature", name(commander)));
+                }
             }
-            if deck.main_count() != 99 {
+            if let Some(partner) = &deck.partner {
+                let has_partner = |key: &CardKey| {
+                    face(key).is_some_and(|f| f.abilities.iter().any(|a| {
+                    matches!(&a.kind, mtg_ir::AbilityKind::DeckRule(rule) if rule.as_ref() == "partner")
+                }))
+                };
+                if english_name(commander) == english_name(partner) {
+                    problems.push("the two commanders must be different cards".into());
+                }
+                if !has_partner(commander) || !has_partner(partner) {
+                    problems.push("both commanders must have partner".into());
+                }
+            }
+            let required = if deck.partner.is_some() { 98 } else { 99 };
+            if deck.main_count() != required {
                 problems.push(format!(
-                    "the deck has {} cards besides the commander; it needs exactly 99",
-                    deck.main_count()
+                    "the deck has {} cards besides the commander(s); it needs exactly {required}",
+                    deck.main_count(),
                 ));
             }
-            let commander_name = english_name(commander);
-            if commander_name.is_some_and(|n| main_names.contains_key(n)) {
-                problems.push(format!(
-                    "{} is both the commander and in the deck",
-                    name(commander)
-                ));
+            for commander in deck.commanders() {
+                let commander_name = english_name(commander);
+                if commander_name.is_some_and(|n| main_names.contains_key(n)) {
+                    problems.push(format!(
+                        "{} is both the commander and in the deck",
+                        name(commander)
+                    ));
+                }
             }
             for (card_name, n) in &main_names {
                 let basic = deck
@@ -392,9 +426,11 @@ pub fn deck_problems(format: Format, deck: &DeckSpec, cards: &GameCards) -> Vec<
                     problems.push(format!("{n} copies of {card_name}; Commander allows one"));
                 }
             }
-            let allowed = cards
-                .id(commander)
-                .map_or("", |id| cards.color_identity(id));
+            let allowed: String = deck
+                .commanders()
+                .filter_map(|k| cards.id(k))
+                .map(|id| cards.color_identity(id))
+                .collect();
             for k in main_cards.keys() {
                 let identity = cards.id(k).map_or("", |id| cards.color_identity(id));
                 if identity.chars().any(|c| !allowed.contains(c)) {
@@ -455,11 +491,18 @@ pub fn new_game_with_players(
     state.rng = mtg_engine::state::Rng::from_seed(&game_seed(match_seed, game, PlayerId(0xEE)).0);
 
     for (seat, deck) in players.into_iter().zip(decks) {
-        if format == Format::Commander
-            && let Some(id) = deck.commander.as_ref().and_then(|k| cards.id(k))
-        {
-            state.place(id, seat, ZoneRef::shared(Zone::Command));
-            state.commander.commanders.insert(seat, id);
+        if format == Format::Commander {
+            for (index, key) in deck.commanders().enumerate() {
+                let Some(id) = cards.id(key) else {
+                    continue;
+                };
+                state.place(id, seat, ZoneRef::shared(Zone::Command));
+                if index == 0 {
+                    state.commander.commanders.insert(seat, id);
+                } else {
+                    state.commander.partners.insert(seat, id);
+                }
+            }
         }
 
         let mut library: Vec<CardId> = deck
@@ -694,6 +737,83 @@ mod tests {
                 cards.id(&CardKey::Demo(2)).unwrap()
             );
         }
+    }
+
+    fn partner_source() -> Invented {
+        let mut src = source();
+        for i in [2, 3] {
+            src.0[i].0.supertypes = vec![Supertype::Legendary];
+            src.0[i].0.abilities.push(mtg_ir::Ability {
+                id: mtg_core::AbilityId(0),
+                kind: mtg_ir::AbilityKind::DeckRule("partner".into()),
+                targets: vec![],
+                source_text: None,
+            });
+        }
+        src
+    }
+
+    #[test]
+    fn partner_decks_validate_combined_identity_and_start_with_both_commanders() {
+        let src = partner_source();
+        let mut d = deck(&[(0, 97), (1, 1)]);
+        d.commander = Some(CardKey::Demo(3)); // blue
+        d.partner = Some(CardKey::Demo(2)); // green
+        let cards = GameCards::build([&d], &src).unwrap();
+        assert!(deck_problems(Format::Commander, &d, &cards).is_empty());
+        let state = new_game(
+            Format::Commander,
+            &cards,
+            [&d, &d],
+            &Seed([9; 32]),
+            1,
+            SEATS[0],
+        );
+        assert_eq!(state.objects_in(ZoneRef::shared(Zone::Command)).len(), 4);
+        for seat in SEATS {
+            assert!(
+                state
+                    .commander
+                    .is_commander(seat, cards.id(&CardKey::Demo(2)).unwrap())
+            );
+            assert!(
+                state
+                    .commander
+                    .is_commander(seat, cards.id(&CardKey::Demo(3)).unwrap())
+            );
+            assert_eq!(state.objects_in(ZoneRef::of(Zone::Library, seat)).len(), 91);
+        }
+        let mut invalid = d.clone();
+        invalid.main[0].1 = 98;
+        assert!(
+            deck_problems(Format::Commander, &invalid, &cards)
+                .iter()
+                .any(|p| p.contains("exactly 98"))
+        );
+        invalid = d.clone();
+        invalid.partner = invalid.commander.clone();
+        assert!(
+            deck_problems(Format::Commander, &invalid, &cards)
+                .iter()
+                .any(|p| p.contains("different cards"))
+        );
+        let mut no_partner = partner_source();
+        no_partner.0[2].0.abilities.clear();
+        let cards = GameCards::build([&d], &no_partner).unwrap();
+        assert!(
+            deck_problems(Format::Commander, &d, &cards)
+                .iter()
+                .any(|p| p.contains("both commanders must have partner"))
+        );
+    }
+
+    #[test]
+    fn older_decks_without_a_partner_field_still_deserialize() {
+        let d: DeckSpec =
+            serde_json::from_str(r#"{"name":"Old","main":[],"side":[],"commander":{"Demo":2}}"#)
+                .unwrap();
+        assert!(d.partner.is_none());
+        assert_eq!(d.keys().count(), 1);
     }
 
     #[test]

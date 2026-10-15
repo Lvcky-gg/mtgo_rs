@@ -244,10 +244,6 @@ pub fn eligible_blockers(
             if obj.tapped {
                 return None;
             }
-            if restricted(state, cards, id, |r| matches!(r, Restriction::CantBlock)) {
-                return None;
-            }
-
             let can: Vec<ObjectId> = attackers
                 .iter()
                 .copied()
@@ -266,6 +262,11 @@ pub fn can_block(
     blocker: ObjectId,
     attacker: ObjectId,
 ) -> bool {
+    if restricted(state, cards, blocker, |r| {
+        matches!(r, Restriction::CantBlock)
+    }) {
+        return false;
+    }
     if state.combat.attackers.contains_key(&attacker)
         && crate::layers::controller(state, blocker) != defending_player(state, attacker)
     {
@@ -339,7 +340,14 @@ pub fn can_block(
             continue;
         }
         let chars = ComputedChars(cards);
-        let ctx = ctx_for(state, cards, &chars, subject);
+        let mut ctx = ctx_for(state, cards, &chars, subject);
+        // Printed "you" and source-relative values belong to the effect's
+        // source/controller, including restrictions imposed on other creatures.
+        ctx.source = e.source;
+        ctx.controller = e
+            .controller
+            .or_else(|| crate::layers::controller(state, e.source))
+            .unwrap_or(ctx.controller);
         if !crate::eval::matches(&ctx, filter, other).unwrap_or(false) {
             return false;
         }

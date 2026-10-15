@@ -766,6 +766,14 @@
             "sees_top": [],
             "shuffled_instead_of_graveyard": [],
             "skipped_turns": [],
+            "spell_colors_by_player": {
+              "$map": [
+                [
+                  0,
+                  16
+                ]
+              ]
+            },
             "spells_by_player": {
               "$map": [
                 [
@@ -1147,7 +1155,7 @@
           ]
         }
       },
-      "expected_digest": "ca4cbd8fb67ab4d88eea80bb81ef8bed4bd1249157342292ac2976ca6d91bbad"
+      "expected_digest": "bc24ba32e1871c06bc1b9c93c552fb1aab8ae7cd939a22d52d4bed25c73df2e3"
     },
     {
       "who": 0,
@@ -1725,6 +1733,14 @@
             "sees_top": [],
             "shuffled_instead_of_graveyard": [],
             "skipped_turns": [],
+            "spell_colors_by_player": {
+              "$map": [
+                [
+                  0,
+                  16
+                ]
+              ]
+            },
             "spells_by_player": {
               "$map": [
                 [
@@ -1773,7 +1789,7 @@
           "undo": []
         }
       },
-      "expected_digest": "e460c6ce929074f6a79b6089c1e9fb51bd26b541fd7bf5075a671c193ed4888c"
+      "expected_digest": "74c594f48522ddf5ecb890ca460a3216dd5bb55d4838343b4f2cc2ce77ba57b5"
     },
     {
       "who": 1,
@@ -2477,6 +2493,14 @@
             "sees_top": [],
             "shuffled_instead_of_graveyard": [],
             "skipped_turns": [],
+            "spell_colors_by_player": {
+              "$map": [
+                [
+                  0,
+                  16
+                ]
+              ]
+            },
             "spells_by_player": {
               "$map": [
                 [
@@ -2532,7 +2556,7 @@
           "undo": []
         }
       },
-      "expected_digest": "7df4d4ae9496ab30eb7b180a373c3080ee6c7ff6cadce93cebd6c7b75e7b248f"
+      "expected_digest": "3fcacc77814b217d40d88a168a45025f05f28049385ee25ba8cb143c4f84a7f9"
     }
   ],
   "expected": {
@@ -2559,7 +2583,7 @@
         "count": 1
       }
     ],
-    "final_digest": "7df4d4ae9496ab30eb7b180a373c3080ee6c7ff6cadce93cebd6c7b75e7b248f",
+    "final_digest": "3fcacc77814b217d40d88a168a45025f05f28049385ee25ba8cb143c4f84a7f9",
     "final_state": {
       "format_version": 1,
       "state": {
@@ -3246,6 +3270,14 @@
           "sees_top": [],
           "shuffled_instead_of_graveyard": [],
           "skipped_turns": [],
+          "spell_colors_by_player": {
+            "$map": [
+              [
+                0,
+                16
+              ]
+            ]
+          },
           "spells_by_player": {
             "$map": [
               [

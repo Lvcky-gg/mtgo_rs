@@ -178,6 +178,10 @@ pub enum EventPattern {
     BecomesTapped {
         who: ObjectFilter,
     },
+    /// Activating a mana ability with {T} in its cost (CR 106.12).
+    TappedForMana {
+        who: ObjectFilter,
+    },
     BecomesUntapped {
         who: ObjectFilter,
     },
@@ -213,6 +217,12 @@ pub enum EventPattern {
         by: Selector,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         noncreature: bool,
+        /// Trigger on the nth and subsequent spells, rather than exactly nth.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        at_least: bool,
+        /// Count the caster's spells only while an opponent's turn is active.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        opponents_turn: bool,
     },
     /// A reflexive trigger's own moment (see `Effect::Reflexive`).
     Reflexive,
@@ -275,6 +285,9 @@ pub enum EventPattern {
     /// Matches when any of several patterns match, for cards that list
     /// alternatives. Fires **once** per event even if several arms match.
     AnyOf(Vec<EventPattern>),
+    Proliferated {
+        whose: Selector,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -310,6 +323,11 @@ pub enum Condition {
     },
     /// "if you control" / "if it is still on the battlefield".
     Exists(Selector),
+    /// An object from a prior action matches, wherever that action moved it.
+    AnyMatches {
+        what: Selector,
+        filter: ObjectFilter,
+    },
     /// True during the listed step only.
     DuringStep(Step),
     /// True on the controller's own turn.
@@ -344,12 +362,23 @@ pub enum Condition {
     Renowned,
     /// The source permanent was cast for this alternative cost (evoke).
     CastFor(crate::ability::AltCost),
+    /// It is the controller's turn, and one of their first `n` turns of the game: "unless
+    /// it's your first, second, or third turn of the game" (Starting Town).
+    YourEarlyTurn(u32),
+    /// One of these players cast a spell of one of these colors this turn: "if an
+    /// opponent has cast a blue or black spell this turn" (Veil of Summer).
+    CastColorThisTurn {
+        who: Selector,
+        colors: Vec<mtg_core::Color>,
+    },
     /// An opponent of the controller was dealt damage this turn (bloodthirst).
     OpponentDamagedThisTurn,
     /// An opponent of the controller lost life this turn, by damage or otherwise.
     OpponentLostLifeThisTurn,
     /// The controller gained life this turn.
     YouGainedLifeThisTurn,
+    /// The controller lost life this turn, even if subsequent gains offset it.
+    YouLostLifeThisTurn,
     /// A creature is attacking the controller or a planeswalker they control: "if you've
     /// been attacked this step".
     YouAreAttacked,

@@ -223,6 +223,10 @@ pub enum Event {
     PhasedOut {
         object: ObjectId,
         out: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with: Option<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        under: Option<PlayerId>,
     },
     /// A resolving Adventure grants its controller permission to play this exile object.
     AdventureExiled {
@@ -376,6 +380,12 @@ pub enum Event {
         player: PlayerId,
         until_turn: u32,
         cast_only: bool,
+        /// "… without paying its mana cost."
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        free: bool,
+        /// "… and mana of any type can be spent to cast them."
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        any_mana: bool,
     },
     /// A foretold or plotted card: `player` may cast it from exile after turn `after_turn`,
     /// for `cost` (`None`: without paying its mana cost), only as a sorcery when `sorcery`.
@@ -491,6 +501,12 @@ pub enum Event {
         card: crate::CardId,
         face: u8,
     },
+    /// Variable token size is part of its copiable characteristics, fixed at creation.
+    TokenSizeSet {
+        object: ObjectId,
+        power: i32,
+        toughness: i32,
+    },
     /// A prevention shield (CR 615) begins; it lasts until cleanup.
     DamageShieldCreated {
         shield: DamageShield,
@@ -502,6 +518,10 @@ pub enum Event {
     },
     DamageShieldEnded {
         shield: u32,
+    },
+    /// A player completed a proliferate action, even when no counters were added.
+    Proliferated {
+        player: PlayerId,
     },
 }
 
@@ -546,6 +566,8 @@ pub enum CounterKind {
     /// CR 122.1c — a permanent with a shield counter that would be dealt damage or
     /// destroyed instead loses a shield counter.
     Shield,
+    /// CR 122.1b — grants the named keyword in layer 6 while present.
+    Keyword(crate::Keyword),
     Other(u16),
 }
 

@@ -21,6 +21,46 @@ use crate::{
     state::GameState,
 };
 
+/// How many times each turn an ability with this timing may be activated by `who` now:
+/// boast twice during their own turn under Birgi (CR 702.142).
+pub fn activation_limit(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    who: PlayerId,
+    timing: mtg_ir::ability::ActivationTiming,
+) -> Option<u32> {
+    let limit = timing.per_turn()?;
+    if timing == mtg_ir::ability::ActivationTiming::Boast
+        && state.active_player == who
+        && crate::layers::effects(state, cards).iter().any(|e| {
+            matches!(
+                e.modification,
+                Modification::Restriction(Restriction::BoastTwice)
+            ) && crate::layers::controller(state, e.source) == Some(who)
+        })
+    {
+        return Some(2);
+    }
+    Some(limit)
+}
+
+/// A cost payable with mana of any type: each colored or hybrid symbol is one generic.
+pub fn any_mana(cost: &ManaCost) -> ManaCost {
+    ManaCost {
+        symbols: cost
+            .symbols
+            .iter()
+            .map(|s| match s {
+                ManaSymbol::Colored(_) | ManaSymbol::Hybrid(..) | ManaSymbol::Phyrexian(_) => {
+                    ManaSymbol::Generic(1)
+                }
+                ManaSymbol::MonoHybrid(n, _) => ManaSymbol::Generic(*n),
+                other => *other,
+            })
+            .collect(),
+    }
+}
+
 /// The cost to cast `object`, after every applicable modifier.
 pub fn total_cost(
     state: &GameState,
@@ -34,7 +74,19 @@ pub fn total_cost(
     // a card still in the graveyard is costed as it would be cast from there.
     let base = match (&obj.cast_context, obj.zone.zone) {
         (Some(cc), _) if cc.cost_override.is_some() => cc.cost_override.clone()?,
-        (_, mtg_core::Zone::Graveyard) => graveyard_cast(cards, obj.card, obj.face)?.0,
+        (_, mtg_core::Zone::Graveyard) => graveyard_cast_now(state, cards, object, obj.face)?.0,
+        // "You may play it this turn without paying its mana cost."
+        (_, mtg_core::Zone::Exile)
+            if obj.may_play_free && obj.may_play.is_some_and(|(p, _, _)| p == controller) =>
+        {
+            ManaCost::default()
+        }
+        // "Mana of any type can be spent to cast them."
+        (_, mtg_core::Zone::Exile)
+            if obj.may_play_any_mana && obj.may_play.is_some_and(|(p, _, _)| p == controller) =>
+        {
+            any_mana(&face.mana_cost)
+        }
         // Foretold or plotted: its later cost (CR 702.143a, 702.170d).
         (_, mtg_core::Zone::Exile) if obj.cast_later.is_some() => obj
             .cast_later
@@ -112,7 +164,7 @@ pub fn total_cost(
     let tax = if obj.zone.zone == mtg_core::Zone::Command
         && state.commander.is_commander(obj.owner, obj.card)
     {
-        state.commander.tax(obj.owner)
+        state.commander.tax_for(obj.owner, obj.card)
     } else {
         state.commander.tax_due.get(&object).copied().unwrap_or(0)
     };
@@ -286,15 +338,48 @@ pub fn cast_forbidden(
     object: ObjectId,
     who: PlayerId,
 ) -> bool {
+    let x = state
+        .objects
+        .get(&object)
+        .and_then(|o| o.cast_context.as_ref())
+        .map_or(0, |c| c.x);
+    cast_forbidden_with_x(state, cards, object, who, x)
+}
+
+/// A face-down spell has the face-down characteristics during casting legality checks.
+pub fn face_down_cast_forbidden(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    who: PlayerId,
+) -> bool {
+    let mut face_down = state.clone();
+    if let Some(o) = face_down.objects.get_mut(&object) {
+        o.face_down = true;
+    }
+    cast_forbidden_with_x(&face_down, cards, object, who, 0)
+}
+
+/// Check an announced X before committing to the spell's costs.
+pub fn cast_forbidden_with_x(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    who: PlayerId,
+    x: u32,
+) -> bool {
     let chars = ComputedChars(cards);
     crate::layers::effects(state, cards).iter().any(|e| {
-        let mtg_ir::effect::Modification::Restriction(mtg_ir::effect::Restriction::CantCast {
-            who: players,
-            spells,
-            beyond,
-        }) = &e.modification
-        else {
-            return false;
+        let (players, spells, beyond, land_limit) = match &e.modification {
+            Modification::Restriction(Restriction::CantCast {
+                who,
+                spells,
+                beyond,
+            }) => (who, spells, *beyond, false),
+            Modification::Restriction(Restriction::CantCastAboveLandCount { who, spells }) => {
+                (who, spells, None, true)
+            }
+            _ => return false,
         };
         let Some(controller) = e
             .controller
@@ -317,6 +402,29 @@ pub fn cast_forbidden(
             .unwrap_or_default()
             .contains(&who)
             && eval::matches(&ctx, spells, object).unwrap_or(false)
+            && (!land_limit || {
+                let lands = state
+                    .battlefield()
+                    .into_iter()
+                    .filter(|id| {
+                        crate::layers::controller(state, *id) == Some(who)
+                            && crate::layers::compute(state, cards, *id)
+                                .is_some_and(|c| c.has_type(mtg_core::CardType::Land))
+                    })
+                    .count() as u32;
+                crate::layers::compute(state, cards, object).is_some_and(|c| {
+                    let variables = c
+                        .mana_cost
+                        .symbols
+                        .iter()
+                        .filter(|s| **s == ManaSymbol::Variable)
+                        .count() as u32;
+                    c.mana_cost
+                        .mana_value()
+                        .saturating_add(x.saturating_mul(variables))
+                        > lands
+                })
+            })
             && beyond.is_none_or(|n| {
                 // "More than one noncreature spell each turn" counts only those.
                 let noncreature = *spells
@@ -760,6 +868,25 @@ pub fn cost_candidates(
             .collect();
         return Some((from, (*n).max(0) as u32));
     }
+    // "Exile cards from your graveyard equal to the number of opponents you have": the
+    // count as it is now.
+    if let A::ExileFrom {
+        zone: mtg_core::Zone::Graveyard,
+        filter,
+        count,
+    } = part
+        && !matches!(count, Value::Fixed(_) | Value::X)
+        && *filter != mtg_ir::ObjectFilter::IsSelf
+    {
+        let n = eval::value(&ctx, count).unwrap_or(0).max(0) as u32;
+        let from = state
+            .objects_in(mtg_core::ZoneRef::of(mtg_core::Zone::Graveyard, who))
+            .into_iter()
+            .filter(|id| *id != source)
+            .filter(|id| eval::matches(&ctx, filter, *id).unwrap_or(false))
+            .collect();
+        return Some((from, n));
+    }
     let (zone, filter, n) = match part {
         A::Reveal {
             filter,
@@ -791,6 +918,15 @@ pub fn cost_candidates(
             at_random: false,
         } if *filter != mtg_ir::ObjectFilter::IsSelf => {
             (mtg_core::ZoneRef::of(mtg_core::Zone::Hand, who), filter, *n)
+        }
+        // Before announcement X may be zero. The announcement substitutes its
+        // chosen value before asking which cards pay this cost.
+        A::Discard {
+            count: Value::X,
+            filter,
+            at_random: false,
+        } if *filter != mtg_ir::ObjectFilter::IsSelf => {
+            (mtg_core::ZoneRef::of(mtg_core::Zone::Hand, who), filter, 0)
         }
         // "Exile a blue card from your hand" (an alternative cost).
         A::ExileFrom {
@@ -859,7 +995,7 @@ pub fn spell_extra_cost(
         }
     }
     if cc.and_then(|c| c.cast_from) == Some(mtg_core::Zone::Graveyard) {
-        extend(cast_from_additional(face, mtg_core::Zone::Graveyard).additional);
+        extend(graveyard_additional_now(state, cards, object, o.face).additional);
     }
     if let Some(
         alt @ (mtg_ir::ability::AltCost::Pay
@@ -972,6 +1108,99 @@ pub fn graveyard_cast(
             } if *z == zone => Some((cost.mana.clone(), *exile)),
             _ => None,
         })
+}
+
+/// Escape granted by a permanent ("each nonland card in your graveyard has escape",
+/// Underworld Breach): the face's own mana cost, and the extra cost the grant names.
+/// Asked of a card in its owner's graveyard, or of one being cast from there.
+fn granted_escape(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    face: u8,
+) -> Option<(ManaCost, mtg_ir::Cost, bool)> {
+    let obj = state.objects.get(&object)?;
+    let printed = cards.face(obj.card, face)?;
+    if printed.card_types.contains(&mtg_core::CardType::Land) {
+        return None;
+    }
+    let chars = ComputedChars(cards);
+    crate::layers::effects(state, cards).iter().find_map(|e| {
+        // Granted to this card itself: "gains flashback until end of turn".
+        if let Modification::Restriction(Restriction::GraveyardCast { exile }) = &e.modification {
+            return crate::layers::applies(state, cards, e, object)
+                .then(|| (printed.mana_cost.clone(), mtg_ir::Cost::free(), *exile));
+        }
+        let Modification::Restriction(Restriction::GrantEscape {
+            cards: filter,
+            additional,
+        }) = &e.modification
+        else {
+            return None;
+        };
+        let controller = crate::layers::controller(state, e.source).or(e.controller)?;
+        if controller != obj.owner {
+            return None;
+        }
+        let ctx = Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        eval::matches(&ctx, filter, object)
+            .unwrap_or(false)
+            .then(|| {
+                (
+                    printed.mana_cost.clone(),
+                    mtg_ir::Cost {
+                        additional: additional.clone(),
+                        ..mtg_ir::Cost::free()
+                    },
+                    false,
+                )
+            })
+    })
+}
+
+/// [`graveyard_cast`] for a particular object: its printed way, or one granted to it —
+/// escape (never exiled afterwards, CR 702.138), or flashback for its mana cost.
+pub fn graveyard_cast_now(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    face: u8,
+) -> Option<(ManaCost, bool)> {
+    let obj = state.objects.get(&object)?;
+    graveyard_cast(cards, obj.card, face).or_else(|| {
+        granted_escape(state, cards, object, face).map(|(mana, _, exile)| (mana, exile))
+    })
+}
+
+/// [`cast_from_additional`] for a particular object cast from its graveyard: the printed
+/// additional cost when it has its own way, else what granted escape adds.
+pub fn graveyard_additional_now(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    face: u8,
+) -> mtg_ir::Cost {
+    let Some(obj) = state.objects.get(&object) else {
+        return mtg_ir::Cost::free();
+    };
+    if graveyard_cast(cards, obj.card, face).is_some()
+        && let Some(f) = cards.face(obj.card, face)
+    {
+        return cast_from_additional(f, mtg_core::Zone::Graveyard);
+    }
+    granted_escape(state, cards, object, face)
+        .map(|(_, extra, _)| extra)
+        .unwrap_or_else(mtg_ir::Cost::free)
 }
 
 /// The additional costs of casting a face from `zone` ([`cast_from`]), as a cost.

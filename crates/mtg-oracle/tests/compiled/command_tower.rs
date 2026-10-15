@@ -79,3 +79,26 @@ fn the_tower_pays_for_a_spell() {
     assert_eq!(game.life(P0), 23);
     assert!(game.engine.state.objects[&tower].tapped);
 }
+
+#[test]
+fn partner_identity_is_the_union_even_after_the_partner_leaves_the_command_zone() {
+    let mut t = Table::default();
+    let tower = t.card("", "Land", None, TOWER);
+    let first = t.card("{G}{U}", "Legendary Creature", Some((1, 1)), "Partner");
+    let second = t.card("{B}{R}", "Legendary Creature", Some((1, 1)), "Partner");
+    let red = t.card("{R}", "Instant", None, "You gain 1 life.");
+    let white = t.card("{W}", "Instant", None, "You gain 1 life.");
+    let mut g = Game::new(t);
+    g.engine.state.commander.commanders.insert(P0, first);
+    g.engine.state.commander.partners.insert(P0, second);
+    g.put(first, P0, Zone::Command);
+    g.put(second, P0, Zone::Battlefield);
+    g.put(tower, P0, Zone::Battlefield);
+    let red = g.put(red, P0, Zone::Hand);
+    let white = g.put(white, P0, Zone::Hand);
+    let actions = g.main();
+    assert!(actions.contains(&Action::Cast { object: red }));
+    assert!(!actions.contains(&Action::Cast { object: white }));
+    g.cast(red, &[]);
+    assert_eq!(g.life(P0), 21);
+}

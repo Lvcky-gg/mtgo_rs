@@ -153,6 +153,8 @@ pub struct ResolveCtx {
     /// the cost was payable. Asking the player again would be asking a question
     /// whose answer is already determined.
     pub mana_choice: Option<mtg_core::Color>,
+    /// For mana "in any combination" of colors, the color of each one the planner spends.
+    pub mana_split: Vec<mtg_core::Color>,
 
     /// Per chosen target, whether it is still legal (CR 608.2b). Empty means all legal.
     pub target_legal: Vec<bool>,
@@ -187,6 +189,7 @@ impl ResolveCtx {
             x: 0,
             bindings: BTreeMap::new(),
             mana_choice: None,
+            mana_split: Vec::new(),
             target_legal: Vec::new(),
             answers: Vec::new(),
             modes: None,
@@ -482,6 +485,494 @@ fn resolve_inner(
             }
             Ok(())
         }
+        Effect::SearchAndSplit {
+            count,
+            different_names,
+            chooser,
+            chosen,
+            chosen_to,
+            rest_to,
+        } => {
+            let me = rc.controller;
+            let rule = search_rule(state, cards, me, me);
+            let searcher = match rule {
+                SearchRule::ControlledBy(p) => p,
+                _ => me,
+            };
+            let library = ZoneRef::of(Zone::Library, me);
+            let names = |id: ObjectId| -> Vec<Box<str>> {
+                let card = state.objects[&id].card;
+                (0..2)
+                    .filter_map(|face| cards.face(card, face).map(|f| f.name.clone()))
+                    .take(if cards.layout(card) == mtg_ir::Layout::Split {
+                        2
+                    } else {
+                        1
+                    })
+                    .collect()
+            };
+            // A search of a hidden zone may find fewer (CR 701.19b). With "different
+            // names", one card at a time, each offered among names not yet found.
+            let mut found: Vec<ObjectId> = Vec::new();
+            if rule == SearchRule::Forbidden {
+                apply::apply(state, cause, Event::Shuffled { player: me }, log);
+                return Ok(());
+            }
+            if *different_names {
+                while found.len() < usize::from(*count) {
+                    let taken: Vec<Box<str>> = found.iter().flat_map(|id| names(*id)).collect();
+                    let candidates: Vec<ObjectId> = state
+                        .objects_in(library)
+                        .into_iter()
+                        .filter(|id| !names(*id).iter().any(|n| taken.contains(n)))
+                        .collect();
+                    if candidates.is_empty() {
+                        break;
+                    }
+                    let picked = ask_objects(rc, searcher, candidates, 0, 1, "search for")?;
+                    let Some(one) = picked.first() else {
+                        break;
+                    };
+                    found.push(*one);
+                }
+            } else {
+                let candidates = state.objects_in(library);
+                found = ask_objects(rc, searcher, candidates, 0, u32::from(*count), "search for")?;
+            }
+            if let SearchRule::ControlledBy(agent) = rule {
+                agent_takes(state, log, &found, agent, cause);
+                apply::apply(state, cause, Event::Shuffled { player: me }, log);
+                return Ok(());
+            }
+            for id in &found {
+                apply::apply(state, cause, Event::Revealed { object: *id }, log);
+            }
+            let who = with_ctx(state, cards, rc, |ctx| eval::players(ctx, chooser))?
+                .first()
+                .copied();
+            let take = (*chosen as usize).min(found.len()) as u32;
+            let picked = match who {
+                Some(p) if take > 0 => ask_objects(
+                    rc,
+                    p,
+                    found.clone(),
+                    take,
+                    take,
+                    "choose cards for the other pile",
+                )?,
+                _ => Vec::new(),
+            };
+            for id in &found {
+                let to = if picked.contains(id) {
+                    *chosen_to
+                } else {
+                    *rest_to
+                };
+                move_to(state, log, *id, to, cause);
+            }
+            apply::apply(state, cause, Event::Shuffled { player: me }, log);
+            Ok(())
+        }
+        Effect::BounceChain { what } => {
+            let Some(target) = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?
+                .first()
+                .copied()
+            else {
+                return Ok(());
+            };
+            let Some(player) = crate::layers::controller(state, target) else {
+                return Ok(());
+            };
+            if move_to(state, log, target, Zone::Hand, cause).is_none() {
+                return Ok(());
+            }
+            let lands: Vec<ObjectId> = state
+                .battlefield()
+                .into_iter()
+                .filter(|id| crate::layers::controller(state, *id) == Some(player))
+                .filter(|id| {
+                    crate::layers::compute(state, cards, *id)
+                        .is_some_and(|c| c.has_type(mtg_core::CardType::Land))
+                })
+                .collect();
+            if lands.is_empty() {
+                return Ok(());
+            }
+            let picked = ask_objects(
+                rc,
+                player,
+                lands,
+                0,
+                1,
+                "sacrifice a land to copy this spell?",
+            )?;
+            let Some(land) = picked.first().copied() else {
+                return Ok(());
+            };
+            move_to(state, log, land, Zone::Graveyard, cause);
+            apply::apply(
+                state,
+                cause,
+                Event::Sacrificed {
+                    player,
+                    object: land,
+                },
+                log,
+            );
+            if !ask_confirm(rc, player, "copy this spell?")? {
+                return Ok(());
+            }
+            let caster = rc.controller;
+            rc.controller = player;
+            let result = resolve(
+                state,
+                cards,
+                log,
+                &Effect::CopySpell {
+                    what: Selector::SelfSource,
+                    may_change_targets: true,
+                },
+                rc,
+            );
+            rc.controller = caster;
+            result
+        }
+        Effect::PersistMana { effect } => {
+            let before: BTreeMap<PlayerId, [u16; 6]> = state
+                .players
+                .iter()
+                .map(|(id, p)| (*id, p.mana.amounts))
+                .collect();
+            resolve(state, cards, log, effect, rc)?;
+            for (id, p) in &state.players {
+                let was = before.get(id).copied().unwrap_or_default();
+                let kept = state.persistent_mana.entry(*id).or_default();
+                for slot in 0..6 {
+                    kept[slot] += p.mana.amounts[slot].saturating_sub(was[slot]);
+                }
+            }
+            state
+                .persistent_mana
+                .retain(|_, k| k.iter().any(|n| *n > 0));
+            Ok(())
+        }
+        Effect::ReanimateAttach { what } => {
+            // "If it's on the battlefield".
+            let Some(aura) = state
+                .objects
+                .get(&rc.source)
+                .filter(|o| o.zone.zone == Zone::Battlefield)
+            else {
+                return Ok(());
+            };
+            let card = match what {
+                None => aura.attached_to,
+                Some(sel) => with_ctx(state, cards, rc, |ctx| eval::objects(ctx, sel))?
+                    .first()
+                    .copied(),
+            };
+            let Some(card) = card.filter(|c| {
+                state.objects.get(c).is_some_and(|o| {
+                    o.zone.zone == Zone::Graveyard
+                        && cards
+                            .face(o.card, o.face)
+                            .is_some_and(|f| f.card_types.contains(&mtg_core::CardType::Creature))
+                })
+            }) else {
+                return Ok(());
+            };
+            // Necromancy becomes an Aura (Animate Dead already is one).
+            if let Some(aura_type) = cards.subtype_named("Aura")
+                && !crate::layers::compute(state, cards, rc.source)
+                    .is_some_and(|c| c.subtypes.contains(&aura_type))
+            {
+                let id = state.new_object_id();
+                let timestamp = state.bump();
+                let modification = mtg_ir::effect::Modification::AddSubtypes(vec![aura_type]);
+                state.continuous.push(ContinuousEffect {
+                    id,
+                    source: rc.source,
+                    affected: AffectedSet::Fixed(vec![rc.source]),
+                    layer: layer_of(&modification),
+                    modification,
+                    duration: Duration::Permanent,
+                    timestamp,
+                    ability: None,
+                    controller: Some(rc.controller),
+                });
+            }
+            let Some(returned) = move_to(state, log, card, Zone::Battlefield, cause) else {
+                return Ok(());
+            };
+            apply::apply(
+                state,
+                cause,
+                Event::EnteredUnderControl {
+                    object: returned,
+                    player: rc.controller,
+                },
+                log,
+            );
+            state.reanimated.insert(rc.source, returned);
+            apply::apply(
+                state,
+                cause,
+                Event::Attached {
+                    object: rc.source,
+                    to: Some(returned),
+                },
+                log,
+            );
+            let pay = enter_choice(state, cards, rc, returned)?;
+            entered(state, cards, log, returned, cause, pay);
+            Ok(())
+        }
+        Effect::SacrificeReanimated => {
+            // A leaves-the-battlefield trigger's source is the Aura where it went; the link
+            // is under the identity it had on the battlefield.
+            let was = log.iter().rev().find_map(|e| match e.event {
+                Event::ZoneChange {
+                    object, new_object, ..
+                } if new_object == rc.source => Some(object),
+                _ => None,
+            });
+            let Some(creature) = state
+                .reanimated
+                .remove(&rc.source)
+                .or_else(|| was.and_then(|w| state.reanimated.remove(&w)))
+            else {
+                return Ok(());
+            };
+            if let Some(player) = state
+                .objects
+                .get(&creature)
+                .filter(|o| o.zone.zone == Zone::Battlefield)
+                .and_then(|_| crate::layers::controller(state, creature))
+            {
+                move_to(state, log, creature, Zone::Graveyard, cause);
+                apply::apply(
+                    state,
+                    cause,
+                    Event::Sacrificed {
+                        player,
+                        object: creature,
+                    },
+                    log,
+                );
+            }
+            Ok(())
+        }
+        Effect::SearchExileMayCast { max_mana_value } => {
+            let me = rc.controller;
+            let rule = search_rule(state, cards, me, me);
+            let library = state.objects_in(ZoneRef::of(Zone::Library, me));
+            let found = match rule {
+                SearchRule::Forbidden => Vec::new(),
+                SearchRule::ControlledBy(chooser) if !library.is_empty() => {
+                    ask_objects(rc, chooser, library, 0, 1, "search for")?
+                }
+                SearchRule::Normal if !library.is_empty() => {
+                    ask_objects(rc, me, library, 0, 1, "search for")?
+                }
+                _ => Vec::new(),
+            };
+            if rule != SearchRule::Forbidden {
+                apply::apply(state, cause, Event::LibrarySearched { player: me }, log);
+            }
+            if let SearchRule::ControlledBy(agent) = rule {
+                agent_takes(state, log, &found, agent, cause);
+                apply::apply(state, cause, Event::Shuffled { player: me }, log);
+                return Ok(());
+            }
+            let exiled = found
+                .first()
+                .and_then(|id| move_to(state, log, *id, Zone::Exile, cause));
+            if let Some(x) = exiled {
+                apply::apply(
+                    state,
+                    cause,
+                    Event::FaceDownChanged {
+                        object: x,
+                        face_down: true,
+                    },
+                    log,
+                );
+            }
+            apply::apply(state, cause, Event::Shuffled { player: me }, log);
+            let Some(x) = exiled else {
+                return Ok(());
+            };
+            let bargained = with_ctx(state, cards, rc, |ctx| {
+                eval::condition(ctx, &mtg_ir::trigger::Condition::Kicked)
+            })?;
+            let small = state
+                .objects
+                .get(&x)
+                .and_then(|o| cards.face(o.card, 0))
+                .is_some_and(|f| f.mana_cost.mana_value() <= *max_mana_value);
+            let cast =
+                bargained && small && cast_during_resolution(state, cards, log, rc, x, me, None)?;
+            if !cast && state.objects.contains_key(&x) {
+                move_to(state, log, x, Zone::Hand, cause);
+            }
+            Ok(())
+        }
+        Effect::ShuffleInAndRevealSelfName => {
+            let Some((owner, card)) = state
+                .objects
+                .get(&rc.source)
+                .filter(|o| o.zone.zone == Zone::Battlefield)
+                .map(|o| (o.owner, o.card))
+            else {
+                return Ok(());
+            };
+            let Some(name) = cards.face(card, 0).map(|f| f.name.clone()) else {
+                return Ok(());
+            };
+            // A token ceases to exist in the library (CR 111.8): nothing is shuffled in.
+            if state.objects[&rc.source].is_token {
+                move_to(state, log, rc.source, Zone::Library, cause);
+                return Ok(());
+            }
+            if move_to(state, log, rc.source, Zone::Library, cause).is_none() {
+                return Ok(());
+            }
+            apply::apply(state, cause, Event::Shuffled { player: owner }, log);
+            let library = ZoneRef::of(Zone::Library, owner);
+            while let Some(top) = state.objects_in(library).first().copied() {
+                apply::apply(state, cause, Event::Revealed { object: top }, log);
+                let named = cards
+                    .face(state.objects[&top].card, 0)
+                    .is_some_and(|f| f.name == name);
+                if named {
+                    if let Some(new_id) = move_to(state, log, top, Zone::Battlefield, cause) {
+                        let pay = enter_choice(state, cards, rc, new_id)?;
+                        entered(state, cards, log, new_id, cause, pay);
+                    }
+                    break;
+                }
+                move_to(state, log, top, Zone::Graveyard, cause);
+            }
+            Ok(())
+        }
+        Effect::ExchangeOrSacrifice { a, b } => {
+            let before = state.continuous.len();
+            resolve(
+                state,
+                cards,
+                log,
+                &Effect::ExchangeControl {
+                    a: a.clone(),
+                    b: b.clone(),
+                },
+                rc,
+            )?;
+            if state.continuous.len() == before {
+                resolve(
+                    state,
+                    cards,
+                    log,
+                    &Effect::Sacrifice {
+                        who: Selector::You,
+                        what: a.clone(),
+                    },
+                    rc,
+                )?;
+            }
+            Ok(())
+        }
+        Effect::GrantEncore { what } => {
+            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            for object in ids {
+                let Some(o) = state.objects.get(&object) else {
+                    continue;
+                };
+                let Some(mana) = cards.face(o.card, o.face).map(|f| f.mana_cost.clone()) else {
+                    continue;
+                };
+                let id = state.new_object_id();
+                let timestamp = state.bump();
+                let modification =
+                    mtg_ir::effect::Modification::GrantAbility(Box::new(mtg_ir::Ability {
+                        id: mtg_core::AbilityId(0),
+                        kind: mtg_ir::ability::encore(mana),
+                        targets: Vec::new(),
+                        source_text: None,
+                    }));
+                state.continuous.push(ContinuousEffect {
+                    id,
+                    source: rc.source,
+                    affected: AffectedSet::Fixed(vec![object]),
+                    layer: layer_of(&modification),
+                    modification,
+                    duration: Duration::UntilEndOfTurn,
+                    timestamp,
+                    ability: None,
+                    controller: Some(rc.controller),
+                });
+                apply::apply(
+                    state,
+                    cause,
+                    Event::ContinuousEffectBegan {
+                        effect: id,
+                        source: rc.source,
+                    },
+                    log,
+                );
+            }
+            Ok(())
+        }
+        Effect::ExileUntilNamed { exile_first } => {
+            let player = rc.controller;
+            let n = with_ctx(state, cards, rc, |ctx| eval::value(ctx, exile_first))?;
+            // Any name may be chosen. Offering the names of the player's own cards, and
+            // one name that is none of them, covers every distinct outcome without
+            // revealing what anyone else's deck holds.
+            let mut names: Vec<Box<str>> = state
+                .objects
+                .values()
+                .filter(|o| o.owner == player && !o.is_token)
+                .filter_map(|o| cards.face(o.card, 0).map(|f| f.name.clone()))
+                .collect();
+            names.sort();
+            names.dedup();
+            names.push("a card not in your deck".into());
+            let answer = rc.need(
+                player,
+                ChoiceKind::ChooseModes {
+                    available: names.clone(),
+                    count: 1,
+                    min: None,
+                },
+                "choose a card name",
+            )?;
+            let last = names.len() - 1;
+            let pick = match answer {
+                Answer::Modes(m) => m.first().map_or(last, |i| usize::from(*i).min(last)),
+                _ => last,
+            };
+            let named = (pick < last).then(|| names[pick].clone());
+            let library = ZoneRef::of(Zone::Library, player);
+            for _ in 0..n.max(0) {
+                let Some(top) = state.objects_in(library).first().copied() else {
+                    break;
+                };
+                move_to(state, log, top, Zone::Exile, cause);
+            }
+            while let Some(top) = state.objects_in(library).first().copied() {
+                apply::apply(state, cause, Event::Revealed { object: top }, log);
+                let card = state.objects[&top].card;
+                let is_named = named.as_ref().is_some_and(|name| {
+                    (0..2).any(|face| cards.face(card, face).is_some_and(|f| f.name == *name))
+                });
+                if is_named {
+                    move_to(state, log, top, Zone::Hand, cause);
+                    break;
+                }
+                move_to(state, log, top, Zone::Exile, cause);
+            }
+            Ok(())
+        }
 
         Effect::SpendOnly {
             only,
@@ -522,73 +1013,106 @@ fn resolve_inner(
                         }
                         other => other,
                     };
-                    let (mut color, amount) = resolve_output(out, rc);
-                    // Targeted abilities and spells choose mana colors on resolution.
-                    // A mana ability's planner has already supplied its choice.
-                    let colors = out.possible_colors();
-                    if amount > 0 && colors.len() > 1 && rc.mana_choice.is_none() {
-                        let available = colors
-                            .iter()
-                            .map(|c| {
-                                match c {
-                                    mtg_core::Color::White => "white",
-                                    mtg_core::Color::Blue => "blue",
-                                    mtg_core::Color::Black => "black",
-                                    mtg_core::Color::Red => "red",
-                                    mtg_core::Color::Green => "green",
-                                }
-                                .into()
-                            })
-                            .collect();
-                        let picked = match rc.need(
-                            p,
-                            ChoiceKind::ChooseModes {
-                                available,
-                                count: 1,
-                                min: None,
-                            },
-                            "choose a color of mana to add",
-                        )? {
-                            Answer::Modes(m) => m.first().copied().unwrap_or(0) as usize,
-                            _ => 0,
+                    // "X mana in any combination of {U} and/or {R}": as the planner split
+                    // it, the rest (or all, by hand) of the activation's chosen color.
+                    let chunks: Vec<(Option<mtg_core::Color>, u16)> =
+                        if let ManaOutput::Combination { amount, colors } = out {
+                            let n = match amount {
+                                mtg_ir::Value::Fixed(n) => (*n).max(0) as usize,
+                                other => with_ctx(state, cards, rc, |ctx| eval::value(ctx, other))?
+                                    .max(0) as usize,
+                            };
+                            let mut made: Vec<mtg_core::Color> = rc
+                                .mana_split
+                                .iter()
+                                .copied()
+                                .filter(|c| colors.contains(c))
+                                .take(n)
+                                .collect();
+                            if let Some(fill) = rc
+                                .mana_choice
+                                .filter(|c| colors.contains(c))
+                                .or_else(|| colors.first().copied())
+                            {
+                                made.resize(n, fill);
+                            }
+                            colors
+                                .iter()
+                                .map(|c| (Some(*c), made.iter().filter(|m| *m == c).count() as u16))
+                                .filter(|(_, n)| *n > 0)
+                                .collect()
+                        } else {
+                            let (mut color, amount) = resolve_output(out, rc);
+                            // Targeted abilities and spells choose mana colors on resolution.
+                            // A mana ability's planner has already supplied its choice.
+                            let colors = out.possible_colors();
+                            if amount > 0 && colors.len() > 1 && rc.mana_choice.is_none() {
+                                let available = colors
+                                    .iter()
+                                    .map(|c| {
+                                        match c {
+                                            mtg_core::Color::White => "white",
+                                            mtg_core::Color::Blue => "blue",
+                                            mtg_core::Color::Black => "black",
+                                            mtg_core::Color::Red => "red",
+                                            mtg_core::Color::Green => "green",
+                                        }
+                                        .into()
+                                    })
+                                    .collect();
+                                let picked = match rc.need(
+                                    p,
+                                    ChoiceKind::ChooseModes {
+                                        available,
+                                        count: 1,
+                                        min: None,
+                                    },
+                                    "choose a color of mana to add",
+                                )? {
+                                    Answer::Modes(m) => m.first().copied().unwrap_or(0) as usize,
+                                    _ => 0,
+                                };
+                                color = colors.get(picked).copied();
+                            }
+                            vec![(color, amount)]
                         };
-                        color = colors.get(picked).copied();
-                    }
-                    if amount > 0 {
-                        let before = state.player(p).mana.amounts;
-                        apply::apply(
-                            state,
-                            cause,
-                            Event::ManaAdded {
-                                player: p,
-                                color,
-                                amount,
-                            },
-                            log,
-                        );
-                        if !rc.mana_restrictions.is_empty() {
-                            let amounts = std::array::from_fn(|slot| {
-                                state.player(p).mana.amounts[slot].saturating_sub(before[slot])
-                            });
-                            if amounts.iter().any(|n| *n > 0) {
-                                state.restricted_mana.push(crate::state::RestrictedMana {
+                    for (color, amount) in chunks {
+                        if amount > 0 {
+                            let before = state.player(p).mana.amounts;
+                            apply::apply(
+                                state,
+                                cause,
+                                Event::ManaAdded {
                                     player: p,
-                                    source: rc.source,
-                                    amounts,
-                                    restrictions: rc
-                                        .mana_restrictions
-                                        .iter()
-                                        .map(|(filter, spells_only)| {
-                                            (
-                                                crate::mana::freeze_mana_restriction(
-                                                    state, rc.source, filter,
-                                                ),
-                                                *spells_only,
-                                            )
-                                        })
-                                        .collect(),
-                                    uncounterable: rc.mana_uncounterable,
+                                    color,
+                                    amount,
+                                },
+                                log,
+                            );
+                            if !rc.mana_restrictions.is_empty() {
+                                let amounts = std::array::from_fn(|slot| {
+                                    state.player(p).mana.amounts[slot].saturating_sub(before[slot])
                                 });
+                                if amounts.iter().any(|n| *n > 0) {
+                                    state.restricted_mana.push(crate::state::RestrictedMana {
+                                        player: p,
+                                        source: rc.source,
+                                        amounts,
+                                        restrictions: rc
+                                            .mana_restrictions
+                                            .iter()
+                                            .map(|(filter, spells_only)| {
+                                                (
+                                                    crate::mana::freeze_mana_restriction(
+                                                        state, rc.source, filter,
+                                                    ),
+                                                    *spells_only,
+                                                )
+                                            })
+                                            .collect(),
+                                        uncounterable: rc.mana_uncounterable,
+                                    });
+                                }
                             }
                         }
                     }
@@ -740,11 +1264,35 @@ fn resolve_inner(
             Ok(())
         }
 
+        Effect::AddCounterKinds { what, counters } => {
+            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            let mut amounts = Vec::new();
+            for (kind, amount) in counters {
+                amounts.push((*kind, value_asking(state, cards, rc, amount)?));
+            }
+            let events = ids
+                .into_iter()
+                .flat_map(|object| {
+                    amounts
+                        .iter()
+                        .filter(|(_, n)| *n > 0)
+                        .map(move |(kind, delta)| Event::CountersChanged {
+                            object,
+                            kind: *kind,
+                            delta: *delta,
+                        })
+                })
+                .collect::<Vec<_>>();
+            if !events.is_empty() {
+                apply::apply_simultaneous(state, cause, events, log);
+            }
+            Ok(())
+        }
         Effect::AddCounters { what, kind, amount } => {
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
             let n = value_asking(state, cards, rc, amount)?;
             for id in ids {
-                if n != 0 {
+                if n != 0 && state.objects.get(&id).is_some_and(|o| !o.phased_out) {
                     apply::apply(
                         state,
                         cause,
@@ -879,6 +1427,27 @@ fn resolve_inner(
             Ok(())
         }
 
+        Effect::FreezeValues { effect } => {
+            let mut frozen = (**effect).clone();
+            let mut failure = None;
+            mtg_ir::walk::Visitor {
+                filter: &mut |_| {},
+                token: &mut |_| {},
+                value: &mut |value| {
+                    if failure.is_none() {
+                        match with_ctx(state, cards, rc, |ctx| eval::value(ctx, value)) {
+                            Ok(number) => *value = mtg_ir::Value::Fixed(number),
+                            Err(error) => failure = Some(error),
+                        }
+                    }
+                },
+            }
+            .effect(&mut frozen);
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            resolve(state, cards, log, &frozen, rc)
+        }
         Effect::Delayed { on, effect } => {
             let card = state
                 .objects
@@ -947,10 +1516,11 @@ fn resolve_inner(
             face_down,
             under_control_of,
         } => {
-            // Only the owner's own zone, face up, under its owner's control is carried
-            // out. Anything else is refused rather than approximated.
+            // Only the owner's own zone, face up (or face down into exile), under its
+            // owner's control is carried out. Anything else is refused rather than
+            // approximated.
             if owner_relative_to.is_some()
-                || *face_down
+                || (*face_down && *to != Zone::Exile)
                 || (under_control_of.is_some() && *to != Zone::Battlefield)
             {
                 return Err(ResolveError::Unsupported("zone change with a twist"));
@@ -962,7 +1532,8 @@ fn resolve_inner(
                 None => None,
             };
             let mut ids = objects_asking(state, cards, rc, what)?;
-            // "Search your library for …" (CR 701.19): searched, found or not.
+            // "Search your library for …" (CR 701.19): searched, found or not — unless
+            // Ashiok forbids it; under Opposition Agent, what is found is exiled instead.
             if let Selector::ChosenBy {
                 chooser,
                 zone: Zone::Library,
@@ -972,7 +1543,17 @@ fn resolve_inner(
                     .first()
                     .copied()
             {
-                apply::apply(state, cause, Event::LibrarySearched { player }, log);
+                match search_rule(state, cards, player, rc.controller) {
+                    SearchRule::Forbidden => {}
+                    SearchRule::Normal => {
+                        apply::apply(state, cause, Event::LibrarySearched { player }, log);
+                    }
+                    SearchRule::ControlledBy(agent) => {
+                        apply::apply(state, cause, Event::LibrarySearched { player }, log);
+                        agent_takes(state, log, &ids, agent, cause);
+                        ids.clear();
+                    }
+                }
             }
             if *to == Zone::Library
                 && matches!(
@@ -1042,6 +1623,18 @@ fn resolve_inner(
                 let Some(new_id) = move_to_at(state, log, id, *to, index, cause) else {
                     continue;
                 };
+                // "Exile the top card of your library face down" (CR 406.3).
+                if *face_down {
+                    apply::apply(
+                        state,
+                        cause,
+                        Event::FaceDownChanged {
+                            object: new_id,
+                            face_down: true,
+                        },
+                        log,
+                    );
+                }
                 if *to == Zone::Battlefield {
                     if let Some(player) = new_controller {
                         apply::apply(
@@ -1178,6 +1771,23 @@ fn resolve_inner(
                     *toughness = mtg_ir::Value::Fixed(t);
                 }
             }
+            // "If a card would be put into your graveyard from anywhere this turn, exile
+            // that card instead" applies at once — to the resolving spell itself too.
+            if let mtg_ir::effect::Modification::Restriction(
+                mtg_ir::effect::Restriction::GraveyardToExile {
+                    whose: Selector::You,
+                    counter,
+                },
+            ) = &modification
+            {
+                let slot = state
+                    .graveyard_exiled
+                    .entry(rc.controller)
+                    .or_insert(*counter);
+                if counter.is_none() {
+                    *slot = None;
+                }
+            }
             let modification = &modification;
             let id = state.new_object_id();
             let timestamp = state.bump();
@@ -1186,8 +1796,17 @@ fn resolve_inner(
                 source: rc.source,
                 // A one-shot effect freezes its set; a static ability keeps
                 // re-evaluating. `Continuous` from a resolving spell is the former.
-                affected: match duration {
-                    Duration::WhileSourcePresent => AffectedSet::Dynamic(what.clone()),
+                affected: match (duration, what) {
+                    (Duration::WhileSourcePresent, _) => AffectedSet::Dynamic(what.clone()),
+                    // "Spells you control can't be countered this turn" covers spells cast
+                    // later in the turn too: it changes no characteristics (CR 611.2c).
+                    (
+                        _,
+                        Selector::All {
+                            zone: mtg_core::Zone::Stack,
+                            ..
+                        },
+                    ) => AffectedSet::Dynamic(what.clone()),
                     _ => AffectedSet::Fixed(affected),
                 },
                 modification: modification.clone(),
@@ -1238,6 +1857,10 @@ fn resolve_inner(
                     mtg_ir::AdditionalCost::PayLife {
                         amount: mtg_ir::Value::Fixed(n),
                     } => life += n,
+                    // "Pay X life, where X is …": counted as it resolves.
+                    mtg_ir::AdditionalCost::PayLife { amount } if *amount != mtg_ir::Value::X => {
+                        life += with_ctx(state, cards, rc, |ctx| eval::value(ctx, amount))?.max(0)
+                    }
                     mtg_ir::AdditionalCost::PayEnergy {
                         amount: mtg_ir::Value::Fixed(n),
                     } => energy += n,
@@ -1397,6 +2020,7 @@ fn resolve_inner(
             at_random,
         } => {
             let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, who))?;
+            let mut discarded = Vec::new();
             for p in players {
                 let n = with_ctx(state, cards, rc, |ctx| eval::value(ctx, count))?.max(0) as u32;
                 let hand = state.objects_in(ZoneRef::of(Zone::Hand, p));
@@ -1414,9 +2038,12 @@ fn resolve_inner(
                     ask_objects(rc, p, hand, n, n, "discard")?
                 };
                 for id in chosen {
-                    discard(state, cards, log, id, cause);
+                    if let Some(card) = discard(state, cards, log, id, cause) {
+                        discarded.push(Target::Object(card));
+                    }
                 }
             }
+            rc.bindings.insert(Binding::DISCARDED, discarded);
             Ok(())
         }
 
@@ -1665,6 +2292,18 @@ fn resolve_inner(
             };
             let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, controller))?;
             let n = value_asking(state, cards, rc, count)?.max(0);
+            let size = if !matches!(token.power, mtg_ir::Value::Fixed(_))
+                || !matches!(token.toughness, mtg_ir::Value::Fixed(_))
+            {
+                Some(with_ctx(state, cards, rc, |ctx| {
+                    Ok((
+                        eval::value(ctx, &token.power)?,
+                        eval::value(ctx, &token.toughness)?,
+                    ))
+                })?)
+            } else {
+                None
+            };
             let mut made = Vec::new();
             for p in players {
                 for _ in 0..n {
@@ -1679,6 +2318,18 @@ fn resolve_inner(
                         },
                         log,
                     );
+                    if let Some((power, toughness)) = size {
+                        apply::apply(
+                            state,
+                            cause,
+                            Event::TokenSizeSet {
+                                object,
+                                power,
+                                toughness,
+                            },
+                            log,
+                        );
+                    }
                     entered(state, cards, log, object, cause, None);
                     made.push(Target::Object(object));
                 }
@@ -1698,6 +2349,53 @@ fn resolve_inner(
                 }
             }
             rc.bindings.insert(Binding::It, moved);
+            Ok(())
+        }
+        Effect::ForEachExiledWith { slot, effect } => {
+            // A leave trigger can use the destination identity. Cross only this
+            // departure, so earlier blink/reanimation incarnations never get mixed in.
+            let departed = state
+                .objects
+                .get(&rc.source)
+                .or_else(|| state.last_known.get(&rc.source))
+                .is_some_and(|o| o.zone.zone != Zone::Battlefield);
+            let previous = departed
+                .then(|| {
+                    log.iter().rev().find_map(|e| match e.event {
+                        Event::ZoneChange {
+                            object,
+                            new_object,
+                            from,
+                            ..
+                        } if new_object == rc.source && from.zone == Zone::Battlefield => {
+                            Some(object)
+                        }
+                        _ => None,
+                    })
+                })
+                .flatten();
+            let linked: Vec<_> = state
+                .exiled_with
+                .iter()
+                .filter(|(source, card)| {
+                    (*source == rc.source || Some(*source) == previous)
+                        && state
+                            .objects
+                            .get(card)
+                            .is_some_and(|o| o.zone.zone == Zone::Exile)
+                })
+                .map(|(_, card)| *card)
+                .collect();
+            let saved = rc.bindings.get(slot).cloned();
+            for card in linked {
+                rc.bindings.insert(*slot, vec![Target::Object(card)]);
+                resolve(state, cards, log, effect, rc)?;
+            }
+            if let Some(saved) = saved {
+                rc.bindings.insert(*slot, saved);
+            } else {
+                rc.bindings.remove(slot);
+            }
             Ok(())
         }
         Effect::ReturnExiledWith { to, tapped } => {
@@ -1756,9 +2454,10 @@ fn resolve_inner(
                 .get(&rc.source)
                 .is_some_and(|o| o.zone.zone == Zone::Battlefield);
             if !here {
+                rc.bindings.insert(Binding::It, Vec::new());
                 return Ok(());
             }
-            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            let ids = objects_asking(state, cards, rc, what)?;
             let mut moved = Vec::new();
             for id in ids {
                 if let Some(new_id) = move_to_at(state, log, id, Zone::Exile, None, cause) {
@@ -1980,8 +2679,11 @@ fn resolve_inner(
             what,
             until,
             cast_only,
+            free,
+            any_mana,
         } => {
-            let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            // "Choose an exiled card …": asked; "that card": already known.
+            let ids = objects_asking(state, cards, rc, what)?;
             let player = rc.controller;
             let until_turn = match until {
                 mtg_ir::effect::PlayUntil::ThisTurn => state.turn,
@@ -2003,6 +2705,8 @@ fn resolve_inner(
                         player,
                         until_turn,
                         cast_only: *cast_only,
+                        free: *free,
+                        any_mana: *any_mana,
                     },
                     log,
                 );
@@ -2043,7 +2747,7 @@ fn resolve_inner(
                 Answer::Modes(m) => m.first().copied().unwrap_or(0),
                 _ => 0,
             };
-            let library = mode != 1;
+            let library = mode != 1 && search_rule(state, cards, me, me) != SearchRule::Forbidden;
             let graveyard = mode != 0;
             let mut candidates = Vec::new();
             for (zone, searched) in [(Zone::Library, library), (Zone::Graveyard, graveyard)] {
@@ -2078,7 +2782,12 @@ fn resolve_inner(
         Effect::SearchLibraryAndGraveyard { filter } => {
             let me = rc.controller;
             let mut candidates = Vec::new();
-            for zone in [Zone::Library, Zone::Graveyard] {
+            let zones: &[Zone] = if search_rule(state, cards, me, me) == SearchRule::Forbidden {
+                &[Zone::Graveyard]
+            } else {
+                &[Zone::Library, Zone::Graveyard]
+            };
+            for zone in zones.iter().copied() {
                 for id in state.objects_in(ZoneRef::of(zone, me)) {
                     if with_ctx(state, cards, rc, |ctx| eval::matches(ctx, filter, id))? {
                         candidates.push(id);
@@ -2573,12 +3282,12 @@ fn resolve_inner(
                 Ok((eval::objects(ctx, of)?, eval::players(ctx, controller)?))
             })?;
             // The copiable values of the object as it is, or as it last existed.
-            let Some((card, face)) = originals.first().and_then(|id| {
+            let Some((card, face, token_size)) = originals.first().and_then(|id| {
                 state
                     .objects
                     .get(id)
                     .or_else(|| state.last_known.get(id))
-                    .map(|o| (o.card, o.face))
+                    .map(|o| (o.card, o.face, o.token_size))
             }) else {
                 return Ok(());
             };
@@ -2600,6 +3309,18 @@ fn resolve_inner(
                     if face != 0 {
                         apply::apply(state, cause, Event::BecameCopy { object, card, face }, log);
                     }
+                    if let Some((power, toughness)) = token_size {
+                        apply::apply(
+                            state,
+                            cause,
+                            Event::TokenSizeSet {
+                                object,
+                                power,
+                                toughness,
+                            },
+                            log,
+                        );
+                    }
                     entered(state, cards, log, object, cause, None);
                     made.push(Target::Object(object));
                 }
@@ -2615,12 +3336,18 @@ fn resolve_inner(
             }
             Ok(())
         }
-        Effect::ChoosePlayer { from, then } => {
+        Effect::ChoosePlayer {
+            from,
+            at_random,
+            then,
+        } => {
             let players = with_ctx(state, cards, rc, |ctx| eval::players(ctx, from))?;
             if players.is_empty() {
                 return Ok(());
             }
-            let picked = if players.len() == 1 {
+            let picked = if *at_random && players.len() > 1 {
+                players[(state.rng.next_u64() % players.len() as u64) as usize]
+            } else if players.len() == 1 {
                 players[0]
             } else {
                 let available = players
@@ -2645,6 +3372,50 @@ fn resolve_inner(
             rc.bindings
                 .insert(Binding::CHOSEN_PLAYER, vec![Target::Player(picked)]);
             resolve(state, cards, log, then, rc)
+        }
+        Effect::ChooseRecipient { from, slot, then } => {
+            let recipients = with_ctx(state, cards, rc, |ctx| targets_of(ctx, from))?;
+            if recipients.is_empty() {
+                return Ok(());
+            }
+            let picked = if recipients.len() == 1 {
+                recipients[0]
+            } else {
+                let available = recipients
+                    .iter()
+                    .map(|recipient| match recipient {
+                        Target::Player(p) => format!("Player {}", p.0 + 1).into(),
+                        Target::Object(id) => state
+                            .objects
+                            .get(id)
+                            .and_then(|o| cards.face(o.card, o.face))
+                            .map(|f| f.name.clone())
+                            .unwrap_or_else(|| format!("Permanent {}", id.0).into()),
+                    })
+                    .collect();
+                let answer = rc.need(
+                    rc.controller,
+                    ChoiceKind::ChooseModes {
+                        available,
+                        count: 1,
+                        min: None,
+                    },
+                    "choose a damage recipient",
+                )?;
+                let index = match answer {
+                    Answer::Modes(m) => usize::from(m.first().copied().unwrap_or(0)),
+                    _ => 0,
+                };
+                recipients.get(index).copied().unwrap_or(recipients[0])
+            };
+            let old = rc.bindings.insert(*slot, vec![picked]);
+            let result = resolve(state, cards, log, then, rc);
+            if let Some(old) = old {
+                rc.bindings.insert(*slot, old);
+            } else {
+                rc.bindings.remove(slot);
+            }
+            result
         }
         // Freeze the recipient when the effect resolves; later source control changes
         // must not change who receives the permanent.
@@ -2838,38 +3609,7 @@ fn resolve_inner(
         }
         Effect::PhaseOut { what } => {
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
-            let mut out = Vec::new();
-            for id in ids {
-                if state
-                    .objects
-                    .get(&id)
-                    .is_some_and(|o| o.zone.zone == Zone::Battlefield && !o.phased_out)
-                {
-                    out.push(id);
-                }
-            }
-            // Attached Auras and Equipment phase out with it, indirectly (CR 702.26g).
-            let attached: Vec<ObjectId> = state
-                .battlefield()
-                .into_iter()
-                .filter(|a| {
-                    state
-                        .objects
-                        .get(a)
-                        .and_then(|o| o.attached_to)
-                        .is_some_and(|host| out.contains(&host))
-                })
-                .collect();
-            out.extend(
-                attached
-                    .into_iter()
-                    .filter(|a| !out.contains(a))
-                    .collect::<Vec<_>>(),
-            );
-            let events: Vec<Event> = out
-                .into_iter()
-                .map(|object| Event::PhasedOut { object, out: true })
-                .collect();
+            let events = crate::phasing::out_events(state, ids);
             if !events.is_empty() {
                 apply::apply_simultaneous(state, cause, events, log);
             }
@@ -3063,24 +3803,38 @@ fn resolve_inner(
                     }
                 }
             }
-            // Players: poison is the only player counter the engine tracks.
-            let poisoned: Vec<PlayerId> = state
+            // A selected player gets one of every counter kind they already have.
+            let players_with_counters: Vec<PlayerId> = state
                 .players
                 .values()
-                .filter(|p| p.poison > 0 && !p.has_lost)
+                .filter(|p| (p.poison > 0 || p.energy > 0) && !p.has_lost)
                 .map(|p| p.id)
                 .collect();
-            for p in poisoned {
-                if ask_confirm(rc, who, "give that player another poison counter?")? {
-                    events.push(Event::Poisoned {
-                        player: p,
-                        amount: 1,
-                    });
+            for p in players_with_counters {
+                if ask_confirm(
+                    rc,
+                    who,
+                    "give that player another counter of each kind they have?",
+                )? {
+                    let player = state.player(p);
+                    if player.poison > 0 {
+                        events.push(Event::Poisoned {
+                            player: p,
+                            amount: 1,
+                        });
+                    }
+                    if player.energy > 0 {
+                        events.push(Event::EnergyChanged {
+                            player: p,
+                            delta: 1,
+                        });
+                    }
                 }
             }
             if !events.is_empty() {
                 apply::apply_simultaneous(state, cause, events, log);
             }
+            apply::apply(state, cause, Event::Proliferated { player: who }, log);
             Ok(())
         }
 
@@ -3331,13 +4085,18 @@ pub(crate) fn count_noncreature_spell(
     spell: ObjectId,
     caster: PlayerId,
 ) {
-    if crate::layers::compute(state, cards, spell)
-        .is_some_and(|c| !c.has_type(mtg_core::CardType::Creature))
-    {
+    let Some(chars) = crate::layers::compute(state, cards, spell) else {
+        return;
+    };
+    if !chars.has_type(mtg_core::CardType::Creature) {
         *state
             .noncreature_spells_by_player
             .entry(caster)
             .or_insert(0) += 1;
+    }
+    if !chars.colors.is_colorless() {
+        let seen = state.spell_colors_by_player.entry(caster).or_default();
+        *seen = seen.union(chars.colors);
     }
 }
 
@@ -3506,6 +4265,10 @@ fn resolve_output(out: &ManaOutput, rc: &ResolveCtx) -> (Option<mtg_core::Color>
                 .or_else(|| cs.first().copied());
             (picked, 1)
         }
+        // Made concrete by its source first, so this is only an unevaluated fallback.
+        ManaOutput::Conditional { otherwise, .. } => resolve_output(otherwise, rc),
+        // Split by `Effect::AddMana` itself.
+        ManaOutput::Combination { colors, .. } => (colors.first().copied(), 0),
         ManaOutput::Repeated { amount, output } => {
             let (c, _) = resolve_output(output, rc);
             let n = match amount {
@@ -3601,6 +4364,72 @@ fn ask_confirm(rc: &mut ResolveCtx, who: PlayerId, because: &str) -> Result<bool
     }
 }
 
+/// Who makes a player's choices while they search their own library, if anyone may
+/// (CR 701.19): Ashiok, Dream Render forbids a search its controller's opponent causes
+/// themselves; Opposition Agent's controller searches for its controller's opponents, and
+/// what they find is exiled for the Agent's controller to play.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SearchRule {
+    Normal,
+    Forbidden,
+    ControlledBy(PlayerId),
+}
+
+pub(crate) fn search_rule(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    searcher: PlayerId,
+    caused_by: PlayerId,
+) -> SearchRule {
+    use mtg_ir::effect::{Modification as M, Restriction as R};
+    let effects = crate::layers::effects(state, cards);
+    let owner = |e: &crate::state::ContinuousEffect| {
+        crate::layers::controller(state, e.source).or(e.controller)
+    };
+    if caused_by == searcher
+        && effects.iter().any(|e| {
+            matches!(e.modification, M::Restriction(R::OpponentsCantSearch))
+                && owner(e).is_some_and(|p| p != searcher)
+        })
+    {
+        return SearchRule::Forbidden;
+    }
+    effects
+        .iter()
+        .filter(|e| matches!(e.modification, M::Restriction(R::ControlOpponentsSearches)))
+        .filter_map(owner)
+        .find(|p| *p != searcher)
+        .map_or(SearchRule::Normal, SearchRule::ControlledBy)
+}
+
+/// Opposition Agent: exile what the search found, playable by the Agent's controller for
+/// as long as it remains exiled, with mana of any color.
+fn agent_takes(
+    state: &mut GameState,
+    log: &mut Vec<StampedEvent>,
+    found: &[ObjectId],
+    agent: PlayerId,
+    cause: Cause,
+) {
+    for id in found {
+        if let Some(exiled) = move_to(state, log, *id, Zone::Exile, cause) {
+            apply::apply(
+                state,
+                cause,
+                Event::PlayPermission {
+                    object: exiled,
+                    player: agent,
+                    until_turn: u32::MAX,
+                    cast_only: false,
+                    free: false,
+                    any_mana: true,
+                },
+                log,
+            );
+        }
+    }
+}
+
 /// The objects a selector picks out, asking when the selector is a choice: "search your
 /// library for a basic land card" is the searching player choosing among the matching cards
 /// in their library (CR 701.19). Anything else evaluates as usual.
@@ -3638,9 +4467,16 @@ fn objects_asking(
         }
         Ok((Some(who), out, eval::value(ctx, count)?.max(0) as u32))
     })?;
-    let Some(who) = who else {
+    let Some(mut who) = who else {
         return Ok(Vec::new());
     };
+    if *zone == Zone::Library {
+        match search_rule(state, cards, who, rc.controller) {
+            SearchRule::Forbidden => return Ok(Vec::new()),
+            SearchRule::ControlledBy(p) => who = p,
+            SearchRule::Normal => {}
+        }
+    }
     let max = n.min(candidates.len() as u32);
     if max == 0 {
         return Ok(Vec::new());
@@ -3826,6 +4662,12 @@ fn pay_plan(
         if let Some(effect) = effect {
             let mut inner = ResolveCtx::new(*object, who);
             inner.mana_choice = *color;
+            inner.mana_split = plan
+                .splits
+                .iter()
+                .find(|(o, a, _)| o == object && a == ability)
+                .map(|(_, _, colors)| colors.clone())
+                .unwrap_or_default();
             let _ = resolve(state, cards, log, &effect, &mut inner);
         }
     }
@@ -4113,6 +4955,36 @@ fn draw_one(
     player: PlayerId,
     cause: Cause,
 ) -> Result<(), ResolveError> {
+    for effect in crate::layers::effects(state, cards) {
+        if let mtg_ir::effect::Modification::Restriction(mtg_ir::effect::Restriction::DrawLimit {
+            who,
+            count,
+        }) = &effect.modification
+        {
+            let Some(controller) = effect
+                .controller
+                .or_else(|| crate::layers::controller(state, effect.source))
+            else {
+                continue;
+            };
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &crate::eval::ComputedChars(cards),
+                source: effect.source,
+                controller,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            if eval::players(&ctx, who)?.contains(&player)
+                && state.draws_this_turn.get(&player).copied().unwrap_or(0) >= u32::from(*count)
+            {
+                return Ok(());
+            }
+        }
+    }
     if dredge(state, cards, log, rc, player, cause)? {
         return Ok(());
     }
@@ -4431,6 +5303,26 @@ pub(crate) fn entered(
                         events.push(Event::EnteredTapped { object: id });
                     }
                 }
+                R::Amplify(n) => {
+                    if let Some(Answer::Objects(chosen)) = &answer {
+                        let eligible = amplify_options(state, cards, id);
+                        let chosen: Vec<_> = chosen
+                            .iter()
+                            .copied()
+                            .filter(|card| eligible.contains(card))
+                            .collect();
+                        for object in &chosen {
+                            events.push(Event::Revealed { object: *object });
+                        }
+                        if !chosen.is_empty() && *n > 0 {
+                            events.push(Event::CountersChanged {
+                                object: id,
+                                kind: mtg_core::CounterKind::PlusOnePlusOne,
+                                delta: i32::from(*n) * chosen.len() as i32,
+                            });
+                        }
+                    }
+                }
                 R::Devour(n) => {
                     devoured = match &answer {
                         Some(Answer::Objects(chosen)) => Some((*n, chosen.clone())),
@@ -4458,6 +5350,19 @@ pub(crate) fn entered(
                             object: id,
                             color: *color,
                             subtype: *subtype,
+                        });
+                    }
+                }
+                R::EntersWithCounterChoice(options) => {
+                    let picked = match &answer {
+                        Some(Answer::Modes(m)) => m.first().copied().unwrap_or(0) as usize,
+                        _ => 0,
+                    };
+                    if let Some((_, kind)) = options.get(picked).or_else(|| options.first()) {
+                        events.push(Event::CountersChanged {
+                            object: id,
+                            kind: *kind,
+                            delta: 1,
                         });
                     }
                 }
@@ -4773,9 +5678,36 @@ fn entry_options(
     }
 }
 
-/// The question a permanent asks as it enters (CR 614.12), if it has one: shock lands,
-/// unleash, riot (yes or no), and "choose a color / creature type". With the answer to
-/// take when none is given. The answer is passed to [`entered`].
+/// Creature cards in the entering permanent's controller's hand that share a type.
+fn amplify_options(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) -> Vec<ObjectId> {
+    let Some(obj) = state.objects.get(&id) else {
+        return vec![];
+    };
+    let chars = ComputedChars(cards);
+    let ctx = Ctx {
+        state,
+        cards,
+        chars: &chars,
+        source: id,
+        controller: obj.controller,
+        targets: &[],
+        target_legal: &[],
+        x: 0,
+        bindings: crate::empty_bindings(),
+    };
+    let filter = mtg_ir::ObjectFilter::And(vec![
+        mtg_ir::ObjectFilter::HasType(mtg_core::CardType::Creature),
+        mtg_ir::ObjectFilter::SharesCreatureTypeWith(Box::new(Selector::SelfSource)),
+    ]);
+    state
+        .objects_in(ZoneRef::of(Zone::Hand, obj.controller))
+        .into_iter()
+        .filter(|candidate| eval::matches(&ctx, &filter, *candidate).unwrap_or(false))
+        .collect()
+}
+
+/// The question a permanent asks as it enters (CR 614.12), with its default answer.
+/// The answer is passed to [`entered`].
 pub(crate) fn enter_question(
     state: &GameState,
     cards: &dyn PrintedCards,
@@ -4807,8 +5739,23 @@ pub(crate) fn enter_question(
                 R::EntersWithCounterIfChosen => confirm(
                     "have it enter with a +1/+1 counter? It can't block while it has one".into(),
                 ),
+                R::EntersWithCounterChoice(options) if !options.is_empty() => Some((
+                    ChoiceKind::ChooseModes {
+                        available: options.iter().map(|(label, _)| label.clone()).collect(),
+                        count: 1,
+                        min: None,
+                    },
+                    "choose a counter for it to enter with".into(),
+                    Answer::Modes(vec![0]),
+                )),
                 R::EntersWithCounterOrHaste => {
                     confirm("have it enter with a +1/+1 counter? If not, it has haste".into())
+                }
+                R::Amplify(n) => {
+                    let from = amplify_options(state, cards, id);
+                    if from.is_empty() { return None; }
+                    let max = from.len() as u32;
+                    Some((ChoiceKind::ChooseObjects { from, min: 0, max }, format!("amplify {n}: reveal any number of creature cards sharing a creature type"), Answer::Objects(vec![])))
                 }
                 R::Devour(n) => {
                     let from: Vec<ObjectId> = state

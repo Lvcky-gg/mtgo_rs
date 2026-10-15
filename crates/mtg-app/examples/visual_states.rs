@@ -176,6 +176,15 @@ fn fixtures() -> Vec<Fixture> {
     });
     result.push(Fixture {
         before: None,
+        name: "13-hand-hover",
+        view: crowded.clone(),
+        kind: Some(ChoiceKind::Priority {
+            legal: Default::default(),
+        }),
+        default: Some(Answer::Pass),
+    });
+    result.push(Fixture {
+        before: None,
         name: "09-game-ended",
         view: crowded,
         kind: None,
@@ -227,6 +236,38 @@ fn fixtures() -> Vec<Fixture> {
         }),
         default: Some(Answer::Pass),
     });
+    // Pods, seated as at a table: three opponents around a 2×2 table, two across the top.
+    for (name, seats) in [("11-four-player-pod", 4u8), ("12-three-player-pod", 3)] {
+        let players: Vec<_> = (0..seats).map(PlayerId).collect();
+        let mut pod = GameState::new(&players, 40);
+        pod.turn = 3;
+        pod.step = Step::PrecombatMain;
+        pod.active_player = PlayerId(1);
+        pod.priority = Some(me);
+        for (i, &player) in players.iter().enumerate() {
+            for _ in 0..3 + i {
+                pod.place(PLAINS, player, ZoneRef::shared(Zone::Battlefield));
+            }
+            for card in [SENTRY, SERGEANT, COLOSSUS].into_iter().take(1 + i % 3) {
+                pod.place(card, player, ZoneRef::shared(Zone::Battlefield));
+            }
+            for _ in 0..7 {
+                pod.place(ADDER, player, ZoneRef::of(Zone::Hand, player));
+            }
+        }
+        let spell = pod.place(BANNER, PlayerId(1), ZoneRef::shared(Zone::Stack));
+        let mut view = mtg_engine::view::project(&pod, me);
+        view.stack = vec![spell];
+        result.push(Fixture {
+            before: None,
+            name,
+            view,
+            kind: Some(ChoiceKind::Priority {
+                legal: Default::default(),
+            }),
+            default: Some(Answer::Pass),
+        });
+    }
     result
 }
 
@@ -355,6 +396,18 @@ impl CaptureApp {
 
 impl eframe::App for CaptureApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        // The pointer over the middle of the hand: the enlarged card and its text.
+        if self
+            .fixtures
+            .get(self.index)
+            .is_some_and(|f| f.name.ends_with("hand-hover"))
+        {
+            let rect = ctx.content_rect();
+            input.events.push(egui::Event::PointerMoved(egui::pos2(
+                rect.center().x - 150.0,
+                rect.bottom() - 260.0,
+            )));
+        }
         if self.scrolled && !self.scroll_sent {
             let rect = ctx.content_rect();
             let pointer_y = if self.index == 10 {

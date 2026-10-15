@@ -71,6 +71,23 @@ const SUBTYPES: &[&str] = &[
     "Kithkin",
     "Golem",
     "Orc",
+    "Mite",
+    "Bat",
+    "Angel",
+    "Sliver",
+    "Bird",
+    "Illusion",
+    "Human",
+    "Urza's",
+    "Construct",
+    "Dauthi",
+    "Rogue",
+    "Drake",
+    "Town",
+    "Cleric",
+    "God",
+    "Bard",
+    "Fish",
 ];
 
 #[derive(Default)]

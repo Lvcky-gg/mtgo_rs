@@ -7,7 +7,7 @@ use mtg_engine::choice::Answer;
 
 /// The index of a creature type among the options the engine offers (sorted names).
 fn type_option(game: &Game, name: &str) -> u8 {
-    let mut names: Vec<&str> = (0..64u16)
+    let mut names: Vec<&str> = (0..1024u16)
         .filter_map(|i| mtg_ir::PrintedCards::subtype_name(&game.table, mtg_core::Subtype(i)))
         .filter(|n| mtg_core::is_creature_type(n))
         .collect();

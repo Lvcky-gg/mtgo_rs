@@ -104,6 +104,22 @@ pub fn counter_name(kind: mtg_core::CounterKind) -> &'static str {
         CounterKind::Poison => "poison",
         CounterKind::Stun => "stun",
         CounterKind::Shield => "shield",
+        CounterKind::Keyword(keyword) => match keyword {
+            mtg_core::Keyword::Flying => "flying",
+            mtg_core::Keyword::FirstStrike => "first strike",
+            mtg_core::Keyword::DoubleStrike => "double strike",
+            mtg_core::Keyword::Deathtouch => "deathtouch",
+            mtg_core::Keyword::Lifelink => "lifelink",
+            mtg_core::Keyword::Hexproof => "hexproof",
+            mtg_core::Keyword::Indestructible => "indestructible",
+            mtg_core::Keyword::Menace => "menace",
+            mtg_core::Keyword::Reach => "reach",
+            mtg_core::Keyword::Trample => "trample",
+            mtg_core::Keyword::Vigilance => "vigilance",
+            mtg_core::Keyword::Haste => "haste",
+            mtg_core::Keyword::Shadow => "shadow",
+            _ => "keyword",
+        },
         CounterKind::Other(_) => "other",
     }
 }

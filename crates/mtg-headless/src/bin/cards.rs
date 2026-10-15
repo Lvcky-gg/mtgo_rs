@@ -182,8 +182,13 @@ fn save_deck(store: &mut Store, name: &str, text: &str) -> Result<(), String> {
     {
         return Err("companion designation is not supported yet; the deck was not saved".into());
     }
-    if parsed.count_in(mtg_deck::Section::Commander) > 1 {
-        return Err("multiple commanders are not supported yet; the deck was not saved".into());
+    if parsed.count_in(mtg_deck::Section::Commander) > 2
+        || parsed
+            .entries
+            .iter()
+            .any(|e| e.section == mtg_deck::Section::Commander && e.count > 1)
+    {
+        return Err("multiple commanders require one copy each and at most two cards; the deck was not saved".into());
     }
     let entries = {
         let resolver = StoreResolver(store);
@@ -417,9 +422,17 @@ fn check(args: &[String]) -> Result<(), String> {
     // back face of a later card that reprints it.
     let mut by_name: HashMap<String, &mtg_store::StoredCard> = cards
         .iter()
-        .flat_map(|(_, c)| c.faces.iter().map(move |f| (f.name.to_lowercase(), c)))
+        .flat_map(|(_, c)| {
+            c.faces
+                .iter()
+                .map(move |f| (mtg_deck::resolve::normalise(&f.name), c))
+        })
         .collect();
-    by_name.extend(cards.iter().map(|(_, c)| (c.name.to_lowercase(), c)));
+    by_name.extend(
+        cards
+            .iter()
+            .map(|(_, c)| (mtg_deck::resolve::normalise(&c.name), c)),
+    );
     let (mut playable, mut listed) = (0usize, 0usize);
     let mut report = Vec::new();
     for name in text.lines() {
@@ -428,7 +441,11 @@ fn check(args: &[String]) -> Result<(), String> {
             continue;
         }
         listed += 1;
-        let Some(card) = by_name.get(&name.to_lowercase()) else {
+        let key = mtg_deck::resolve::normalise(name);
+        let Some(card) = by_name.get(&key).or_else(|| {
+            let canonical = mtg_deck::resolve::alternate_printed_name(&key)?;
+            by_name.get(&mtg_deck::resolve::normalise(canonical))
+        }) else {
             report.push(format!("UNKNOWN\t{name}"));
             continue;
         };
@@ -457,7 +474,7 @@ fn check(args: &[String]) -> Result<(), String> {
         if blockers.is_empty() {
             playable += 1;
         } else {
-            report.push(format!("BLOCKED\t{}\t{}", card.name, blockers.join(" | ")));
+            report.push(format!("BLOCKED\t{name}\t{}", blockers.join(" | ")));
         }
     }
     println!("{playable} of {listed} listed cards playable as printed");
@@ -531,7 +548,7 @@ mod deck_tests {
         let original = store.deck(id).unwrap();
         for (text, expected) in [
             (
-                "Commander\n1 First Captain\n1 Second Captain",
+                "Commander\n1 First Captain\n1 Second Captain\n1 Third Captain",
                 "multiple commanders",
             ),
             ("Commander\n2 First Captain", "multiple commanders"),

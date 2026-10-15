@@ -40,6 +40,7 @@ pub struct Side {
     pub mana: [u16; 6],
     /// Commander damage taken, by the commander's owner.
     pub commander_damage: std::collections::BTreeMap<PlayerId, u32>,
+    pub partner_commander_damage: std::collections::BTreeMap<PlayerId, u32>,
     pub has_lost: bool,
 }
 
@@ -58,6 +59,7 @@ impl Default for Side {
             graveyard: Vec::new(),
             mana: [0; 6],
             commander_damage: Default::default(),
+            partner_commander_damage: Default::default(),
             has_lost: false,
         }
     }
@@ -91,6 +93,7 @@ pub fn arrange(view: &PlayerView) -> Board {
             graveyard: summary.graveyard.clone(),
             mana: summary.mana,
             commander_damage: summary.commander_damage.clone(),
+            partner_commander_damage: summary.partner_commander_damage.clone(),
             has_lost: false,
             hand: Vec::new(),
             battlefield: Vec::new(),
@@ -120,7 +123,12 @@ pub fn arrange(view: &PlayerView) -> Board {
         }
     }
 
-    board.opponents.sort_by_key(|s| s.player);
+    // Turn order from the viewer's seat: the next player first, as around a table where
+    // play passes to the left.
+    let seats = view.players.len().max(1) as u8;
+    board
+        .opponents
+        .sort_by_key(|s| (s.player.0 + seats - view.viewer.0 % seats) % seats);
     board
 }
 
@@ -318,6 +326,24 @@ mod tests {
     }
 
     #[test]
+    fn opponents_are_seated_in_turn_order_from_the_viewer() {
+        let mut view = a_view();
+        let them = view.players[&THEM].clone();
+        for p in [2, 3] {
+            let id = PlayerId(p);
+            view.players
+                .insert(id, PlayerSummary { id, ..them.clone() });
+        }
+        view.viewer = PlayerId(2);
+        let seats: Vec<_> = arrange(&view)
+            .opponents
+            .iter()
+            .map(|s| s.player.0)
+            .collect();
+        assert_eq!(seats, [3, 0, 1]);
+    }
+
+    #[test]
     fn library_browser_only_contains_disclosed_cards_from_that_library() {
         let mut view = a_view();
         assert!(visible_library_cards(&view, ME).is_empty());
@@ -399,6 +425,7 @@ mod tests {
                 graveyard: vec![ObjectId(50)],
                 mana: [0; 6],
                 commander_damage: Default::default(),
+                partner_commander_damage: Default::default(),
             },
         );
         players.insert(
@@ -414,6 +441,7 @@ mod tests {
                 graveyard: Vec::new(),
                 mana: [0; 6],
                 commander_damage: Default::default(),
+                partner_commander_damage: Default::default(),
             },
         );
 

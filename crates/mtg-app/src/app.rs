@@ -638,7 +638,11 @@ impl App {
                 let side: u32 = spec.side.iter().map(|(_, n)| u32::from(*n)).sum();
                 ui.label(format!("{} main · {} sideboard", spec.main_count(), side));
                 if spec.commander.is_some() {
-                    ui.label("has a commander");
+                    ui.label(if spec.partner.is_some() {
+                        "2 commanders"
+                    } else {
+                        "1 commander"
+                    });
                 }
                 let (ok, total) = decks::coverage(self.store.as_ref(), &spec);
                 let color = if ok == total { GOOD } else { WARN };

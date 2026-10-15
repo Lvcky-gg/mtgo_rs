@@ -3,6 +3,80 @@ use mtg_core::{Color, Target, Zone};
 use mtg_engine::actions::Action;
 
 #[test]
+fn sacred_knight_excludes_either_color_and_multicolored_blockers() {
+    let mut t = Table::default();
+    let knight = t.card(
+        "{0}",
+        "Creature",
+        Some((3, 3)),
+        "This creature can't be blocked by black and/or red creatures.",
+    );
+    let creatures: Vec<_> = ["{B}", "{R}", "{B}{R}", "{G}", "{0}"]
+        .into_iter()
+        .map(|cost| t.card(cost, "Creature", Some((2, 2)), ""))
+        .collect();
+    let mut g = Game::new(t);
+    let attacker = g.put(knight, P0, Zone::Battlefield);
+    g.engine
+        .state
+        .combat
+        .attackers
+        .insert(attacker, Target::Player(P1));
+    for (index, creature) in creatures.into_iter().enumerate() {
+        let blocker = g.put(creature, P1, Zone::Battlefield);
+        let blocks = std::collections::BTreeMap::from([(attacker, vec![blocker])]);
+        assert_eq!(
+            mtg_engine::combat::validate_blocks(&g.engine.state, &g.table, P1, &blocks).is_ok(),
+            index >= 3
+        );
+    }
+}
+
+#[test]
+fn color_union_counts_each_matching_creature_once() {
+    let mut t = Table::default();
+    let healer = t.card("{0}", "Creature", Some((1, 1)), "When this creature enters, you gain 2 life for each black and/or red creature target opponent controls.");
+    let creatures: Vec<_> = ["{B}", "{R}", "{B}{R}", "{G}", "{0}"]
+        .into_iter()
+        .map(|cost| t.card(cost, "Creature", Some((2, 2)), ""))
+        .collect();
+    let mut g = Game::new(t);
+    for creature in creatures {
+        g.put(creature, P1, Zone::Battlefield);
+    }
+    let spell = g.put(healer, P0, Zone::Hand);
+    g.main();
+    g.cast(spell, &[Target::Player(P1)]);
+    assert_eq!(g.life(P0), 26);
+}
+
+#[test]
+fn color_conjunction_requires_both_colors_for_an_anthem() {
+    let mut t = Table::default();
+    let anthem = t.card(
+        "{0}",
+        "Enchantment",
+        None,
+        "White and blue creatures you control get +1/+1.",
+    );
+    let creatures: Vec<_> = ["{W}", "{U}", "{W}{U}", "{W}{U}{G}", "{0}"]
+        .into_iter()
+        .map(|cost| t.card(cost, "Creature", Some((2, 2)), ""))
+        .collect();
+    let mut g = Game::new(t);
+    g.put(anthem, P0, Zone::Battlefield);
+    for (index, creature) in creatures.into_iter().enumerate() {
+        let object = g.put(creature, P0, Zone::Battlefield);
+        let expected = if index == 2 || index == 3 {
+            (3, 3)
+        } else {
+            (2, 2)
+        };
+        assert_eq!(g.pt(object), expected);
+    }
+}
+
+#[test]
 fn printed_blast_modes_compile_and_destroy_the_matching_color() {
     for (color, cost) in [("blue", "{U}"), ("red", "{R}")] {
         let mut t = Table::default();

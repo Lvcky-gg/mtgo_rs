@@ -144,11 +144,12 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
     // An instant or sorcery's effect lines are one spell ability, in order.
     let mut spell_lines: Vec<Effect> = Vec::new();
     let mut spell_cx = Cx::new(subtypes);
-    // X is the spell's when its mana cost or its additional cost ("pay X life") has one.
+    // X is the spell's when its mana cost or an additional casting cost defines it.
     spell_cx.x = face.mana_cost.contains("{X}")
-        || text
-            .lines()
-            .any(|l| l.starts_with("As an additional cost to cast this spell, pay X life"));
+        || text.lines().any(|l| {
+            l.starts_with("As an additional cost to cast this spell, pay X life")
+                || l.starts_with("As an additional cost to cast this spell, discard X cards")
+        });
 
     let mut lines: Vec<&str> = normalised.lines().collect();
     // CR 706 — a die roll's results table ("1—9 | …", "20 | …") follows the line that
@@ -194,6 +195,32 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
     let mut awaken: Option<(i32, mtg_core::ManaCost, String)> = None;
     while i < lines.len() {
         let line = lines[i];
+        // CR 702.174 — "Gift a tapped Fish" with "… If the gift was promised, instead …"
+        // on the next line: promising is chosen as the spell is cast, so the two are modes
+        // — each with its own targets — and the promised one gives the Fish first.
+        if is_spell
+            && line == "gift a tapped fish"
+            && let Some(next) = lines.get(i + 1)
+            && let Some((base, alt)) = next
+                .trim_end_matches('.')
+                .split_once(". if the gift was promised, instead ")
+        {
+            let mut cx = Cx::new(subtypes);
+            let gift = format!(
+                "choose an opponent. that player creates a tapped 1/1 blue fish creature token. {alt}"
+            );
+            let labels = [
+                "don't promise a gift".to_string(),
+                "promise a gift: an opponent creates a tapped Fish".to_string(),
+            ];
+            if let Some(e) = modal(&[base, &gift], &labels, 1, None, None, None, &mut cx) {
+                spell_lines.push(e);
+                spell_cx.targets.extend(std::mem::take(&mut cx.targets));
+                spell_modal = true;
+                i += 2;
+                continue;
+            }
+        }
         if is_spell && line == "ascend" {
             spell_lines.push(Effect::Ascend);
             i += 1;
@@ -344,9 +371,13 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
                 .collect::<Vec<_>>()
                 .join("\n");
             let mut cx = Cx::new(subtypes);
-            cx.x = is_spell && spell_cx.x;
+            let activated_modal = prefix.ends_with(": ");
+            cx.x = (is_spell && spell_cx.x) || (activated_modal && prefix.contains("{x}"));
             // A modal trigger's "it" comes from its condition.
-            let it = if prefix.is_empty() {
+            let it = if activated_modal {
+                cx.it = Some(Selector::SelfSource);
+                cx.it.clone()
+            } else if prefix.is_empty() {
                 None
             } else {
                 trigger_condition(prefix, &mut cx).and_then(|(_, _, it, _)| it)
@@ -368,6 +399,13 @@ pub fn compile(face: &FaceText, subtypes: &dyn Subtypes) -> Compiled {
                 .and_then(|effect| {
                     if prefix.is_empty() {
                         is_spell.then_some((None, effect))
+                    } else if activated_modal {
+                        // Modal mana abilities need their own payment-planner support.
+                        if bullets.iter().any(|line| line.contains("add ")) {
+                            return None;
+                        }
+                        let kind = activated_with_effect(prefix, &mut cx, Some(effect))?;
+                        Some((Some(kind), Effect::Nothing))
                     } else {
                         let kind = triggered_with(prefix, effect, &mut cx)?;
                         Some((Some(kind), Effect::Nothing))
@@ -690,7 +728,7 @@ fn mark_once_each_turn(e: &mut Effect) -> bool {
 
 fn returns_exiled(e: &Effect) -> bool {
     match e {
-        Effect::ReturnExiledWith { .. } => true,
+        Effect::ReturnExiledWith { .. } | Effect::ForEachExiledWith { .. } => true,
         Effect::Sequence(items) => items.iter().any(returns_exiled),
         Effect::May { then, .. } | Effect::MayPay { then, .. } => returns_exiled(then),
         _ => false,
@@ -1272,7 +1310,7 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
             } = &mut kind
         {
             if boast {
-                *timing = ActivationTiming::InstantOncePerTurn;
+                *timing = ActivationTiming::Boast;
                 cost.timing
                     .push(mtg_ir::trigger::Condition::Exists(Selector::All {
                         zone: Zone::Battlefield,
@@ -1390,6 +1428,21 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     if let Some(list) = chapter(line, face, cx) {
         return Some(Line::Abilities(list));
     }
+    // CR 702.38 — amplify N.
+    if let Some(n) = line.strip_prefix("amplify ")
+        && let Ok(n) = n.trim_end_matches('.').parse::<u8>()
+        && face.card_types.contains(&CardType::Creature)
+    {
+        return one(
+            AbilityKind::ReplacementEffect(Replacement {
+                matches: EventPattern::Enters {
+                    who: ObjectFilter::IsSelf,
+                },
+                kind: ReplacementKind::Amplify(n),
+            }),
+            cx,
+        );
+    }
     // CR 702.82 — devour N.
     if let Some(n) = line.strip_prefix("devour ")
         && let Ok(n) = n.trim_end_matches('.').parse::<u8>()
@@ -1494,6 +1547,18 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     if let Some(kind) = cycling(line, cx) {
         return one(kind, cx);
     }
+    if line.contains(", ") {
+        let list = line
+            .split(", ")
+            .map(|part| {
+                let mut inner = cx.fresh();
+                cycling(part, &mut inner).map(|kind| (kind, inner.targets))
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(list) = list {
+            return Some(Line::Abilities(list));
+        }
+    }
     if let Some(kind) = additional_cast_cost(line, cx) {
         return one(kind, cx);
     }
@@ -1572,8 +1637,8 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
             );
         }
     }
-    // CR 702.37 — "morph {2}{U}", "megamorph {1}{G}": a creature card only, and only a
-    // mana cost to turn it face up.
+    // CR 702.37 — morph can also appear on noncreature permanents (e.g. Zoetic Cavern).
+    // Only a mana cost to turn it face up is supported here.
     for (prefix, megamorph, disguise) in [
         ("morph ", false, false),
         ("megamorph ", true, false),
@@ -1581,7 +1646,7 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     ] {
         if let Some(r) = line.strip_prefix(prefix)
             && let Some((mana, "")) = mana_cost(r)
-            && face.card_types.contains(&CardType::Creature)
+            && face.card_types.iter().any(|t| t.is_permanent())
         {
             return one(
                 AbilityKind::Morph {
@@ -1997,11 +2062,171 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
             return one(AbilityKind::ExertAsAttacks { effect }, cx);
         }
     }
+    // Birgi, God of Storytelling.
+    if line == "creatures you control can boast twice during each of your turns rather than once." {
+        return one(
+            AbilityKind::Static {
+                what: Selector::SelfSource,
+                modification: Modification::Restriction(Restriction::BoastTwice),
+                condition: None,
+            },
+            cx,
+        );
+    }
+    if let Some(head) =
+        line.strip_suffix(" until end of turn, you don't lose this mana as steps and phases end.")
+        && let Some(Line::Abilities(mut list)) = compile_line(head, face, &mut cx.clone())
+        && let [(AbilityKind::Triggered { effect, .. }, _)] = list.as_mut_slice()
+        && matches!(effect, Effect::AddMana { .. })
+    {
+        let inner = std::mem::replace(effect, Effect::Nothing);
+        *effect = Effect::PersistMana {
+            effect: Box::new(inner),
+        };
+        return Some(Line::Abilities(list));
+    }
+    // Tymna the Weaver.
+    if line
+        == "at the beginning of each of your postcombat main phases, you may pay x life, where x is the number of opponents that were dealt combat damage this turn. if you do, draw x cards."
+    {
+        let x = Value::CombatDamagedThisTurn(Box::new(Selector::Opponents));
+        return one(
+            AbilityKind::Triggered {
+                trigger: Trigger {
+                    on: EventPattern::StepBegins {
+                        step: Step::PostcombatMain,
+                        whose: Selector::You,
+                    },
+                    functions_from: Zone::Battlefield,
+                    intervening_if: None,
+                    optional: false,
+                    limit: None,
+                    timing: mtg_ir::TriggerTiming::Normal,
+                },
+                effect: Effect::If {
+                    cond: mtg_ir::trigger::Condition::ValueAtLeast {
+                        lhs: x.clone(),
+                        rhs: Value::ONE,
+                    },
+                    then: Box::new(Effect::MayPay {
+                        cost: Cost {
+                            additional: vec![AdditionalCost::PayLife { amount: x.clone() }],
+                            ..Cost::free()
+                        },
+                        then: Box::new(Effect::Draw {
+                            who: Selector::You,
+                            count: x,
+                        }),
+                    }),
+                    otherwise: Box::new(Effect::Nothing),
+                },
+            },
+            cx,
+        );
+    }
+    // Animate Dead, Necromancy: reanimate, attach, and sacrifice when it leaves.
+    {
+        let normal = line
+            .replace("this aura", "~")
+            .replace("this enchantment", "~");
+        let tail = " when ~ leaves the battlefield, that creature's controller sacrifices it.";
+        let what = match normal.strip_suffix(tail) {
+            Some(
+                "when ~ enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with ~.\" return enchanted creature card to the battlefield under your control and attach ~ to it.",
+            ) => Some(None),
+            Some(
+                "when ~ enters, if it's on the battlefield, it becomes an aura with \"enchant creature put onto the battlefield with ~.\" put target creature card from a graveyard onto the battlefield under your control and attach ~ to it.",
+            ) => {
+                let target = cx.target(TargetSpec {
+                    zone: Zone::Graveyard,
+                    filter: ObjectFilter::HasType(CardType::Creature),
+                    allows_players: false,
+                    players: None,
+                    mode: None,
+                    count: Value::ONE,
+                    up_to: false,
+                    distinct_from_other_targets: false,
+                });
+                Some(Some(target))
+            }
+            _ => None,
+        };
+        if let Some(what) = what {
+            let targets = cx.targets.clone();
+            let trigger = |on, timing| Trigger {
+                on,
+                functions_from: Zone::Battlefield,
+                intervening_if: None,
+                optional: false,
+                limit: None,
+                timing,
+            };
+            return Some(Line::Abilities(vec![
+                (
+                    AbilityKind::Triggered {
+                        trigger: trigger(
+                            EventPattern::Enters {
+                                who: ObjectFilter::IsSelf,
+                            },
+                            mtg_ir::TriggerTiming::Normal,
+                        ),
+                        effect: Effect::ReanimateAttach { what },
+                    },
+                    targets,
+                ),
+                (
+                    AbilityKind::Triggered {
+                        trigger: trigger(
+                            EventPattern::Leaves {
+                                who: ObjectFilter::IsSelf,
+                            },
+                            mtg_ir::TriggerTiming::LeavesBattlefield,
+                        ),
+                        effect: Effect::SacrificeReanimated,
+                    },
+                    Vec::new(),
+                ),
+            ]));
+        }
+    }
+    // Opposition Agent's second line: the same rule as its first.
+    if line
+        == "while an opponent is searching their library, they exile each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them."
+    {
+        return one(
+            AbilityKind::Static {
+                what: Selector::SelfSource,
+                modification: Modification::Restriction(Restriction::ControlOpponentsSearches),
+                condition: None,
+            },
+            cx,
+        );
+    }
     // CR 103.6 — leylines.
     if line == "if ~ is in your opening hand, you may begin the game with it on the battlefield."
         && face.card_types.iter().any(|t| t.is_permanent())
     {
         return one(AbilityKind::BeginOnBattlefield, cx);
+    }
+    if let Some(r) = line
+        .strip_prefix("if ~ is in your opening hand and you're not the starting player, ")
+        .and_then(|r| r.strip_prefix("you may begin the game with ~ on the battlefield with a "))
+        && face.card_types.iter().any(|t| t.is_permanent())
+        && let Some((counter, r)) = words::counter(r)
+        && let Some(r) = r.strip_prefix(" on it.")
+    {
+        let exile_from_hand = match r {
+            "" => false,
+            " if you do, exile a card from your hand." => true,
+            _ => return None,
+        };
+        return one(
+            AbilityKind::BeginOnBattlefieldNotStarting {
+                counter,
+                exile_from_hand,
+            },
+            cx,
+        );
     }
     // CR 702.121 — melee: "Whenever this creature attacks, it gets +1/+1 until end of turn
     // for each opponent you attacked with a creature this combat."
@@ -2360,6 +2585,65 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     if let Some(list) = activate_only_if(line, face, cx) {
         return Some(Line::Abilities(list));
     }
+    // "{0}: Add X mana in any combination of {U} and/or {R}, where X is ~'s power." (Vivi
+    // Ornitier): each mana its own choice among those colors.
+    if let Some((input, output)) = line.split_once(": ")
+        && let Some(r) = output.strip_prefix("add x mana in any combination of ")
+        && let Some((colors, r)) = r.split_once(", where x is ")
+        && let Some(definition) = r.strip_suffix('.')
+        && let Some((amount, "")) = clauses::value_phrase(definition, cx)
+        && let Some(colors) = colors
+            .split(" and/or ")
+            .map(|c| match mana_symbol(c)? {
+                ManaOutput::Colored(c) => Some(c),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+        && colors.len() > 1
+        && let Some(cost) = cost(input, cx)
+        && cost.additional.is_empty()
+        && cost
+            .mana
+            .symbols
+            .iter()
+            .all(|s| *s == mtg_core::ManaSymbol::Generic(0))
+    {
+        let (mut kind, targets) = mana_ability(vec![ManaOutput::Combination { amount, colors }]);
+        if let AbilityKind::Activated { cost: c, .. } = &mut kind {
+            *c = cost;
+        }
+        return Some(Line::Abilities(vec![(kind, targets)]));
+    }
+    // "Activate only during your turn and only once each turn.", "Activate only during your
+    // turn.": a condition on paying the cost, which a mana ability's planner reads too.
+    for (tail, once) in [
+        (
+            " activate only during your turn and only once each turn.",
+            true,
+        ),
+        (" activate only during your turn.", false),
+    ] {
+        if let Some(head) = line.strip_suffix(tail)
+            && let Some(Line::Abilities(mut list)) = compile_line(head, face, &mut cx.clone())
+            && let [
+                (
+                    AbilityKind::Activated {
+                        cost,
+                        timing: timing @ ActivationTiming::Instant,
+                        is_mana_ability: true,
+                        ..
+                    },
+                    _,
+                ),
+            ] = list.as_mut_slice()
+        {
+            cost.timing.push(mtg_ir::trigger::Condition::YourTurn);
+            if once {
+                *timing = ActivationTiming::InstantOncePerTurn;
+            }
+            return Some(Line::Abilities(list));
+        }
+    }
     // "{T}: Add one mana of any color. Activate only once each turn." — any mana ability,
     // limited. Anything else falls through to the activated-ability grammar.
     if let Some(head) = line.strip_suffix(" activate only once each turn.")
@@ -2376,6 +2660,31 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
     {
         *timing = ActivationTiming::InstantOncePerTurn;
         return Some(Line::Abilities(list));
+    }
+    // "{T}: Add {C}. If ~ has a luck counter on it, instead add one mana of any color.",
+    // "{T}: Add {C}. If you control a Swamp, add {B} instead.": the output depends on
+    // the condition as the ability resolves.
+    if let Some((head, tail)) = line.split_once(". if ")
+        && let Some(base) = mana_line(&format!("{head}."))
+        && let [base] = base.as_slice()
+        && let Some((cond, alt)) = conditions::condition(tail, cx)
+        && let Some(alt) = alt
+            .strip_prefix(", instead add ")
+            .or_else(|| {
+                alt.strip_prefix(", add ")
+                    .and_then(|a| a.strip_suffix(" instead."))
+            })
+            .map(|a| a.strip_suffix('.').unwrap_or(a))
+        && let Some(alt) = mana_line(&format!("{{t}}: add {alt}."))
+        && let [alt] = alt.as_slice()
+    {
+        return Some(Line::Abilities(vec![mana_ability(vec![
+            ManaOutput::Conditional {
+                cond: Box::new(cond),
+                then: Box::new(alt.clone()),
+                otherwise: Box::new(base.clone()),
+            },
+        ])]));
     }
     // A mana ability can also have an unconditional, target-free effect such as
     // "Draw a card" (CR 605.1a). It still resolves immediately, including that effect.
@@ -2732,6 +3041,8 @@ pub(crate) struct Cx<'a> {
     pub group: Option<Selector>,
     /// What the last "destroy all …" named, for "for each creature destroyed this way".
     pub destroyed: Option<ObjectFilter>,
+    /// A preceding discard instruction produced the `DISCARDED` binding.
+    pub discarded: bool,
     /// The player slot of "creatures target player controls", registered before the noun
     /// that names it is read.
     pub controller_target: Option<Selector>,
@@ -2764,6 +3075,7 @@ impl<'a> Cx<'a> {
             until_eot: false,
             group: None,
             destroyed: None,
+            discarded: false,
             controller_target: None,
             that_much: false,
             batch: false,
@@ -3226,11 +3538,12 @@ fn enchant(line: &str, cx: &mut Cx) -> Option<TargetSpec> {
         });
     }
     let (n, rest) = nouns::noun(r, cx)?;
-    if !rest.is_empty() || n.plural || n.zone != Zone::Battlefield {
+    // "enchant creature card in a graveyard" (Animate Dead), as well as permanents.
+    if !rest.is_empty() || n.plural || !matches!(n.zone, Zone::Battlefield | Zone::Graveyard) {
         return None;
     }
     Some(TargetSpec {
-        zone: Zone::Battlefield,
+        zone: n.zone,
         filter: n.filter,
         allows_players: false,
         players: None,
@@ -3295,6 +3608,31 @@ fn enters_as_copy(line: &str, face: &FaceText, cx: &Cx) -> Option<AbilityKind> {
         .or_else(|| r.strip_prefix("a "))?;
     let (noun, rest) = nouns::noun(r, cx)?;
     let rest = rest.strip_prefix(" on the battlefield").unwrap_or(rest);
+    // "with mana value less than or equal to the amount of mana spent to cast ~"
+    let (filter, rest) = match rest.strip_prefix(" with ") {
+        Some(r) => {
+            let (more, r) = nouns::with_clause(r, cx)?;
+            (ObjectFilter::And(vec![noun.filter.clone(), more]), r)
+        }
+        None => (noun.filter.clone(), rest),
+    };
+    // ", except it's a Bird in addition to its other types and it has flying."
+    let mut except = Vec::new();
+    let rest = match rest.strip_prefix(", except it's a ") {
+        Some(r) => {
+            let (kind, r) = r.split_once(" in addition to its other types")?;
+            except.push(Modification::AddSubtypes(vec![cx.subtype(kind)?]));
+            match r.strip_prefix(" and it has ") {
+                Some(r) => {
+                    let (ks, r) = words::keyword_list(r)?;
+                    except.extend(ks.into_iter().map(clauses::grant));
+                    r
+                }
+                None => r,
+            }
+        }
+        None => rest,
+    };
     if rest != "." || noun.plural || noun.zone != Zone::Battlefield {
         return None;
     }
@@ -3303,8 +3641,9 @@ fn enters_as_copy(line: &str, face: &FaceText, cx: &Cx) -> Option<AbilityKind> {
             who: ObjectFilter::IsSelf,
         },
         kind: ReplacementKind::EntersAsCopy {
-            of: noun.filter,
+            of: filter,
             optional: true,
+            except,
         },
     }))
 }
@@ -3372,6 +3711,34 @@ fn enters_replacement(line: &str, face: &FaceText, cx: &Cx) -> Option<AbilityKin
         ReplacementKind::EntersTappedUnless { condition }
     } else {
         let r = r.strip_prefix("with ")?;
+        if let Some(mut rest) = r.strip_prefix("your choice of ") {
+            let mut options = Vec::new();
+            loop {
+                let start = rest;
+                let next = rest
+                    .strip_prefix("a ")
+                    .or_else(|| rest.strip_prefix("an "))?;
+                let (kind, next) = words::counter(next)?;
+                options.push((start[..start.len() - next.len()].into(), kind));
+                if let Some(next) = next
+                    .strip_prefix(", or ")
+                    .or_else(|| next.strip_prefix(" or "))
+                    .or_else(|| next.strip_prefix(", "))
+                {
+                    rest = next;
+                } else {
+                    if next != " on it." || options.len() < 2 {
+                        return None;
+                    }
+                    return Some(AbilityKind::ReplacementEffect(Replacement {
+                        matches: EventPattern::Enters {
+                            who: ObjectFilter::IsSelf,
+                        },
+                        kind: ReplacementKind::EntersWithCounterChoice(options),
+                    }));
+                }
+            }
+        }
         // "with X +1/+1 counters": the X it was cast with.
         let (n, r) = match r.strip_prefix("x ") {
             Some(r) if face.mana_cost.contains("{X}") => (Value::X, r),
@@ -3657,6 +4024,7 @@ fn triggered(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     | EventPattern::NthDraw { whose, .. }
     | EventPattern::Discards { whose }
     | EventPattern::LifeGained { whose }
+    | EventPattern::Proliferated { whose }
     | EventPattern::LifeLost { whose } = &on
         && *whose != Selector::You
     {
@@ -3791,6 +4159,11 @@ fn triggered(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
     }
     // "When you cast this spell" triggers while it is a spell.
     let functions_from = match on {
+        EventPattern::ZoneChange {
+            who: ObjectFilter::And(ref filters),
+            from: Some(Zone::Library),
+            to: Some(Zone::Graveyard),
+        } if filters.contains(&ObjectFilter::IsSelf) => Zone::Graveyard,
         EventPattern::Cast {
             who: ObjectFilter::IsSelf,
             ..
@@ -3834,6 +4207,21 @@ fn self_trigger(r: &str) -> Option<Condition<'_>> {
     // Having left the battlefield, "it" is the card where it went (CR 400.7): "when ~
     // dies, return it to its owner's hand".
     let gone = Some(Selector::Bound(mtg_ir::selector::Binding::EventSubject));
+    if let Some(rest) = r.strip_prefix("is put into your graveyard from your library") {
+        return Some((
+            EventPattern::ZoneChange {
+                who: ObjectFilter::And(vec![
+                    ObjectFilter::IsSelf,
+                    ObjectFilter::OwnedBy(Box::new(Selector::You)),
+                ]),
+                from: Some(Zone::Library),
+                to: Some(Zone::Graveyard),
+            },
+            normal,
+            gone,
+            rest,
+        ));
+    }
     // "when this Class becomes level 2" (CR 716.2c)
     if let Some(r) = r.strip_prefix("becomes level ")
         && let Some((n, r)) = words::number(r)
@@ -4088,6 +4476,18 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
     let normal = TriggerTiming::Normal;
     let leaves = TriggerTiming::LeavesBattlefield;
     let subject = Some(Selector::Bound(mtg_ir::selector::Binding::EventSubject));
+    if let Some(rest) = line.strip_prefix("whenever you tap ~ for mana")
+        && rest.starts_with(',')
+    {
+        return Some((
+            EventPattern::TappedForMana {
+                who: ObjectFilter::IsSelf,
+            },
+            normal,
+            subject,
+            rest,
+        ));
+    }
 
     // "Whenever enchanted player is attacked".
     if let Some(rest) = line
@@ -4427,6 +4827,18 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
             return Some((pattern, normal, None, r));
         }
     }
+    for (prefix, whose) in [
+        ("you proliferate", Selector::You),
+        ("an opponent proliferates", Selector::Opponents),
+        ("a player proliferates", Selector::EachPlayer),
+    ] {
+        if let Some(rest) = r
+            .strip_prefix(prefix)
+            .filter(|rest| rest.is_empty() || rest.starts_with(','))
+        {
+            return Some((EventPattern::Proliferated { whose }, normal, None, rest));
+        }
+    }
     // "you scry or surveil": either.
     if let Some(r) = r.strip_prefix("you scry or surveil")
         && (r.is_empty() || r.starts_with(','))
@@ -4762,12 +5174,22 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
                 Some(after) => (true, after),
                 None => (false, after),
             };
-            if let Some(r) = after.strip_prefix("spell each turn") {
+            let tail = after
+                .strip_prefix("spell each turn")
+                .map(|r| (r, false))
+                .or_else(|| {
+                    after
+                        .strip_prefix("spell during each opponent's turn")
+                        .map(|r| (r, true))
+                });
+            if let Some((r, opponents_turn)) = tail {
                 return Some((
                     EventPattern::NthSpellCast {
                         n,
                         by: by.clone(),
                         noncreature,
+                        at_least: false,
+                        opponents_turn,
                     },
                     normal,
                     subject,
@@ -4775,6 +5197,20 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
                 ));
             }
         }
+    }
+    if let Some(r) = r.strip_prefix("you cast a spell other than your first spell each turn") {
+        return Some((
+            EventPattern::NthSpellCast {
+                n: 2,
+                by: Selector::You,
+                noncreature: false,
+                at_least: true,
+                opponents_turn: false,
+            },
+            normal,
+            subject,
+            r,
+        ));
     }
     // "you cast a kicked spell", "you cast a spell from your graveyard", "… from anywhere
     // other than your hand", "… with {X} in its mana cost".
@@ -5086,6 +5522,7 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
         who = ObjectFilter::And(vec![who, ObjectFilter::Not(Box::new(ObjectFilter::IsSelf))]);
     }
     for (phrase, timing) in [
+        (" enters or attacks", normal),
         (" enters the battlefield under your control", normal),
         (" enters", normal),
         (" enters the battlefield", normal),
@@ -5124,6 +5561,10 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
             who.clone()
         };
         let pattern = match phrase {
+            " enters or attacks" => EventPattern::AnyOf(vec![
+                EventPattern::Enters { who: who.clone() },
+                EventPattern::Attacks { who },
+            ]),
             " dies" | " is put into a graveyard from the battlefield" => EventPattern::Dies { who },
             " leaves the battlefield" => EventPattern::Leaves { who },
             " attacks" => EventPattern::Attacks { who },
@@ -5205,7 +5646,14 @@ fn activate_only_if(
     face: &FaceText,
     cx: &mut Cx,
 ) -> Option<Vec<(AbilityKind, Vec<TargetSpec>)>> {
-    let (head, rest) = line.rsplit_once(" activate only if ")?;
+    let (head, rest) = line
+        .rsplit_once(" activate only if ")
+        .map(|(head, rest)| (head.to_owned(), rest))
+        .or_else(|| {
+            let (head, rest) = line.rsplit_once(" and only if ")?;
+            head.contains(". activate only ")
+                .then(|| (format!("{head}."), rest))
+        })?;
     if !head.ends_with('.') || head.contains('"') {
         return None;
     }
@@ -5233,7 +5681,7 @@ fn activate_only_if(
                 .collect::<Option<_>>()?,
         ),
     };
-    let Some(Line::Abilities(mut list)) = compile_line(head, face, &mut inner) else {
+    let Some(Line::Abilities(mut list)) = compile_line(&head, face, &mut inner) else {
         return None;
     };
     let [(AbilityKind::Activated { cost, timing, .. }, _)] = list.as_mut_slice() else {
@@ -5251,6 +5699,10 @@ fn activate_only_if(
 
 /// "<cost>: <effect>", with an optional "Activate only as a sorcery."
 pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
+    activated_with_effect(line, cx, None)
+}
+
+fn activated_with_effect(line: &str, cx: &mut Cx, supplied: Option<Effect>) -> Option<AbilityKind> {
     let (cost_text, body) = line.split_once(": ")?;
     let loyalty = loyalty_delta(cost_text);
     let mut cost = if let Some(delta) = loyalty {
@@ -5374,7 +5826,10 @@ pub(crate) fn activated(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
             timing,
         });
     }
-    let effect = clauses::effect(body, cx)?;
+    let effect = match supplied {
+        Some(effect) => effect,
+        None => clauses::effect(body, cx)?,
+    };
     // Mana made by an ability is a mana ability's, which can't ask what color it is.
     let asks_for_mana = |e: &Effect| match e {
         Effect::AddManaAnyCombination { .. } => true,
@@ -5545,50 +6000,7 @@ fn encore(line: &str) -> Option<AbilityKind> {
     if !rest.is_empty() {
         return None;
     }
-    let made = || Selector::Bound(mtg_ir::selector::Binding::It);
-    Some(AbilityKind::Activated {
-        cost: Cost {
-            mana,
-            additional: vec![AdditionalCost::ExileFrom {
-                zone: Zone::Graveyard,
-                filter: ObjectFilter::IsSelf,
-                count: Value::ONE,
-            }],
-            ..Cost::free()
-        },
-        effect: Effect::Sequence(vec![
-            Effect::CreateTokenCopy {
-                of: Selector::SelfSource,
-                count: Value::Count(Box::new(Selector::Opponents)),
-                controller: Selector::You,
-            },
-            Effect::Continuous {
-                what: made(),
-                modification: clauses::grant(mtg_core::Keyword::Haste),
-                duration: mtg_ir::effect::Duration::Permanent,
-            },
-            // Two players: "attacks that opponent" is attacking the only one there is.
-            Effect::Continuous {
-                what: made(),
-                modification: Modification::Restriction(Restriction::MustAttackIfAble),
-                duration: mtg_ir::effect::Duration::UntilEndOfTurn,
-            },
-            Effect::Delayed {
-                on: EventPattern::StepBegins {
-                    step: Step::End,
-                    whose: Selector::EachPlayer,
-                },
-                effect: Box::new(Effect::Sacrifice {
-                    who: Selector::You,
-                    what: made(),
-                }),
-            },
-        ]),
-        functions_from: Zone::Graveyard,
-        is_mana_ability: false,
-        is_loyalty_ability: false,
-        timing: ActivationTiming::SorcerySpeed,
-    })
+    Some(mtg_ir::ability::encore(mana))
 }
 
 /// CR 702.97a — "scavenge {3}{G}{G}": exile this card from your graveyard: put a number of
@@ -5706,6 +6118,13 @@ fn chosen_cost(part: &str, cx: &Cx) -> Option<AdditionalCost> {
         });
     }
     if let Some(r) = part.strip_prefix("discard ") {
+        if r == "x cards" {
+            return Some(AdditionalCost::Discard {
+                count: Value::X,
+                filter: ObjectFilter::Any,
+                at_random: false,
+            });
+        }
         let (n, r) = words::number(r)?;
         let card = if n == 1 { "card" } else { "cards" };
         let r = r.strip_prefix(' ')?;
@@ -5729,6 +6148,14 @@ fn chosen_cost(part: &str, cx: &Cx) -> Option<AdditionalCost> {
             count: Value::Fixed(n),
             filter,
             at_random: false,
+        });
+    }
+    // "exile cards from your graveyard equal to the number of opponents you have"
+    if part == "exile cards from your graveyard equal to the number of opponents you have" {
+        return Some(AdditionalCost::ExileFrom {
+            zone: Zone::Graveyard,
+            filter: ObjectFilter::Any,
+            count: Value::Count(Box::new(Selector::Opponents)),
         });
     }
     // "exile three other cards from your graveyard", "exile a creature card from your
@@ -6107,6 +6534,24 @@ fn statics(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>>
     } else {
         (line, None)
     };
+    if let Some(mut condition) = condition.clone() {
+        // These conditions need layer dependencies: printed keywords can be removed
+        // or granted by another effect in layer 6. Keep them unsupported in statics.
+        let mut keyword_dependency = false;
+        mtg_ir::walk::Visitor {
+            filter: &mut |filter| {
+                keyword_dependency |= matches!(filter, ObjectFilter::And(parts)
+                    if parts.contains(&ObjectFilter::IsSelf)
+                        && parts.iter().any(|part| matches!(part, ObjectFilter::HasKeyword(_))));
+            },
+            token: &mut |_| {},
+            value: &mut |_| {},
+        }
+        .condition(&mut condition);
+        if keyword_dependency {
+            return None;
+        }
+    }
     let mut list = statics_unconditional(line, face, cx)?;
     // The engine reads "you control enchanted …" unconditionally (see
     // `mtg_engine::layers::controller`), so a conditional one is not compiled.
@@ -6176,6 +6621,80 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
             condition: None,
         }]);
     }
+    // Underworld Breach: "Each nonland card in your graveyard has escape. The escape cost
+    // is equal to the card's mana cost plus exile three other cards from your graveyard."
+    if let Some(r) = line.strip_prefix("each ")
+        && let Some((noun, r)) = nouns::noun(r, cx)
+        && noun.zone == Zone::Graveyard
+        && let Some(extra) = r
+            .strip_prefix(" has escape. the escape cost is equal to the card's mana cost plus ")
+            .or_else(|| {
+                r.strip_prefix(
+                    " have escape. the escape cost is equal to the card's mana cost plus ",
+                )
+            })
+        && let Some(extra) = cost(extra.strip_suffix('.').unwrap_or(extra), cx)
+        && extra.mana.symbols.is_empty()
+        && extra.additional.iter().all(|a| {
+            matches!(
+                a,
+                AdditionalCost::ExileFrom {
+                    zone: Zone::Graveyard,
+                    ..
+                }
+            )
+        })
+    {
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::Restriction(Restriction::GrantEscape {
+                cards: noun.filter,
+                additional: extra.additional,
+            }),
+            condition: None,
+        }]);
+    }
+    // Ashiok, Dream Render; Opposition Agent (its two lines are one rule).
+    let search_rule = match line {
+        "spells and abilities your opponents control can't cause their controller to search their library" => {
+            Some(Restriction::OpponentsCantSearch)
+        }
+        "you control your opponents while they're searching their libraries" => {
+            Some(Restriction::ControlOpponentsSearches)
+        }
+        _ => None,
+    };
+    if let Some(r) = search_rule {
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::Restriction(r),
+            condition: None,
+        }]);
+    }
+    // Leyline of the Void, Dauthi Voidwalker.
+    if let Some(r) =
+        line.strip_prefix("if a card would be put into an opponent's graveyard from anywhere, ")
+    {
+        let counter = match r {
+            "exile it instead" => None,
+            _ => {
+                let r = r.strip_prefix("instead exile it with a ")?;
+                let (kind, r) = words::counter(r)?;
+                if r != " on it" {
+                    return None;
+                }
+                Some(kind)
+            }
+        };
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::Restriction(Restriction::GraveyardToExile {
+                whose: Selector::Opponents,
+                counter,
+            }),
+            condition: None,
+        }]);
+    }
     if line == "~ can't be countered" {
         return Some(vec![AbilityKind::Static {
             what: Selector::SelfSource,
@@ -6198,6 +6717,28 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
             modification: Modification::Restriction(Restriction::CantBeCountered),
             condition: None,
         }]);
+    }
+    // Keyword grants to spells describe stack objects, rather than battlefield
+    // permanents (for example, Samut's split second).
+    if let Some((noun, rest)) = nouns::noun(line, cx)
+        && noun.zone == Zone::Stack
+        && noun.plural
+        && let Some(rest) = rest.strip_prefix(" have ")
+        && let Some((keywords, "")) = words::keyword_list(rest)
+    {
+        return Some(
+            keywords
+                .into_iter()
+                .map(|keyword| AbilityKind::Static {
+                    what: Selector::All {
+                        zone: Zone::Stack,
+                        filter: noun.filter.clone(),
+                    },
+                    modification: clauses::grant(keyword),
+                    condition: None,
+                })
+                .collect(),
+        );
     }
     if let Some(k) = cost_static(line, cx) {
         return Some(vec![k]);
@@ -6409,6 +6950,24 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
     if permanent && let Some(made) = additional_mana_line(line, cx) {
         return Some(vec![made]);
     }
+    for (phrase, who) in [
+        (
+            "each opponent can't draw more than one card each turn",
+            Selector::Opponents,
+        ),
+        (
+            "each player can't draw more than one card each turn",
+            Selector::EachPlayer,
+        ),
+    ] {
+        if line == phrase && permanent {
+            return Some(vec![AbilityKind::Static {
+                what: Selector::SelfSource,
+                modification: Modification::Restriction(Restriction::DrawLimit { who, count: 1 }),
+                condition: None,
+            }]);
+        }
+    }
     // "Creatures can't attack you unless their controller pays {2} for each creature they
     // control that's attacking you." (Propaganda, Ghostly Prison)
     if permanent
@@ -6490,6 +7049,21 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
                 condition,
             }]);
         }
+    }
+    if permanent
+        && line
+            == "each opponent can't cast noncreature spells with mana value greater than the number of lands that player controls"
+    {
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::Restriction(Restriction::CantCastAboveLandCount {
+                who: Selector::Opponents,
+                spells: ObjectFilter::Not(Box::new(ObjectFilter::HasType(
+                    mtg_core::CardType::Creature,
+                ))),
+            }),
+            condition: None,
+        }]);
     }
     // "Each opponent can cast spells only any time they could cast a sorcery." (Teferi)
     for (lead, who) in [
@@ -6588,6 +7162,29 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
     if !cx.targets.is_empty() {
         return None;
     }
+    if let Some(keyword) = r.strip_prefix(if plural { " have " } else { " has " })
+        && keyword.starts_with("fabricate ")
+        && matches!(
+            &what,
+            Selector::All {
+                zone: Zone::Battlefield,
+                ..
+            } | Selector::SelfSource
+        )
+    {
+        let mut granted = cx.fresh();
+        let kind = fabricate(keyword, &mut granted)?;
+        return Some(vec![AbilityKind::Static {
+            what,
+            modification: Modification::GrantAbility(Box::new(Ability {
+                id: AbilityId(0),
+                kind,
+                targets: granted.targets,
+                source_text: Some(keyword.into()),
+            })),
+            condition: None,
+        }]);
+    }
     // A creature's "~ gets +1/+1" is fine; "~" on an instant is not a static subject.
     if matches!(what, Selector::SelfSource) && !face.card_types.iter().any(|t| t.is_permanent()) {
         return None;
@@ -6638,8 +7235,12 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
         }
     }
     // "This creature gets +1/+1 for each oil counter on it": "it" is the card itself.
-    if what == Selector::SelfSource && cx.it.is_none() {
-        cx.it = Some(Selector::SelfSource);
+    if cx.it.is_none()
+        && (what == Selector::SelfSource
+            || line.starts_with("enchanted ")
+            || line.starts_with("equipped "))
+    {
+        cx.it = Some(what.clone());
     }
     let mods = match restriction_predicate(r, cx) {
         Some(mods) => mods,
@@ -6650,6 +7251,12 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
             if let Some(after) = r.strip_prefix(" for each ") {
                 let (by, after) = clauses::per(after, cx)?;
                 clauses::scale_mods(&mut mods, by);
+                r = after;
+            }
+            // A keyword grant after the count is independent of the scaled bonus.
+            if let Some(after) = r.strip_prefix(", and").or_else(|| r.strip_prefix(" and")) {
+                let (extra, after) = clauses::grants(after, plural, "have", false, cx)?;
+                mods.extend(extra);
                 r = after;
             }
             if !r.is_empty() {
@@ -8465,10 +9072,13 @@ fn cycling(line: &str, cx: &mut Cx) -> Option<AbilityKind> {
         )
     } else {
         let (kind, r) = line.split_once("cycling ")?;
-        let what = match kind {
-            "basic land" => "basic land",
-            "plains" | "island" | "swamp" | "mountain" | "forest" => kind,
-            _ => return None,
+        let what = if matches!(kind, "basic land" | "artifact land")
+            || cx.subtype(kind).is_some()
+            || words::card_type(kind).is_some_and(|(_, plural)| !plural)
+        {
+            kind
+        } else {
+            return None;
         };
         let text = format!(
             "search your library for a {what} card, reveal it, put it into your hand, then shuffle"

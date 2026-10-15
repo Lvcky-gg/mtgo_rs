@@ -80,6 +80,20 @@ pub fn normalise(name: &str) -> String {
     out.trim().to_string()
 }
 
+/// Known alternate printed names used by deck exports. Keys use `normalise`.
+/// These keep the underlying Oracle identity, including singleton checks.
+pub fn alternate_printed_name(key: &str) -> Option<&'static str> {
+    match key {
+        "balins tomb" => Some("Ancient Tomb"),
+        "dol amroth" => Some("Minamo, School at Water's Edge"),
+        "hopes aero magic" => Some("Cyclonic Rift"),
+        "mayor tong of chin village" => Some("Drannith Magistrate"),
+        "slimed" => Some("Trickbind"),
+        "widowmaking infiltrator" => Some("Dauthi Voidwalker"),
+        _ => None,
+    }
+}
+
 /// Resolve a parsed list against the card database.
 pub fn resolve(parsed: &ParsedDeck, db: &dyn Resolver) -> ResolvedDeck {
     let mut out = ResolvedDeck {
@@ -98,6 +112,11 @@ pub fn resolve(parsed: &ParsedDeck, db: &dyn Resolver) -> ResolvedDeck {
         let hit = db
             .exact(&entry.name)
             .or_else(|| db.normalised(&normalise(&entry.name)))
+            .or_else(|| {
+                let canonical = alternate_printed_name(&normalise(&entry.name))?;
+                db.exact(canonical)
+                    .or_else(|| db.normalised(&normalise(canonical)))
+            })
             .or_else(|| {
                 // `Front // Back` written when only one face is the card's name.
                 entry
@@ -179,6 +198,43 @@ mod tests {
         let r = resolve(&parsed, &OnlyNormalised);
         assert_eq!(r.main, vec![(CardId(7), 4)]);
         assert!(r.failed.is_empty());
+    }
+
+    #[test]
+    fn alternate_and_original_names_use_the_same_card_identity() {
+        struct CanonicalOnly;
+        impl Resolver for CanonicalOnly {
+            fn exact(&self, name: &str) -> Option<CardId> {
+                match name {
+                    "Ancient Tomb" => Some(CardId(1)),
+                    "Dauthi Voidwalker" => Some(CardId(2)),
+                    _ => None,
+                }
+            }
+            fn normalised(&self, _: &str) -> Option<CardId> {
+                None
+            }
+            fn by_face_name(&self, _: &str) -> Option<CardId> {
+                None
+            }
+            fn suggest(&self, _: &str, _: usize) -> Vec<(CardId, String)> {
+                vec![]
+            }
+        }
+        let parsed = crate::parse(
+            "1 Balin’s Tomb\n1 Ancient Tomb\n1 Widow-Making Infiltrator\n1 Dauthi Voidwalker",
+        );
+        let resolved = resolve(&parsed, &CanonicalOnly);
+        assert!(resolved.failed.is_empty());
+        assert_eq!(
+            resolved.main,
+            vec![
+                (CardId(1), 1),
+                (CardId(1), 1),
+                (CardId(2), 1),
+                (CardId(2), 1)
+            ]
+        );
     }
 
     #[test]

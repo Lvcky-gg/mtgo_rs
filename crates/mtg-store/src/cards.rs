@@ -222,14 +222,21 @@ impl Store {
 
     /// Match on a normalised key.
     pub fn find_normalised(&self, key: &str) -> Result<Option<u32>> {
-        Ok(self
+        let found = self
             .conn
             .query_row(
                 "SELECT oracle FROM face_keys WHERE key = ?1 ORDER BY face_index LIMIT 1",
                 params![key],
                 |r| r.get(0),
             )
-            .optional()?)
+            .optional()?;
+        if found.is_some() {
+            return Ok(found);
+        }
+        match mtg_deck::resolve::alternate_printed_name(key) {
+            Some(name) => self.find_exact(name),
+            None => Ok(None),
+        }
     }
 
     /// Match a name that is only one face of a multi-face card.

@@ -602,6 +602,7 @@ mod tests {
             graveyard,
             mana: [0; 6],
             commander_damage: Default::default(),
+            partner_commander_damage: Default::default(),
         };
         let graveyard = |p: PlayerId| {
             objects

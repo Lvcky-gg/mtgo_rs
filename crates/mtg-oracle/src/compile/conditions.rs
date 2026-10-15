@@ -16,6 +16,77 @@ fn your_graveyard() -> Selector {
 
 /// A condition, and the rest of the input.
 pub fn condition<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    let (first, mut rest) = condition_and(s, cx)?;
+    let mut parts = vec![first];
+    while let Some(after) = rest.strip_prefix(" or ") {
+        let Some((next, after)) = condition_and(after, cx) else {
+            break;
+        };
+        parts.push(next);
+        rest = after;
+    }
+    Some((
+        if parts.len() == 1 {
+            parts.pop()?
+        } else {
+            Condition::Or(parts)
+        },
+        rest,
+    ))
+}
+
+fn condition_and<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    let (first, mut rest) = condition_atom(s, cx)?;
+    let mut parts = vec![first];
+    while let Some(after) = rest.strip_prefix(" and ") {
+        let Some((next, after)) = condition_atom(after, cx) else {
+            break;
+        };
+        parts.push(next);
+        rest = after;
+    }
+    Some((
+        if parts.len() == 1 {
+            parts.pop()?
+        } else {
+            Condition::And(parts)
+        },
+        rest,
+    ))
+}
+
+fn condition_atom<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    // "you discarded an instant or sorcery card this way" (Vohar): what the discard
+    // instruction just discarded.
+    if let Some(r) = s
+        .strip_prefix("you discarded a ")
+        .or_else(|| s.strip_prefix("you discarded an "))
+        && let Some((phrase, r)) = r.split_once(" this way")
+        // A card noun needs a zone; a discarded card is in its owner's graveyard.
+        && let Some((noun, "")) = nouns::noun(&format!("{phrase} in your graveyard"), cx)
+        && !noun.plural
+    {
+        return Some((
+            Condition::AnyMatches {
+                what: Selector::Bound(mtg_ir::selector::Binding::DISCARDED),
+                filter: noun.filter,
+            },
+            r,
+        ));
+    }
+    if let Some(rest) = s.strip_prefix("no mana was spent to cast it") {
+        let what = cx.it.clone()?;
+        return Some((
+            Condition::Exists(Selector::Except(
+                Box::new(what),
+                Box::new(Selector::All {
+                    zone: Zone::Stack,
+                    filter: ObjectFilter::Not(Box::new(ObjectFilter::NoManaSpent)),
+                }),
+            )),
+            rest,
+        ));
+    }
     condition_shapes(s, cx)
         .filter(|(_, r)| !r.starts_with(" and a"))
         .or_else(|| control_both(s, cx))
@@ -104,12 +175,88 @@ fn comparison<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
 }
 
 fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    if let Some(rest) = s
+        .strip_prefix("there is a ")
+        .or_else(|| s.strip_prefix("there is an "))
+        && let Some((noun, rest)) = nouns::noun(rest, cx)
+        && noun.zone == Zone::Graveyard
+        && !noun.plural
+    {
+        return Some((
+            Condition::Exists(Selector::All {
+                zone: noun.zone,
+                filter: noun.filter,
+            }),
+            rest,
+        ));
+    }
+    // Corrupted checks one opponent's poison count, never the opponents' sum.
+    let poisoned_opponents = Value::MostPoisonCounters(Box::new(Selector::Opponents));
+    if let Some(rest) = s.strip_prefix("an opponent has ")
+        && let Some((n, rest)) = words::number(rest)
+        && let Some(rest) = rest.strip_prefix(" or less life")
+    {
+        return Some((
+            Condition::And(vec![
+                Condition::Exists(Selector::Opponents),
+                Condition::ValueAtLeast {
+                    lhs: Value::Fixed(n),
+                    rhs: Value::LeastLifeTotal(Box::new(Selector::Opponents)),
+                },
+            ]),
+            rest,
+        ));
+    }
+    if let Some(r) = s.strip_prefix("an opponent is poisoned") {
+        return Some((at_least(poisoned_opponents, 1), r));
+    }
+    if let Some(r) = s.strip_prefix("an opponent has ")
+        && let Some((n, r)) = words::number(r)
+        && let Some(r) = r.strip_prefix(" or more poison counters")
+    {
+        return Some((at_least(poisoned_opponents, n), r));
+    }
     if let Some(rest) = s.strip_prefix("you have the city's blessing") {
         return Some((Condition::HasCityBlessing, rest));
     }
     // "It" is this object unless the line has bound it to another ("whenever you cast a
     // spell, if it was bargained" is about that spell).
     let it_is_self = matches!(cx.it, None | Some(Selector::SelfSource));
+    for (prefix, pronoun, absent) in [
+        ("~ has ", "it has ", false),
+        ("~ doesn't have ", "it doesn't have ", true),
+    ] {
+        if let Some(rest) = s
+            .strip_prefix(prefix)
+            .or_else(|| s.strip_prefix(pronoun).filter(|_| it_is_self))
+        {
+            let property = if let Some((keyword, rest)) = words::keyword_prefix(rest) {
+                Some((ObjectFilter::HasKeyword(keyword), rest))
+            } else {
+                rest.strip_prefix("a ")
+                    .or_else(|| rest.strip_prefix("an "))
+                    .and_then(words::counter)
+                    .and_then(|(kind, rest)| {
+                        rest.strip_prefix(" on it")
+                            .map(|rest| (ObjectFilter::HasCounter(kind), rest))
+                    })
+            };
+            if let Some((property, rest)) = property {
+                let cond = Condition::Exists(Selector::All {
+                    zone: Zone::Battlefield,
+                    filter: ObjectFilter::And(vec![ObjectFilter::IsSelf, property]),
+                });
+                return Some((
+                    if absent {
+                        Condition::Not(Box::new(cond))
+                    } else {
+                        cond
+                    },
+                    rest,
+                ));
+            }
+        }
+    }
     if let Some(r) = s
         .strip_prefix("~ was kicked")
         .or_else(|| s.strip_prefix("it was kicked").filter(|_| it_is_self))
@@ -133,6 +280,12 @@ fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
             filter: ObjectFilter::And(vec![ObjectFilter::IsSelf, f]),
         })
     };
+    if let Some(rest) = s.strip_prefix("~ attacked this turn").or_else(|| {
+        s.strip_prefix("it attacked this turn")
+            .filter(|_| it_is_self)
+    }) {
+        return Some((me(ObjectFilter::AttackedThisTurn), rest));
+    }
     for (prefix, f) in [
         ("it's attacking", ObjectFilter::Attacking),
         ("~ is attacking", ObjectFilter::Attacking),
@@ -168,6 +321,26 @@ fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
                 r,
             ));
         }
+    }
+    if let Some(r) = s
+        .strip_prefix("~ is a ")
+        .or_else(|| s.strip_prefix("~ is an "))
+    {
+        let (word, rest) = words::first_word(r);
+        if let Some((kind, false)) = words::card_type(word)
+            && kind.is_permanent()
+        {
+            return Some((me(ObjectFilter::HasType(kind)), rest));
+        }
+    }
+    if let Some(rest) = s.strip_prefix("you own a card in exile") {
+        return Some((
+            Condition::Exists(Selector::All {
+                zone: Zone::Exile,
+                filter: ObjectFilter::OwnedBy(Box::new(Selector::You)),
+            }),
+            rest,
+        ));
     }
     if let Some(r) = s
         .strip_prefix("you're the monarch")
@@ -240,6 +413,31 @@ fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     }
     if let Some(r) = s.strip_prefix("you gained life this turn") {
         return Some((Condition::YouGainedLifeThisTurn, r));
+    }
+    for (phrase, both) in [
+        ("you gained or lost life this turn", false),
+        ("you gained and lost life this turn", true),
+    ] {
+        if let Some(r) = s.strip_prefix(phrase) {
+            let parts = vec![
+                Condition::YouGainedLifeThisTurn,
+                Condition::YouLostLifeThisTurn,
+            ];
+            return Some((
+                if both {
+                    Condition::And(parts)
+                } else {
+                    Condition::Or(parts)
+                },
+                r,
+            ));
+        }
+    }
+    if let Some(r) = s
+        .strip_prefix("you lost life this turn")
+        .or_else(|| s.strip_prefix("you've lost life this turn"))
+    {
+        return Some((Condition::YouLostLifeThisTurn, r));
     }
     if let Some(r) = s.strip_prefix("a creature died this turn") {
         return Some((Condition::CreatureDiedThisTurn, r));
@@ -342,6 +540,25 @@ fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     {
         return Some((
             at_least(Value::CardsDrawnThisTurn(Box::new(Selector::You)), n),
+            r,
+        ));
+    }
+    // "it's your first, second, or third turn of the game" (Starting Town)
+    if let Some(r) = s.strip_prefix("it's your first, second, or third turn of the game") {
+        return Some((Condition::YourEarlyTurn(3), r));
+    }
+    // "an opponent has cast a blue or black spell this turn" (Veil of Summer)
+    if let Some(r) = s.strip_prefix("an opponent has cast a ") {
+        let (colors, r) = r.split_once(" spell this turn")?;
+        let colors = colors
+            .split(" or ")
+            .map(words::color)
+            .collect::<Option<Vec<_>>>()?;
+        return Some((
+            Condition::CastColorThisTurn {
+                who: Selector::Opponents,
+                colors,
+            },
             r,
         ));
     }
@@ -455,7 +672,9 @@ fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
         return Some((at_least(Value::DistinctPowers(Box::new(creatures)), n), r));
     }
     // "you gained 3 or more life this turn".
-    if let Some(r) = s.strip_prefix("you gained ")
+    if let Some(r) = s
+        .strip_prefix("you gained ")
+        .or_else(|| s.strip_prefix("you've gained "))
         && let Some((n, r)) = words::number(r)
         && let Some(r) = r.strip_prefix(" or more life this turn")
     {
@@ -819,7 +1038,7 @@ pub fn counted<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, &'s str)> {
         Some(r) => (true, r),
         None => (false, s),
     };
-    let (noun, r) = nouns::noun(s, cx)?;
+    let (noun, r) = nouns::counted_noun(s, cx)?;
     let mut filter = if other {
         ObjectFilter::And(vec![
             noun.filter,
@@ -829,12 +1048,21 @@ pub fn counted<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, &'s str)> {
         noun.filter
     };
     // "for each Equipment attached to it"
-    let r = match r
+    let attachment = r
         .strip_prefix(" attached to it")
-        .or_else(|| r.strip_prefix(" attached to ~"))
-    {
-        Some(r) if noun.zone == Zone::Battlefield => {
-            filter = ObjectFilter::And(vec![filter, ObjectFilter::AttachedToSource]);
+        .map(|r| (cx.it.clone().unwrap_or(Selector::SelfSource), r))
+        .or_else(|| {
+            r.strip_prefix(" attached to ~")
+                .map(|r| (Selector::SelfSource, r))
+        });
+    let r = match attachment {
+        Some((host, r)) if noun.zone == Zone::Battlefield => {
+            let attached = if host == Selector::SelfSource {
+                ObjectFilter::AttachedToSource
+            } else {
+                ObjectFilter::AttachedTo(Box::new(host))
+            };
+            filter = ObjectFilter::And(vec![filter, attached]);
             r
         }
         _ => r,

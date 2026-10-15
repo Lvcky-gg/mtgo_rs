@@ -129,6 +129,12 @@ pub fn compute(
         }
         ch
     };
+    if !obj.face_down
+        && let Some((power, toughness)) = obj.token_size
+    {
+        ch.power = Some(power);
+        ch.toughness = Some(toughness);
+    }
     // CR 702.103b — a bestowed Aura is an Aura enchantment, and no creature.
     if obj.bestowed() {
         ch.card_types.retain(|t| *t != mtg_core::CardType::Creature);
@@ -268,6 +274,41 @@ fn dependency_sort(_effects: &mut [ContinuousEffect]) {}
 /// Not modelled: removal decided by characteristics another effect changed (CR 613.8).
 pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousEffect> {
     let mut out = state.continuous.clone();
+    for id in state.battlefield() {
+        let Some(obj) = state.objects.get(&id).filter(|o| !o.phased_out) else {
+            continue;
+        };
+        for (kind, count) in &obj.counters {
+            let mtg_core::CounterKind::Keyword(keyword) = kind else {
+                continue;
+            };
+            if *count <= 0 {
+                continue;
+            }
+            out.push(ContinuousEffect {
+                id,
+                source: id,
+                affected: AffectedSet::Fixed(vec![id]),
+                modification: mtg_ir::effect::Modification::GrantAbility(Box::new(
+                    mtg_ir::Ability {
+                        id: mtg_core::AbilityId(0),
+                        kind: mtg_ir::AbilityKind::Keyword(*keyword),
+                        targets: vec![],
+                        source_text: None,
+                    },
+                )),
+                duration: mtg_ir::effect::Duration::WhileSourcePresent,
+                timestamp: obj
+                    .keyword_counter_timestamps
+                    .get(keyword)
+                    .copied()
+                    .unwrap_or(obj.timestamp),
+                layer: layer::ABILITY,
+                ability: None,
+                controller: Some(obj.controller),
+            });
+        }
+    }
     let mut statics = Vec::new();
     let spells = state
         .objects_in(mtg_core::ZoneRef::shared(mtg_core::Zone::Stack))
@@ -387,7 +428,9 @@ pub fn applies(
     effect: &ContinuousEffect,
     id: ObjectId,
 ) -> bool {
-    let chars = crate::eval::PrintedChars(printed);
+    // Restrictions are queried after characteristics have been computed, so
+    // their dynamic filters must see current power, types, and other values.
+    let chars = crate::eval::ComputedChars(printed);
     affects(state, printed, &chars, effect, id)
 }
 
@@ -428,10 +471,12 @@ fn effect_ctx<'a>(
     effect: &ContinuousEffect,
 ) -> crate::eval::Ctx<'a> {
     static NO_TARGETS: &[mtg_core::Target] = &[];
+    // A resolved spell's effect remembers who cast it once the spell is gone.
     let controller = state
         .objects
         .get(&effect.source)
         .map(|o| o.controller)
+        .or(effect.controller)
         .unwrap_or(state.active_player);
     crate::eval::Ctx {
         state,
@@ -532,8 +577,10 @@ fn apply_one(
                     static_ability: effect.ability,
                 });
             } else if let mtg_ir::AbilityKind::Keyword(k) = a.kind
-                && !ch.granted_keywords.contains(&k)
+                && (matches!(k, mtg_core::Keyword::Toxic(_)) || !ch.granted_keywords.contains(&k))
             {
+                // CR 702.164b: each instance contributes its own toxic value,
+                // including repeated grants of the same numbered ability.
                 ch.granted_keywords.push(k);
                 if k == mtg_core::Keyword::Changeling {
                     ch.every_creature_type = true;

@@ -81,6 +81,7 @@ impl Visitor<'_> {
             | AbilityKind::FlashSurcharge { .. }
             | AbilityKind::SacrificeIfFlashed
             | AbilityKind::BeginOnBattlefield
+            | AbilityKind::BeginOnBattlefieldNotStarting { .. }
             | AbilityKind::Spree { .. }
             | AbilityKind::Keyword(_)
             | AbilityKind::Native { .. } => {}
@@ -156,6 +157,7 @@ impl Visitor<'_> {
             | EventPattern::AttacksUnblocked { who }
             | EventPattern::TakesDamage { who, .. }
             | EventPattern::BecomesTapped { who }
+            | EventPattern::TappedForMana { who }
             | EventPattern::BecomesUntapped { who }
             | EventPattern::ExiledForMadness { who }
             | EventPattern::BecomesMonstrous { who }
@@ -165,7 +167,9 @@ impl Visitor<'_> {
                 self.filter(who);
                 self.selector(player);
             }
-            EventPattern::Scried { whose, .. } => self.selector(whose),
+            EventPattern::Scried { whose, .. } | EventPattern::Proliferated { whose } => {
+                self.selector(whose)
+            }
             EventPattern::Cycled { who, by } | EventPattern::Sacrificed { who, by } => {
                 self.filter(who);
                 self.selector(by);
@@ -230,7 +234,9 @@ impl Visitor<'_> {
             | ReplacementKind::EntersTappedUnlessPaysLife { .. }
             | ReplacementKind::EntersWithCounterIfChosen
             | ReplacementKind::EntersWithCounterOrHaste
+            | ReplacementKind::EntersWithCounterChoice(_)
             | ReplacementKind::Devour(_)
+            | ReplacementKind::Amplify(_)
             | ReplacementKind::EntersChoosing(_)
             | ReplacementKind::EntersChoosingColorExcept(_) => {}
             ReplacementKind::EntersIfDiscards(f) => self.filter(f),
@@ -248,7 +254,12 @@ impl Visitor<'_> {
                     self.condition(c);
                 }
             }
-            ReplacementKind::EntersAsCopy { of, .. } => self.filter(of),
+            ReplacementKind::EntersAsCopy { of, except, .. } => {
+                self.filter(of);
+                for m in except {
+                    self.modification(m);
+                }
+            }
             ReplacementKind::Instead { effect } | ReplacementKind::InAddition { effect } => {
                 self.effect(effect)
             }
@@ -272,13 +283,18 @@ impl Visitor<'_> {
                 | Restriction::PreventDamage { from: f, .. }
                 | Restriction::CantAttackUnlessDefenderControls(f)
                 | Restriction::Protection { from: f, .. }
+                | Restriction::PlayerHexproofFrom(f)
+                | Restriction::HexproofFrom(f)
+                | Restriction::GrantEscape { cards: f, .. }
                 | Restriction::FlashFor(f) => self.filter(f),
-                Restriction::CantGainLife(who) | Restriction::LifeGainBoost { who, .. } => {
-                    self.selector(who)
-                }
+                Restriction::CantGainLife(who)
+                | Restriction::GraveyardToExile { whose: who, .. }
+                | Restriction::LifeGainBoost { who, .. }
+                | Restriction::DrawLimit { who, .. } => self.selector(who),
                 Restriction::PlayFromTopOfLibrary { spells, .. }
                 | Restriction::MustBeBlockedByAll(spells) => self.filter(spells),
-                Restriction::CantCast { who, spells, .. } => {
+                Restriction::CantCast { who, spells, .. }
+                | Restriction::CantCastAboveLandCount { who, spells } => {
                     self.selector(who);
                     self.filter(spells);
                 }
@@ -299,6 +315,10 @@ impl Visitor<'_> {
                 | Restriction::CantUntapDuringUntapStep
                 | Restriction::CantBeRegenerated
                 | Restriction::PlayerHexproof
+                | Restriction::GraveyardCast { .. }
+                | Restriction::OpponentsCantSearch
+                | Restriction::BoastTwice
+                | Restriction::ControlOpponentsSearches
                 | Restriction::CantActivateAbilities
                 | Restriction::LookAtTopOfLibrary
                 | Restriction::SkipDrawStep
@@ -498,6 +518,12 @@ impl Visitor<'_> {
                 self.selector(what);
                 self.value(amount);
             }
+            Effect::AddCounterKinds { what, counters } => {
+                self.selector(what);
+                for (_, amount) in counters {
+                    self.value(amount);
+                }
+            }
             Effect::Fight { a, b } => {
                 self.selector(a);
                 self.selector(b);
@@ -535,8 +561,29 @@ impl Visitor<'_> {
             }
             Effect::Choose { then, .. } => self.effect(then),
             Effect::RepeatMay { body } => self.effect(body),
+            Effect::FreezeValues { effect } | Effect::ForEachExiledWith { effect, .. } => {
+                self.effect(effect)
+            }
             Effect::ExileUntilRepeatedName { who } => self.selector(who),
-            Effect::ChoosePlayer { from, then } => {
+            Effect::ExileUntilNamed { exile_first } => self.value(exile_first),
+            Effect::GrantEncore { what } => self.selector(what),
+            Effect::ShuffleInAndRevealSelfName
+            | Effect::SearchExileMayCast { .. }
+            | Effect::SacrificeReanimated => {}
+            Effect::PersistMana { effect } => self.effect(effect),
+            Effect::BounceChain { what } => self.selector(what),
+            Effect::ReanimateAttach { what } => {
+                if let Some(what) = what {
+                    self.selector(what);
+                }
+            }
+            Effect::ExchangeOrSacrifice { a, b } => {
+                self.selector(a);
+                self.selector(b);
+            }
+            Effect::SearchAndSplit { chooser, .. } => self.selector(chooser),
+            Effect::ChoosePlayer { from, then, .. }
+            | Effect::ChooseRecipient { from, then, .. } => {
                 self.selector(from);
                 self.effect(then);
             }
@@ -628,9 +675,22 @@ impl Visitor<'_> {
     }
 
     fn mana(&mut self, m: &mut crate::ManaOutput) {
-        if let crate::ManaOutput::Repeated { amount, output } = m {
-            self.value(amount);
-            self.mana(output);
+        match m {
+            crate::ManaOutput::Repeated { amount, output } => {
+                self.value(amount);
+                self.mana(output);
+            }
+            crate::ManaOutput::Combination { amount, .. } => self.value(amount),
+            crate::ManaOutput::Conditional {
+                cond,
+                then,
+                otherwise,
+            } => {
+                self.condition(cond);
+                self.mana(then);
+                self.mana(otherwise);
+            }
+            _ => {}
         }
     }
 
@@ -678,6 +738,7 @@ impl Visitor<'_> {
         (self.filter)(f);
         match f {
             ObjectFilter::ControlledBy(s)
+            | ObjectFilter::AttachedTo(s)
             | ObjectFilter::OwnedBy(s)
             | ObjectFilter::SharesColorWith(s)
             | ObjectFilter::SharesCreatureTypeWith(s) => self.selector(s),
@@ -693,6 +754,8 @@ impl Visitor<'_> {
                 }
             }
             ObjectFilter::Any
+            | ObjectFilter::ManaCostIs(_)
+            | ObjectFilter::NoManaSpent
             | ObjectFilter::IsSelf
             | ObjectFilter::InBinding(_)
             | ObjectFilter::HasType(_)
@@ -741,6 +804,7 @@ impl Visitor<'_> {
             | Value::X
             | Value::EventAmount
             | Value::ColorsSpent
+            | Value::ManaSpent
             | Value::TimesKicked
             | Value::CastX
             | Value::OpponentsAttacked
@@ -764,13 +828,17 @@ impl Visitor<'_> {
             | Value::GreatestPower(s)
             | Value::GreatestToughness(s)
             | Value::GreatestManaValue(s)
+            | Value::GreatestOwnedCount(s)
             | Value::ManaValue(s)
             | Value::CardTypesAmong(s)
             | Value::PartySize(s)
             | Value::BasicLandTypesAmong(s)
             | Value::SpellsCastThisTurn(s)
             | Value::MostSpellsCastThisTurn(s)
-            | Value::CardsDrawnThisTurn(s) => self.selector(s),
+            | Value::MostPoisonCounters(s)
+            | Value::LeastLifeTotal(s)
+            | Value::CardsDrawnThisTurn(s)
+            | Value::CombatDamagedThisTurn(s) => self.selector(s),
             Value::Sum(vs) | Value::Product(vs) => {
                 for v in vs {
                     self.value(v);
@@ -797,17 +865,20 @@ impl Visitor<'_> {
         }
     }
 
-    fn condition(&mut self, c: &mut Condition) {
+    pub fn condition(&mut self, c: &mut Condition) {
         match c {
+            Condition::CastColorThisTurn { who, .. } => self.selector(who),
             Condition::Always
             | Condition::DuringStep(_)
             | Condition::YourTurn
             | Condition::Kicked
             | Condition::ControlledSinceLastUpkeep
             | Condition::OpponentDamagedThisTurn
+            | Condition::YourEarlyTurn(_)
             | Condition::YouAreAttacked
             | Condition::OpponentLostLifeThisTurn
             | Condition::YouGainedLifeThisTurn
+            | Condition::YouLostLifeThisTurn
             | Condition::CastFor(_)
             | Condition::Renowned
             | Condition::YouAttackedThisTurn
@@ -832,6 +903,10 @@ impl Visitor<'_> {
                 self.value(rhs);
             }
             Condition::Exists(s) => self.selector(s),
+            Condition::AnyMatches { what, filter } => {
+                self.selector(what);
+                self.filter(filter);
+            }
             Condition::Not(c) => self.condition(c),
             Condition::And(cs) | Condition::Or(cs) => {
                 for c in cs {

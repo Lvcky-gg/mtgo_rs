@@ -49,7 +49,8 @@ impl CardText {
 impl CardTexts {
     /// Preserve deck artwork preferences across the game/UI thread boundary.
     pub fn for_match(cards: &mtg_session::game::GameCards) -> Self {
-        let mut texts = Self::snapshot(cards, cards.ids());
+        // Tokens too: without their text every token would show as "(hidden)".
+        let mut texts = Self::snapshot(cards, cards.ids().chain(cards.token_ids()));
         for ((id, face), text) in &mut texts.entries {
             if let Some(mtg_session::game::CardKey::Oracle(_, Some(printing))) = cards.key(*id) {
                 let back = *face == 1

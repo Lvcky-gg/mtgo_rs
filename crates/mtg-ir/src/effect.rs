@@ -45,6 +45,11 @@ pub enum Effect {
     },
     /// Run each child in order.
     Sequence(Vec<Effect>),
+    /// Evaluate the numerical values in this subtree now, before installing a
+    /// delayed effect that must remember them across turns.
+    FreezeValues {
+        effect: Box<Effect>,
+    },
     /// Run `then` if the condition holds, else `otherwise`.
     If {
         cond: Condition,
@@ -71,6 +76,15 @@ pub enum Effect {
     /// This choice does not target the player.
     ChoosePlayer {
         from: Selector,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        at_random: bool,
+        then: Box<Effect>,
+    },
+    /// Choose a player or permanent during resolution, without targeting it.
+    /// The chosen recipient is bound to `slot` while resolving `then`.
+    ChooseRecipient {
+        from: Selector,
+        slot: Binding,
         then: Box<Effect>,
     },
     /// Repeat for each object a selector matches, binding `Binding::It`.
@@ -91,6 +105,70 @@ pub enum Effect {
     /// Stop on acceptance, a repeated name, or an empty library (Tainted Pact).
     ExileUntilRepeatedName {
         who: Selector,
+    },
+    /// "Choose a card name. Exile the top six cards of your library, then reveal cards from
+    /// the top of your library until you reveal a card with the chosen name. Put that card
+    /// into your hand and exile all other cards revealed this way." (Demonic Consultation)
+    ExileUntilNamed {
+        exile_first: Value,
+    },
+    /// Animate Dead, Necromancy: "Return enchanted creature card to the battlefield under
+    /// your control and attach this Aura to it" (`what: None`), "Put target creature card
+    /// from a graveyard onto the battlefield under your control and attach this enchantment
+    /// to it" (`what`: that target). The source becomes an Aura legally enchanting just
+    /// that creature.
+    ReanimateAttach {
+        what: Option<Selector>,
+    },
+    /// "When this Aura leaves the battlefield, that creature's controller sacrifices it.":
+    /// the creature [`Effect::ReanimateAttach`] returned with this source.
+    SacrificeReanimated,
+    /// "Return target nonland permanent to its owner's hand. Then that permanent's
+    /// controller may sacrifice a land of their choice. If the player does, they may copy
+    /// this spell and may choose a new target for that copy." (Chain of Vapor)
+    BounceChain {
+        what: Selector,
+    },
+    /// "Add {R}. Until end of turn, you don't lose this mana as steps and phases end."
+    /// (Birgi): the mana `effect` adds stays in its player's pool until the turn ends.
+    PersistMana {
+        effect: Box<Effect>,
+    },
+    /// "Search your library for a card, exile it face down, then shuffle. If this spell was
+    /// bargained, you may cast the exiled card without paying its mana cost if that spell's
+    /// mana value is 4 or less. Put the exiled card into your hand if it wasn't cast this
+    /// way." (Beseech the Mirror)
+    SearchExileMayCast {
+        max_mana_value: u32,
+    },
+    /// "This creature's owner shuffles it into their library. If that player does, they
+    /// reveal cards from the top of that library until a card named ~ is revealed. The
+    /// player puts that card onto the battlefield and all other cards revealed this way
+    /// into their graveyard." (Mirror-Mad Phantasm)
+    ShuffleInAndRevealSelfName,
+    /// "Exchange control of this creature and up to one target creature an opponent
+    /// controls. If you don't or can't make an exchange, sacrifice this creature. This
+    /// ability still resolves if its target becomes illegal." (Gilded Drake)
+    ExchangeOrSacrifice {
+        a: Selector,
+        b: Selector,
+    },
+    /// "Target creature card in your graveyard gains encore until end of turn. The encore
+    /// cost is equal to its mana cost." (Araumi of the Dead Tide)
+    GrantEncore {
+        what: Selector,
+    },
+    /// "Search your library for up to four cards with different names and reveal them.
+    /// Target opponent chooses two of those cards. Put the chosen cards into your graveyard
+    /// and the rest into your hand. Then shuffle." (Gifts Ungiven; Intuition): the searcher
+    /// finds up to `count`, `chooser` picks `chosen` of them (all, if fewer were found).
+    SearchAndSplit {
+        count: u8,
+        different_names: bool,
+        chooser: Selector,
+        chosen: u8,
+        chosen_to: Zone,
+        rest_to: Zone,
     },
     /// Give the controller the option; `Nothing` if declined.
     MayPay {
@@ -267,6 +345,11 @@ pub enum Effect {
         kind: CounterKind,
         amount: Value,
     },
+    /// A list of different counter kinds placed in one simultaneous event batch.
+    AddCounterKinds {
+        what: Selector,
+        counters: Vec<(CounterKind, Value)>,
+    },
     RemoveCounters {
         what: Selector,
         kind: CounterKind,
@@ -310,6 +393,12 @@ pub enum Effect {
         until: PlayUntil,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cast_only: bool,
+        /// "… without paying its mana cost."
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        free: bool,
+        /// "… and mana of any type can be spent to cast them."
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        any_mana: bool,
     },
     /// "Its owner may cast this card after the current turn has ended for as long as it
     /// remains exiled" (warp): for its mana cost.
@@ -333,6 +422,11 @@ pub enum Effect {
     ReturnExiledWith {
         to: mtg_core::Zone,
         tapped: bool,
+    },
+    /// Resolve for each card still in exile linked to this source incarnation.
+    ForEachExiledWith {
+        slot: crate::selector::Binding,
+        effect: Box<Effect>,
     },
     /// "You may search your library and/or graveyard for a card named …, reveal it, and put
     /// it into your hand. If you search your library this way, shuffle.": one optional
@@ -653,6 +747,19 @@ pub enum ManaOutput {
         amount: Value,
         output: Box<ManaOutput>,
     },
+    /// "Add X mana in any combination of {U} and/or {R}" (Vivi Ornitier): `amount` mana,
+    /// each one of these colors independently.
+    Combination {
+        amount: Value,
+        colors: Vec<Color>,
+    },
+    /// "Add {C}. If ~ has a luck counter on it, instead add one mana of any color."
+    /// (Gemstone Caverns): `then` while the condition holds as it is activated.
+    Conditional {
+        cond: Box<crate::trigger::Condition>,
+        then: Box<ManaOutput>,
+        otherwise: Box<ManaOutput>,
+    },
 }
 
 impl ManaOutput {
@@ -671,6 +778,18 @@ impl ManaOutput {
             | ManaOutput::EachColorAmong(_) => Vec::new(),
             ManaOutput::OrChosen(c) => vec![*c],
             ManaOutput::Repeated { output, .. } => output.possible_colors(),
+            ManaOutput::Combination { colors, .. } => colors.clone(),
+            ManaOutput::Conditional {
+                then, otherwise, ..
+            } => {
+                let mut colors = then.possible_colors();
+                for c in otherwise.possible_colors() {
+                    if !colors.contains(&c) {
+                        colors.push(c);
+                    }
+                }
+                colors
+            }
         }
     }
 
@@ -679,6 +798,9 @@ impl ManaOutput {
         match self {
             ManaOutput::AnyOf(cs) => cs.len() > 1,
             ManaOutput::Repeated { output, .. } => output.is_ambiguous(),
+            ManaOutput::Conditional {
+                then, otherwise, ..
+            } => then.is_ambiguous() || otherwise.is_ambiguous(),
             _ => false,
         }
     }
@@ -802,9 +924,55 @@ pub enum Restriction {
     /// "You have hexproof": the source's controller can't be the target of spells or
     /// abilities their opponents control (CR 702.11c).
     PlayerHexproof,
+    /// "You gain hexproof from blue" (CR 702.11d): the effect's controller can't be the
+    /// target of spells or abilities matching the filter that their opponents control.
+    PlayerHexproofFrom(ObjectFilter),
+    /// "Each nonland card in your graveyard has escape. The escape cost is equal to the
+    /// card's mana cost plus exile three other cards from your graveyard." (Underworld
+    /// Breach, CR 702.138): the source's controller may cast matching cards from their
+    /// graveyard for their mana cost plus `additional`.
+    GrantEscape {
+        cards: ObjectFilter,
+        additional: Vec<crate::AdditionalCost>,
+    },
+    /// "Target instant or sorcery card in your graveyard gains flashback until end of turn.
+    /// The flashback cost is equal to its mana cost." (Snapcaster Mage), "You may cast
+    /// target instant or sorcery card from your graveyard this turn. If that spell would be
+    /// put into your graveyard, exile it instead." (Vohar): the cards this applies to may be
+    /// cast from their owner's graveyard for their mana cost, exiled afterwards if `exile`.
+    GraveyardCast {
+        exile: bool,
+    },
+    /// "Creatures you control can boast twice during each of your turns rather than once."
+    /// (Birgi, God of Storytelling)
+    BoastTwice,
+    /// "Spells and abilities your opponents control can't cause their controller to search
+    /// their library." (Ashiok, Dream Render)
+    OpponentsCantSearch,
+    /// "You control your opponents while they're searching their libraries. While an
+    /// opponent is searching their library, they exile each card they find. You may play
+    /// those cards for as long as they remain exiled, and you may spend mana as though it
+    /// were mana of any color to cast them." (Opposition Agent)
+    ControlOpponentsSearches,
+    /// "If a card would be put into an opponent's graveyard from anywhere, instead exile it
+    /// with a void counter on it." (Dauthi Voidwalker; Leyline of the Void without the
+    /// counter): cards these players own, relative to the source's controller.
+    GraveyardToExile {
+        whose: crate::selector::Selector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter: Option<mtg_core::CounterKind>,
+    },
+    /// "Permanents you control gain hexproof from black" (CR 702.11d): matching spells
+    /// and abilities its controller's opponents control can't target it.
+    HexproofFrom(ObjectFilter),
     /// "Players can't gain life", "your opponents can't gain life" — these players,
     /// relative to the source's controller.
     CantGainLife(crate::selector::Selector),
+    /// A per-turn ceiling on the number of cards these players can draw.
+    DrawLimit {
+        who: crate::selector::Selector,
+        count: u8,
+    },
     /// CR 502.3 — "You may choose not to untap this creature during your untap step."
     MayChooseNotToUntap,
     /// CR 305.2a — "You may play an additional land on each of your turns": its
@@ -861,9 +1029,12 @@ pub enum Restriction {
     /// "All creatures able to block this creature do so": every creature matching the
     /// filter (from this creature's point of view) that can block it, does.
     MustBeBlockedByAll(ObjectFilter),
-    /// "Your opponents can't cast creature spells", "each player can't cast more than one
-    /// spell each turn": the players `who` names (from the effect's controller) can't cast
-    /// spells matching `spells` — at all, or once they have cast `beyond` spells this turn.
+    /// Restrict spells whose mana value exceeds the caster's current land count.
+    CantCastAboveLandCount {
+        who: crate::selector::Selector,
+        spells: ObjectFilter,
+    },
+    /// Prohibit matching spells, either outright or beyond a per-turn limit.
     CantCast {
         who: crate::selector::Selector,
         spells: ObjectFilter,
@@ -997,7 +1168,13 @@ pub enum ReplacementKind {
     },
     /// CR 707.9 — "You may have this creature enter as a copy of any creature on the
     /// battlefield": chosen as it resolves, among objects matching `of`.
-    EntersAsCopy { of: ObjectFilter, optional: bool },
+    EntersAsCopy {
+        of: ObjectFilter,
+        optional: bool,
+        /// "… except it's a Bird in addition to its other types and it has flying."
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        except: Vec<Modification>,
+    },
     /// CR 614.12 — "As this land enters, you may pay 2 life. If you don't, it enters
     /// tapped."
     EntersTappedUnlessPaysLife { amount: u32 },
@@ -1014,6 +1191,8 @@ pub enum ReplacementKind {
     EntersWithCounterIfChosen,
     /// Riot (CR 702.136a): it enters with your choice of a +1/+1 counter or haste.
     EntersWithCounterOrHaste,
+    /// Enters with one counter chosen from the listed kinds.
+    EntersWithCounterChoice(Vec<(Box<str>, CounterKind)>),
     /// Devour N (CR 702.82a): as it enters, its controller may sacrifice any number of
     /// creatures; it enters with N +1/+1 counters for each.
     Devour(u8),
@@ -1031,6 +1210,8 @@ pub enum ReplacementKind {
     /// a replacement in the rules, but it shares the "rewrite the pending event"
     /// pipeline position.
     InAddition { effect: Box<Effect> },
+    /// Reveal any number of creature cards sharing a creature type as it enters.
+    Amplify(u8),
 }
 
 /// How long a permission to play a card lasts.

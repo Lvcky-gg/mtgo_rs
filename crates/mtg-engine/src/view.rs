@@ -67,6 +67,8 @@ pub struct PlayerSummary {
     /// by that commander's owner (CR 903.10a). Empty otherwise.
     #[serde(default)]
     pub commander_damage: BTreeMap<PlayerId, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partner_commander_damage: BTreeMap<PlayerId, u32>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -213,6 +215,13 @@ pub fn project_showing(state: &GameState, viewer: PlayerId, shown: &[ObjectId]) 
                     library_size: state.objects_in(ZoneRef::of(Zone::Library, p.id)).len() as u32,
                     graveyard: state.objects_in(ZoneRef::of(Zone::Graveyard, p.id)),
                     mana: p.mana.amounts,
+                    partner_commander_damage: state
+                        .commander
+                        .partner_damage
+                        .iter()
+                        .filter(|((victim, _), _)| *victim == p.id)
+                        .map(|((_, owner), n)| (*owner, *n))
+                        .collect(),
                     commander_damage: state
                         .commander
                         .damage

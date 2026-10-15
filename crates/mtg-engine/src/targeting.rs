@@ -33,12 +33,14 @@ fn ctx<'a>(
 ) -> Ctx<'a> {
     // Filters describe the spell or ability's source, not the ability object
     // representing it on the stack ("another target" excludes the permanent).
-    let source = state
+    let cast = state
         .objects
         .get(&source)
-        .and_then(|object| object.cast_context.as_ref())
-        .and_then(|cast| cast.source)
-        .unwrap_or(source);
+        .and_then(|object| object.cast_context.as_ref());
+    let bindings = cast
+        .map(|cast| &cast.bindings)
+        .unwrap_or_else(|| crate::empty_bindings());
+    let source = cast.and_then(|cast| cast.source).unwrap_or(source);
     Ctx {
         state,
         cards,
@@ -48,7 +50,7 @@ fn ctx<'a>(
         targets: &[],
         target_legal: &[],
         x: 0,
-        bindings: crate::empty_bindings(),
+        bindings,
     }
 }
 
@@ -100,6 +102,7 @@ pub fn legal_targets(
             if !state.player(*p).has_lost
                 && allowed.as_ref().is_none_or(|a| a.contains(p))
                 && !player_hexproof_from(state, cards, *p, controller)
+                && !player_hexproof_from_source(&c, *p)
                 && !player_protected(state, cards, *p)
             {
                 out.push(Target::Player(*p));
@@ -186,6 +189,47 @@ pub fn can_be_announced(
         return possible >= usize::from(min.max(1));
     }
     all_announceable(state, cards, specs, source, controller)
+}
+
+/// Before activation, the permanent has no stack cast context identifying which
+/// ability is being announced. Read its modes from that ability explicitly.
+pub fn can_activate(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    ability: &mtg_ir::Ability,
+    source: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    if let mtg_ir::AbilityKind::Activated {
+        effect:
+            mtg_ir::Effect::Modal {
+                choose,
+                modes,
+                at_least,
+            },
+        ..
+    } = &ability.kind
+    {
+        let chars = ComputedChars(cards);
+        let c = ctx(state, cards, &chars, source, controller);
+        let count = eval::value(&c, choose)
+            .unwrap_or(1)
+            .clamp(0, modes.len() as i32) as u8;
+        let minimum = at_least.unwrap_or(count).min(count).max(1);
+        let possible = (0..modes.len() as u8)
+            .filter(|mode| {
+                let specs: Vec<_> = ability
+                    .targets
+                    .iter()
+                    .filter(|spec| spec.mode.is_none_or(|m| m == *mode))
+                    .cloned()
+                    .collect();
+                all_announceable(state, cards, &specs, source, controller)
+            })
+            .count();
+        return possible >= usize::from(minimum);
+    }
+    can_be_announced(state, cards, &ability.targets, source, controller)
 }
 
 /// Whether every one of these target slots can be filled at once.
@@ -323,6 +367,7 @@ pub fn recheck(
                             eval::players(&c, selector).is_ok_and(|players| players.contains(p))
                         })
                         && !player_hexproof_from(state, cards, *p, controller)
+                        && !player_hexproof_from_source(&c, *p)
                 }
             }
         })
@@ -487,6 +532,24 @@ pub fn player_hexproof_from(
                     mtg_ir::effect::Restriction::PlayerHexproof
                 )
             ) && crate::layers::controller(state, e.source) == Some(player)
+        })
+}
+
+/// Whether `player` has hexproof from a quality the targeting source has ("you gain
+/// hexproof from blue", CR 702.11d), against a source an opponent controls.
+fn player_hexproof_from_source(c: &Ctx, player: PlayerId) -> bool {
+    player != c.controller
+        && crate::layers::effects(c.state, c.cards).iter().any(|e| {
+            let mtg_ir::effect::Modification::Restriction(
+                mtg_ir::effect::Restriction::PlayerHexproofFrom(from),
+            ) = &e.modification
+            else {
+                return false;
+            };
+            e.controller
+                .or_else(|| crate::layers::controller(c.state, e.source))
+                == Some(player)
+                && eval::matches(c, from, c.source).unwrap_or(false)
         })
 }
 

@@ -101,6 +101,9 @@ impl Binding {
     /// What was tapped to pay a cost: station's "equal to the tapped creature's power".
     pub const TAPPED: Self = Binding::Named(u16::MAX - 10);
     pub const CHOSEN_PLAYER: Self = Binding::Named(u16::MAX - 11);
+    /// Cards actually discarded by the most recent discard instruction.
+    pub const DISCARDED: Self = Binding::Named(u16::MAX - 13);
+    pub const LINKED_EXILE: Self = Binding::Named(u16::MAX - 14);
 }
 
 /// A predicate over objects. Composable so that printed text maps structurally.
@@ -151,6 +154,11 @@ pub enum ObjectFilter {
     /// Shares a creature type with any of these (changelings share every one): kinship.
     SharesCreatureTypeWith(Box<Selector>),
     ManaValueAtMost(Value),
+    /// Exactly this printed mana cost: "an artifact card with mana cost {0} or {1}". `{0}`
+    /// is not the same as no mana cost at all (CR 202.1b).
+    ManaCostIs(mtg_core::ManaCost),
+    /// No mana was actually spent to cast this object (including colorless mana).
+    NoManaSpent,
     HasCounter(CounterKind),
     /// One or more counters of any kind: "with a counter on it".
     HasAnyCounter,
@@ -166,6 +174,8 @@ pub enum ObjectFilter {
     Token,
     /// Attached to this ability's source: "Equipment attached to it", "~ is enchanted".
     AttachedToSource,
+    /// Attached to an object named by the selector, such as the enchanted creature.
+    AttachedTo(Box<Selector>),
     /// Blocking this ability's source: "for each creature blocking it" (rampage).
     BlockingSource,
     /// Has the same name as this ability's source: "a card named ~".
