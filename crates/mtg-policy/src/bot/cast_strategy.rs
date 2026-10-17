@@ -42,7 +42,8 @@ impl Bot {
     /// Determine the bot's priority action on its turn.
     ///
     /// On its own turn with an empty stack: a land, a loyalty activation, then the
-    /// most expensive spell. Otherwise pass.
+    /// most expensive useful spell. Counter opposing spells and answer attackers
+    /// with effective instant removal during combat, including on an opponent's turn.
     ///
     /// ## Decision Tree
     ///
@@ -92,9 +93,18 @@ impl Bot {
         {
             return Answer::Action(action.clone());
         }
-        // An opponent's spell on top of the stack: counter it when a counterspell is offered
-        // and, for a blast, the spell is of its color.
+        // Answer the opposing stack object with a suitable counter, respecting
+        // target restrictions, visible protection, tax payment and blast colors.
         if let Some(action) = self.counter(actions, view) {
+            return Answer::Action(action);
+        }
+        if let Some(action) = self.replacement_win_response(actions, view) {
+            return Answer::Action(action);
+        }
+        if let Some(action) = self.combat_response(actions, view) {
+            return Answer::Action(action);
+        }
+        if let Some(action) = self.engine_response(actions, view) {
             return Answer::Action(action);
         }
         let my_main = view.active_player == view.viewer
@@ -144,6 +154,9 @@ impl Bot {
                 if land || is_fog(a) {
                     return None;
                 }
+                if !self.productive_response(view, object, face) {
+                    return None;
+                }
                 let card = view.visible.get(&object)?.card?;
                 // Counterspells wait for a spell to counter; a blast for a permanent of its
                 // color, or it would be cast for nothing.
@@ -180,10 +193,13 @@ impl Bot {
 }
 
 impl Bot {
-    /// A counterspell for the opponent's spell on top of the stack, if one is offered.
+    /// Match a counter to the opposing spell or ability currently on top.
     fn counter(&self, actions: &[Action], view: &PlayerView) -> Option<Action> {
-        let top = view.visible.get(view.stack.last()?)?;
-        if top.is_ability || top.controller == view.viewer {
+        let top = view.visible.get(view.stack.first()?)?;
+        if top.controller == view.viewer
+            || self.visibly_uncounterable(view, top.id)
+            || self.low_impact_stack_object(view, top.id)
+        {
             return None;
         }
         actions
@@ -197,13 +213,31 @@ impl Bot {
                             .and_then(|o| o.card)
                             .is_some_and(|card| {
                                 self.counterspells.contains(&(card, face))
+                                    && self
+                                        .counter_reliability(view, object, face, top.id)
+                                        .is_some()
                                     && self.color_gated.get(&(card, face)).is_none_or(|c| {
                                         self.has_color(view, mtg_core::Target::Object(top.id), *c)
                                     })
                             })
                 })
             })
-            .min_by_key(|a| action_object(a))
+            .min_by_key(|a| {
+                let mana_value = a
+                    .play()
+                    .and_then(|(object, face, _)| {
+                        let card = view.visible.get(&object)?.card?;
+                        self.stats.get(&(card, face)).map(|s| s.mana_value)
+                    })
+                    .unwrap_or(u32::MAX);
+                let reliability = a
+                    .play()
+                    .and_then(|(object, face, _)| {
+                        self.counter_reliability(view, object, face, top.id)
+                    })
+                    .unwrap_or(u8::MAX);
+                (reliability, mana_value, action_object(a))
+            })
             .cloned()
     }
 }

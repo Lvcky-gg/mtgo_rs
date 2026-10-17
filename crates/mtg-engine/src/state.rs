@@ -919,9 +919,13 @@ impl GameState {
     /// The permanents on the battlefield — not those phased out, which are treated as
     /// though they don't exist (CR 702.26b).
     pub fn battlefield(&self) -> Vec<ObjectId> {
-        self.objects_in(ZoneRef::shared(Zone::Battlefield))
-            .into_iter()
-            .filter(|id| self.objects.get(id).is_none_or(|o| !o.phased_out))
+        // One pass over the objects, without a second lookup per permanent: this is the
+        // hottest scan in the engine.
+        let field = ZoneRef::shared(Zone::Battlefield);
+        self.objects
+            .values()
+            .filter(|o| o.zone == field && !o.phased_out)
+            .map(|o| o.id)
             .collect()
     }
 

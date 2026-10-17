@@ -263,7 +263,7 @@ pub fn objects(ctx: &Ctx, sel: &Selector) -> Eval<Vec<ObjectId>> {
         }
 
         // The choice must already have been made and recorded.
-        Selector::ChosenBy { .. } => Err(EvalError::UnresolvedChoice),
+        Selector::ChosenBy { .. } | Selector::DifferentNames(_) => Err(EvalError::UnresolvedChoice),
 
         Selector::TopOfLibrary { player, count } => {
             let n = value(ctx, count)?.max(0) as usize;
@@ -294,6 +294,45 @@ pub fn objects(ctx: &Ctx, sel: &Selector) -> Eval<Vec<ObjectId>> {
                 .filter(|o| !drop.contains(o))
                 .collect())
         }
+    }
+}
+
+/// Whether [`objects`] would include `id`, without building the whole set.
+///
+/// The layer system asks this of every dynamic continuous effect for every object it
+/// computes, so building the set each time made computing a board quadratic in the
+/// number of objects in the game — libraries included. Errors are the same as
+/// [`objects`]'s: every part is still evaluated, so an error anywhere is still an error.
+pub fn contains(ctx: &Ctx, sel: &Selector, id: ObjectId) -> Eval<bool> {
+    match sel {
+        Selector::All { zone, filter } => {
+            let Some(obj) = ctx.state.objects.get(&id) else {
+                return Ok(false);
+            };
+            // The membership `in_zone` gives: the shared zone, or a seated player's.
+            let in_zone = if zone.is_shared() {
+                obj.zone == ZoneRef::shared(*zone)
+            } else {
+                obj.zone.zone == *zone
+                    && obj
+                        .zone
+                        .player
+                        .is_some_and(|p| ctx.state.turn_order.contains(&p))
+            };
+            Ok(in_zone && matches(ctx, filter, id)?)
+        }
+        Selector::Union(parts) => {
+            let mut found = false;
+            for p in parts {
+                found |= contains(ctx, p, id)?;
+            }
+            Ok(found)
+        }
+        Selector::Except(base, minus) => {
+            let dropped = contains(ctx, minus, id)?;
+            Ok(contains(ctx, base, id)? && !dropped)
+        }
+        _ => Ok(objects(ctx, sel)?.contains(&id)),
     }
 }
 
@@ -368,7 +407,7 @@ pub fn players(ctx: &Ctx, sel: &Selector) -> Eval<Vec<PlayerId>> {
             Ok(out)
         }
 
-        Selector::ChosenBy { .. } => Err(EvalError::UnresolvedChoice),
+        Selector::ChosenBy { .. } | Selector::DifferentNames(_) => Err(EvalError::UnresolvedChoice),
 
         Selector::ControllerOf(inner) | Selector::OwnerOf(inner) => {
             let owner = matches!(sel, Selector::OwnerOf(_));
@@ -459,6 +498,11 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             .map(|p| ctx.state.player(*p).life)
             .min()
             .unwrap_or(i32::MAX),
+        Value::GreatestLifeTotal(sel) => players(ctx, sel)?
+            .iter()
+            .map(|p| ctx.state.player(*p).life)
+            .max()
+            .unwrap_or(i32::MIN),
         Value::Counters(sel, kind) => objects(ctx, sel)?
             .iter()
             .map(|id| {
@@ -572,6 +616,12 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             }
             party(&fills, 0, &mut vec![false; fills.len()])
         }
+        // "the amount of mana spent to cast that spell": all of it, on each named spell.
+        Value::ManaSpentOn(sel) => objects(ctx, sel)?
+            .iter()
+            .filter_map(|id| ctx.state.objects.get(id))
+            .flat_map(|o| o.mana_spent.iter().map(|(_, n)| i32::from(*n)))
+            .sum(),
         Value::ColorsSpent | Value::ManaSpentOfColor(_) | Value::ManaSpent => {
             let spent = ctx
                 .state
@@ -700,6 +750,15 @@ pub fn value(ctx: &Ctx, v: &Value) -> Eval<i32> {
             .get(&ctx.source)
             .and_then(|o| o.cast_context.as_ref())
             .map_or(0, |c| c.cast_index as i32),
+        Value::GreatestControlledCount(sel) => {
+            let mut counts = BTreeMap::<PlayerId, i32>::new();
+            for id in objects(ctx, sel)? {
+                if let Some(p) = crate::layers::controller(ctx.state, id) {
+                    *counts.entry(p).or_default() += 1;
+                }
+            }
+            counts.into_values().max().unwrap_or(0)
+        }
         Value::GreatestOwnedCount(sel) => {
             let mut counts = BTreeMap::<PlayerId, i32>::new();
             for id in objects(ctx, sel)? {
@@ -911,6 +970,7 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
             matched
         }
         Condition::Not(inner) => !condition(ctx, inner)?,
+        Condition::WhenTriggered(inner) => condition(ctx, inner)?,
         Condition::And(cs) => {
             for c in cs {
                 if !condition(ctx, c)? {

@@ -222,6 +222,9 @@ pub fn plan_spell(
     spell: ObjectId,
 ) -> Option<Payment> {
     let mut sources = mana_sources(state, cards, player);
+    // A card can't pay for its own casting: Simian Spirit Guide is on the stack, not in
+    // hand, by the time its cost is paid. Counted, the cast was offered and then taken back.
+    sources.retain(|s| s.object != spell);
     // An activated ability announced through the same path is not a spell: mana
     // restricted to spells pays for it only when the restriction is about spells alone.
     let is_ability = state
@@ -1244,7 +1247,6 @@ pub fn manual_source(
     use mtg_ir::{AdditionalCost as A, Selector as S, Value};
     let a = crate::abilities::find(state, cards, object, ability)?;
     let AbilityKind::Activated {
-        cost,
         effect,
         is_mana_ability: true,
         ..
@@ -1252,6 +1254,8 @@ pub fn manual_source(
     else {
         return None;
     };
+    // What it costs now, after "activated abilities … cost {2} less".
+    let cost = &crate::cost::ability_cost(state, cards, object, ability)?;
     if !cost.additional.iter().all(|part| {
         matches!(
             part,

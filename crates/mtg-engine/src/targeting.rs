@@ -41,6 +41,8 @@ fn ctx<'a>(
         .map(|cast| &cast.bindings)
         .unwrap_or_else(|| crate::empty_bindings());
     let source = cast.and_then(|cast| cast.source).unwrap_or(source);
+    // X is announced before targets (CR 601.2b-c): "untap X target lands".
+    let x = cast.map_or(0, |cast| cast.x);
     Ctx {
         state,
         cards,
@@ -49,7 +51,7 @@ fn ctx<'a>(
         controller,
         targets: &[],
         target_legal: &[],
-        x: 0,
+        x,
         bindings,
     }
 }
@@ -531,7 +533,10 @@ pub fn player_hexproof_from(
                 mtg_ir::effect::Modification::Restriction(
                     mtg_ir::effect::Restriction::PlayerHexproof
                 )
-            ) && crate::layers::controller(state, e.source) == Some(player)
+            ) && e
+                .controller
+                .or_else(|| crate::layers::controller(state, e.source))
+                == Some(player)
         })
 }
 

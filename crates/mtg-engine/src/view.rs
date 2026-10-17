@@ -27,7 +27,7 @@ pub struct PlayerView {
     pub players: BTreeMap<PlayerId, PlayerSummary>,
     /// Objects the viewer can see, with the detail they are entitled to.
     pub visible: BTreeMap<ObjectId, ObjectView>,
-    /// Stack from bottom to top.
+    /// Stack from top to bottom; the next object to resolve is first.
     pub stack: Vec<ObjectId>,
     /// Public reveal history: identities only, never library positions or hidden object ids.
     #[serde(default)]

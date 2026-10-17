@@ -41,9 +41,9 @@ impl Bot {
             .collect();
 
         let their_life = opponent(view).map_or(i32::MAX, |p| view.players[&p].life);
-        let total: i64 = attackers.iter().map(|(_, s)| s.combat_damage()).sum();
         if blockers.is_empty()
-            || total >= i64::from(their_life) + blockers.len() as i64 * max_damage(&attackers)
+            || damage_after_blocks(attackers.iter().map(|(_, s)| s), &blockers)
+                >= i64::from(their_life)
         {
             return attackers
                 .iter()
@@ -104,19 +104,11 @@ impl Bot {
             .collect();
         ranked.sort_by_key(|(id, damage, _)| (std::cmp::Reverse(*damage), *id));
         let blockers = self.potential_blockers(view);
-        let mut stoppable: Vec<i64> = ranked
-            .iter()
-            .filter(|(_, _, a)| blockers.iter().any(|b| a.blockable_by(b)))
-            .map(|(_, damage, _)| *damage)
-            .collect();
-        stoppable.sort_by_key(|damage| std::cmp::Reverse(*damage));
-        let total: i64 = ranked.iter().map(|(_, damage, _)| *damage).sum();
-        let prevented: i64 = stoppable.iter().take(blockers.len()).sum();
         let life = match player {
             Target::Player(p) => view.players.get(&p).map_or(i32::MAX, |p| p.life),
             _ => i32::MAX,
         };
-        if total - prevented >= i64::from(life) {
+        if damage_after_blocks(ranked.iter().map(|(_, _, s)| s), &blockers) >= i64::from(life) {
             return Answer::Attackers(attackers.iter().map(|a| (*a, player)).collect());
         }
         let mut walkers: Vec<_> = defenders
@@ -167,10 +159,18 @@ fn opponent(view: &PlayerView) -> Option<PlayerId> {
     view.players.keys().copied().find(|p| *p != view.viewer)
 }
 
-fn max_damage(creatures: &[(ObjectId, Stats)]) -> i64 {
-    creatures
-        .iter()
-        .map(|(_, s)| s.combat_damage())
-        .max()
-        .unwrap_or(0)
+// Conservatively let each blocker stop a different, maximally damaging attacker.
+// Unblockable attackers still contribute damage, but never consume this allowance.
+fn damage_after_blocks<'a>(attackers: impl Iterator<Item = &'a Stats>, blockers: &[Stats]) -> i64 {
+    let mut total = 0;
+    let mut stoppable = Vec::new();
+    for attacker in attackers {
+        let damage = attacker.combat_damage();
+        total += damage;
+        if blockers.iter().any(|b| attacker.blockable_by(b)) {
+            stoppable.push(damage);
+        }
+    }
+    stoppable.sort_unstable_by_key(|damage| std::cmp::Reverse(*damage));
+    total - stoppable.into_iter().take(blockers.len()).sum::<i64>()
 }

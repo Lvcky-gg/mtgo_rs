@@ -9,6 +9,90 @@ use mtg_policy::bot::Bot;
 const PYROBLAST: &str =
     "Choose one —\n• Counter target spell if it's blue.\n• Destroy target permanent if it's blue.";
 
+#[test]
+fn search_declines_a_fatal_optional_draw_and_accepts_a_useful_one() {
+    use mtg_core::ZoneRef;
+    use mtg_engine::choice::ChoiceKind;
+    use mtg_policy::search::{Budget, Searcher};
+
+    for empty_library in [false, true] {
+        let mut table = Table::default();
+        let draw = table.card("{0}", "Sorcery", None, "You may draw a card.");
+        let mut game = Game::new(table);
+        let spell = game.put(draw, P0, Zone::Hand);
+        game.main();
+        let retained_hand = game
+            .engine
+            .state
+            .objects_in(ZoneRef::of(Zone::Hand, P0))
+            .len()
+            - 1;
+        if empty_library {
+            let library = ZoneRef::of(Zone::Library, P0);
+            for id in game.engine.state.objects_in(library) {
+                game.engine.state.objects.remove(&id);
+            }
+            game.engine.state.zone_order.insert(library, Vec::new());
+            game.engine.state.bump();
+        }
+        let choice = game.pending.take().unwrap();
+        game.engine
+            .answer(
+                &game.table,
+                choice.id,
+                Answer::Action(Action::Cast { object: spell }),
+            )
+            .unwrap();
+        let searcher = Searcher::new(
+            Bot::new(&game.table, (0..2).map(CardId)),
+            Budget {
+                playouts: 8,
+                horizon_turns: 0,
+                max_choices: 40,
+                ..Default::default()
+            },
+            23,
+        );
+        let mut compared = false;
+        let mut resolved = false;
+        for _ in 0..100 {
+            match game.engine.advance(&game.table) {
+                Progress::Continue => {}
+                Progress::GameOver { .. } => break,
+                Progress::NeedsChoice(choice) => {
+                    if compared && game.stack().is_empty() {
+                        resolved = true;
+                        break;
+                    }
+                    let answer = if matches!(choice.kind, ChoiceKind::Confirm) {
+                        compared = true;
+                        let answer = searcher.decide(&game.engine, &game.table, &choice);
+                        assert!(
+                            matches!(answer, Answer::Bool(accept) if accept != empty_library),
+                            "{answer:?}, empty={empty_library}"
+                        );
+                        answer
+                    } else {
+                        searcher
+                            .bot
+                            .decide(&choice, &game.engine.view_for(choice.who))
+                    };
+                    game.engine.answer(&game.table, choice.id, answer).unwrap();
+                }
+            }
+        }
+        assert!(compared && resolved);
+        assert!(!game.engine.state.player(P0).has_lost);
+        assert_eq!(
+            game.engine
+                .state
+                .objects_in(ZoneRef::of(Zone::Hand, P0))
+                .len(),
+            retained_hand + usize::from(!empty_library)
+        );
+    }
+}
+
 /// Both seats played by the bot through turn `last`, as the app plays a match. Every
 /// answer must be accepted, and the number of choices must stay sane — a cast that
 /// rewinds and is offered again makes thousands.
@@ -160,4 +244,37 @@ fn a_mode_without_targets_is_refused_and_not_the_default() {
             .answer(&g.table, modes.id, Answer::Modes(vec![0]))
             .is_err()
     );
+}
+
+/// Simian Spirit Guide can't pay for itself: once it is cast it is no longer in hand to exile.
+/// Counted as its own mana, the cast was offered, accepted, and silently taken back — forever,
+/// for a bot.
+#[test]
+fn a_spirit_guide_is_not_its_own_mana() {
+    let mut t = Table::default();
+    let guide = t.card(
+        "{2}{R}",
+        "Creature — Ape Spirit",
+        Some((2, 2)),
+        "Exile this card from your hand: Add {R}.",
+    );
+    let mut g = Game::new(t);
+    lands(&mut g, P0, 2);
+    let card = g.put(guide, P0, Zone::Hand);
+    assert!(!g.main().contains(&Action::Cast { object: card }));
+}
+
+#[test]
+fn a_bot_with_a_spirit_guide_and_two_lands_keeps_playing() {
+    let mut t = Table::default();
+    let guide = t.card(
+        "{2}{R}",
+        "Creature — Ape Spirit",
+        Some((2, 2)),
+        "Exile this card from your hand: Add {R}.",
+    );
+    let mut g = Game::new(t);
+    lands(&mut g, P0, 2);
+    g.put(guide, P0, Zone::Hand);
+    play(&mut g, 2, 4);
 }

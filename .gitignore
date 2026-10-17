@@ -6,3 +6,4 @@
 /.flatpak-builder
 /scripts/__pycache__
 /scripts/tests/__pycache__
+/tools/learn/__pycache__

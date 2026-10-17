@@ -63,6 +63,9 @@ pub enum Selector {
         /// Whether choosing fewer than `count` is allowed ("up to").
         up_to: bool,
     },
+    /// "… cards with different names": a `ChosenBy` whose picks each have a name none of
+    /// the others has.
+    DifferentNames(Box<Selector>),
     /// The top N of a library, for scry/surveil/cascade shapes.
     TopOfLibrary {
         player: Box<Selector>,

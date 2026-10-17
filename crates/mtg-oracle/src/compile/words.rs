@@ -16,13 +16,93 @@ pub fn normalise(text: &str, name: &str) -> String {
     let mut s = strip_reminder(text);
     if !name.is_empty() {
         s = s.replace(name, "~");
+        // "Loran of the Third Path" → "Loran", but only where the text uses it of the card
+        // itself: "Knight of the New Coalition" also creates a "Knight creature token".
+        if !name.contains(", ")
+            && let Some((short, _)) = name.split_once(" of the ")
+            && short.len() >= 3
+            && !short.contains(' ')
+        {
+            for verb in [
+                " enters", " attacks", " blocks", " dies", " deals", " gets", " gains", " has ",
+                " becomes", " can't", " doesn't", " leaves", "'s ",
+            ] {
+                s = s.replace(&format!("{short}{verb}"), &format!("~{verb}"));
+            }
+            for lead in [
+                "on ",
+                "of ",
+                "untap ",
+                "tap ",
+                "exile ",
+                "sacrifice ",
+                "return ",
+            ] {
+                s = s.replace(&format!("{lead}{short}."), &format!("{lead}~."));
+            }
+        }
+        // "Urza, Lord High Artificer" → "Urza".
         if let Some((short, _)) = name.split_once(", ").or_else(|| name.split_once(" the "))
             && short.len() >= 3
         {
             s = s.replace(short, "~");
         }
     }
-    let mut s = s.to_lowercase().replace('−', "-");
+    let s = s.to_lowercase().replace('−', "-");
+    // Inside double quotes "this creature" is whatever has the quoted ability — a token or
+    // the creature it's granted to, not this card — so it's left for `quoted_abilities`.
+    let s: String = s
+        .split('"')
+        .enumerate()
+        .map(|(i, part)| {
+            if i % 2 == 1 {
+                part.to_string()
+            } else {
+                self_references(part)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\"");
+    s.lines()
+        .map(|line| instead_if_first(line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// "~ deals 4 damage instead if you control three or more artifacts." (Galvanic Blast) is
+/// read as "if you control three or more artifacts, ~ deals 4 damage instead.", the order
+/// the compiler knows. An ability word before it stays in front.
+fn instead_if_first(line: &str) -> String {
+    if !line.contains(" instead if ") || line.contains('"') {
+        return line.to_string();
+    }
+    line.split_inclusive(". ")
+        .map(|sentence| {
+            let (text, end) = match sentence.strip_suffix(". ") {
+                Some(t) => (t, ". "),
+                None => match sentence.strip_suffix('.') {
+                    Some(t) => (t, "."),
+                    None => (sentence, ""),
+                },
+            };
+            let Some((body, cond)) = text.split_once(" instead if ") else {
+                return sentence.to_string();
+            };
+            let (lead, body) = match body.rsplit_once(" — ") {
+                Some((word, body)) => (format!("{word} — "), body),
+                None => (String::new(), body),
+            };
+            if body.starts_with("if ") || body.contains(": ") || cond.contains(" instead") {
+                return sentence.to_string();
+            }
+            format!("{lead}if {cond}, {body} instead{end}")
+        })
+        .collect()
+}
+
+/// "this creature", "this spell", … as `~`.
+pub fn self_references(text: &str) -> String {
+    let mut s = text.to_string();
     for this in [
         "this creature",
         "this artifact",
@@ -42,7 +122,7 @@ pub fn normalise(text: &str, name: &str) -> String {
     ] {
         s = s.replace(this, "~");
     }
-    s.lines().map(str::trim).collect::<Vec<_>>().join("\n")
+    s
 }
 
 /// A line with every parenthesised span removed.
@@ -83,6 +163,19 @@ pub fn number(s: &str) -> Option<(i32, &str)> {
         ("eight", 8),
         ("nine", 9),
         ("ten", 10),
+        ("eleven", 11),
+        ("twelve", 12),
+        ("thirteen", 13),
+        ("fourteen", 14),
+        ("fifteen", 15),
+        ("sixteen", 16),
+        ("seventeen", 17),
+        ("eighteen", 18),
+        ("nineteen", 19),
+        ("twenty", 20),
+        ("thirty", 30),
+        ("forty", 40),
+        ("fifty", 50),
     ];
     for (w, n) in WORDS {
         if let Some(rest) = s.strip_prefix(w)
@@ -426,6 +519,33 @@ pub fn strip_ability_word(line: &str) -> &str {
             return rest;
         }
     }
+    // Any other flavor word (CR 207.2c): "Venom Blast — …", "Treasure Hunter — …". Not a
+    // keyword whose dash introduces a cost ("Boast — {1}{R}: …") or a condition ("Max speed
+    // — …"), not a saga chapter ("I, II — …"), and only a few plain words.
+    if let Some((word, rest)) = line.split_once(" — ")
+        && !rest.starts_with('{')
+        && !word.is_empty()
+        && word.split(' ').count() <= 5
+        && word
+            .chars()
+            .all(|c| c.is_alphabetic() || matches!(c, ' ' | '\'' | '-' | ',' | '!' | '.'))
+        && !word
+            .chars()
+            .all(|c| matches!(c.to_ascii_lowercase(), 'i' | 'v' | 'x' | ',' | ' '))
+        && ![
+            "max speed",
+            "boast",
+            "exhaust",
+            "forecast",
+            "level up",
+            "choose one",
+            "choose two",
+        ]
+        .iter()
+        .any(|k| word.to_lowercase().starts_with(k))
+    {
+        return rest;
+    }
     line
 }
 
@@ -552,6 +672,29 @@ const PLAIN_COUNTERS: &[&str] = &[
     "lore",
     "level",
     "burden",
+    "plan",
+    "flame",
+    "fetch",
+    "memory",
+    "judgment",
+    "intel",
+    "ingenuity",
+    "hatching",
+    "fire",
+    "dread",
+    "collection",
+    "blight",
+    "blaze",
+    "story",
+    "valor",
+    "point",
+    "wreck",
+    "supply",
+    "spite",
+    "sin",
+    "shred",
+    "stall",
+    "unlock",
 ];
 
 /// "+1/+1 counter", "-1/-1 counter", "charge counter", "loyalty counter".
@@ -601,6 +744,25 @@ pub fn counter(s: &str) -> Option<(CounterKind, &str)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn flavor_words_are_stripped_but_not_costs_or_chapters() {
+        let strip = super::strip_ability_word;
+        assert_eq!(
+            strip("Venom Blast — Creatures your opponents control enter tapped."),
+            "Creatures your opponents control enter tapped."
+        );
+        assert_eq!(strip("II, III — Draw a card."), "II, III — Draw a card.");
+        assert_eq!(
+            strip("Boast — {1}{R}: Draw a card."),
+            "Boast — {1}{R}: Draw a card."
+        );
+        assert_eq!(
+            strip("Max speed — Whenever you attack, draw a card."),
+            "Max speed — Whenever you attack, draw a card."
+        );
+    }
+
     use super::*;
 
     #[test]

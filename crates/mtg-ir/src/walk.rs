@@ -21,6 +21,7 @@ pub struct Visitor<'a> {
     pub filter: &'a mut dyn FnMut(&mut ObjectFilter),
     pub token: &'a mut dyn FnMut(&mut TokenSpec),
     pub value: &'a mut dyn FnMut(&mut Value),
+    pub selector: &'a mut dyn FnMut(&mut Selector),
 }
 
 impl Visitor<'_> {
@@ -239,7 +240,8 @@ impl Visitor<'_> {
             | ReplacementKind::Amplify(_)
             | ReplacementKind::EntersChoosing(_)
             | ReplacementKind::EntersChoosingColorExcept(_) => {}
-            ReplacementKind::EntersIfDiscards(f) => self.filter(f),
+            ReplacementKind::EntersIfDiscards(f)
+            | ReplacementKind::EntersTappedUnlessReveals(f) => self.filter(f),
             ReplacementKind::EntersTappedUnless { condition } => self.condition(condition),
             ReplacementKind::Reduce { amount } => self.value(amount),
             ReplacementKind::Redirect { to } => self.selector(to),
@@ -291,6 +293,13 @@ impl Visitor<'_> {
                 | Restriction::GraveyardToExile { whose: who, .. }
                 | Restriction::LifeGainBoost { who, .. }
                 | Restriction::DrawLimit { who, .. } => self.selector(who),
+                Restriction::NextSpell { filter, .. } => self.filter(filter),
+                Restriction::MaximumHandSize { who, size } => {
+                    self.selector(who);
+                    if let crate::effect::HandSize::Equals(v) = size {
+                        self.value(v);
+                    }
+                }
                 Restriction::PlayFromTopOfLibrary { spells, .. }
                 | Restriction::MustBeBlockedByAll(spells) => self.filter(spells),
                 Restriction::CantCast { who, spells, .. }
@@ -298,11 +307,43 @@ impl Visitor<'_> {
                     self.selector(who);
                     self.filter(spells);
                 }
-                Restriction::CostModifier { what, delta } => {
+                Restriction::CostModifier { what, delta }
+                | Restriction::AbilityCostModifier { what, delta, .. } => {
                     self.filter(what);
                     self.value(delta);
                 }
-                Restriction::CantAttack
+                Restriction::ExtraTrigger { sources, entering } => {
+                    self.filter(sources);
+                    if let Some(entering) = entering {
+                        self.filter(entering);
+                    }
+                }
+                Restriction::ActivateAsThoughHaste { what: sources } => self.filter(sources),
+                Restriction::DamageModifier { sources, .. } => self.filter(sources),
+                Restriction::CantEnterFrom { what, .. } | Restriction::EntersUntapped { what } => {
+                    self.filter(what)
+                }
+                Restriction::ExtraTokens { only, token, .. } => {
+                    if let Some(only) = only {
+                        self.filter(only);
+                    }
+                    (self.token)(token);
+                    self.value(&mut token.power);
+                    self.value(&mut token.toughness);
+                    for a in &mut token.abilities {
+                        self.ability(a);
+                    }
+                }
+                Restriction::CounterModifier { what, .. } => self.filter(what),
+                Restriction::SuppressTriggers { what, sources, .. } => {
+                    self.filter(what);
+                    if let Some(sources) = sources {
+                        self.filter(sources);
+                    }
+                }
+                Restriction::TokenMultiplier { .. }
+                | Restriction::WinInsteadOfEmptyDraw
+                | Restriction::CantAttack
                 | Restriction::AttackDespiteDefender
                 | Restriction::AssignDamageByToughness
                 | Restriction::AssignsNoCombatDamage
@@ -324,7 +365,6 @@ impl Visitor<'_> {
                 | Restriction::SkipDrawStep
                 | Restriction::Saddled
                 | Restriction::TopOfLibraryRevealed
-                | Restriction::NoMaximumHandSize
                 | Restriction::UntapDuringOthersUntap
                 | Restriction::CastOnlyAsSorcery { .. }
                 | Restriction::AddsAdditionalMana { .. }
@@ -351,6 +391,7 @@ impl Visitor<'_> {
             | Modification::SetTypes(_)
             | Modification::AddSubtypes(_)
             | Modification::SetCreatureTypes(_)
+            | Modification::SetLandTypes(_)
             | Modification::BecomesChosen(_)
             | Modification::RemoveSupertype(_)
             | Modification::NoManaCost
@@ -695,6 +736,7 @@ impl Visitor<'_> {
     }
 
     fn selector(&mut self, s: &mut Selector) {
+        (self.selector)(s);
         match s {
             Selector::SelfSource
             | Selector::You
@@ -721,6 +763,7 @@ impl Visitor<'_> {
                 self.selector(player);
                 self.value(count);
             }
+            Selector::DifferentNames(inner) => self.selector(inner),
             Selector::Union(ss) => {
                 for s in ss {
                     self.selector(s);
@@ -829,7 +872,9 @@ impl Visitor<'_> {
             | Value::GreatestToughness(s)
             | Value::GreatestManaValue(s)
             | Value::GreatestOwnedCount(s)
+            | Value::GreatestControlledCount(s)
             | Value::ManaValue(s)
+            | Value::ManaSpentOn(s)
             | Value::CardTypesAmong(s)
             | Value::PartySize(s)
             | Value::BasicLandTypesAmong(s)
@@ -837,6 +882,7 @@ impl Visitor<'_> {
             | Value::MostSpellsCastThisTurn(s)
             | Value::MostPoisonCounters(s)
             | Value::LeastLifeTotal(s)
+            | Value::GreatestLifeTotal(s)
             | Value::CardsDrawnThisTurn(s)
             | Value::CombatDamagedThisTurn(s) => self.selector(s),
             Value::Sum(vs) | Value::Product(vs) => {
@@ -907,7 +953,7 @@ impl Visitor<'_> {
                 self.selector(what);
                 self.filter(filter);
             }
-            Condition::Not(c) => self.condition(c),
+            Condition::Not(c) | Condition::WhenTriggered(c) => self.condition(c),
             Condition::And(cs) | Condition::Or(cs) => {
                 for c in cs {
                     self.condition(c);
@@ -932,6 +978,7 @@ pub fn map_subtypes(a: &mut Ability, map: &mut dyn FnMut(mtg_core::Subtype) -> m
             }
         },
         value: &mut |_| {},
+        selector: &mut |_| {},
     }
     .ability(a);
 }
@@ -942,6 +989,7 @@ pub fn substitute_value(e: &mut Effect, from: &Value, to: &Value) {
     Visitor {
         filter: &mut |_| {},
         token: &mut |_| {},
+        selector: &mut |_| {},
         value: &mut |v| {
             if v == from {
                 *v = to.clone();
@@ -996,6 +1044,7 @@ pub fn register_tokens<'a>(
                     assign(t, s, m);
                 },
                 value: &mut |_| {},
+                selector: &mut |_| {},
             }
             .ability(a);
         }

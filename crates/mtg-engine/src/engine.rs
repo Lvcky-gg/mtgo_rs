@@ -134,6 +134,7 @@ enum Suspended {
 /// should not happen, because `legal_actions` only offers a spell whose targets can be
 /// chosen, but rewinding is the correct failure rather than leaving a half-announced
 /// spell on the stack.
+#[derive(Clone)]
 #[cfg_attr(feature = "verification", derive(serde::Serialize))]
 struct Announcing {
     /// The stack object being announced.
@@ -267,6 +268,7 @@ fn obj_card(state: &GameState, id: ObjectId) -> mtg_core::CardId {
 /// answers, so the Nth choice on a re-run is necessarily the same Nth choice. It costs
 /// one replay per choice and effects have only a handful. It also makes resolution
 /// restartable in general, which is exactly what taking a choice back requires.
+#[derive(Clone)]
 #[cfg_attr(feature = "verification", derive(serde::Serialize))]
 struct Resolving {
     /// The stack object being resolved. If the top of the stack is not this, the
@@ -299,6 +301,9 @@ enum Phase {
     Over,
 }
 
+/// Cloning forks the whole game — pending question, flight state, log and undo history —
+/// so a search can play futures out without touching the real one.
+#[derive(Clone)]
 pub struct Engine {
     pub state: GameState,
     pub log: Vec<StampedEvent>,
@@ -351,6 +356,7 @@ pub struct Engine {
 /// Only taken at priority with nothing in flight — no announcement, resolution,
 /// suspended turn-based action or trigger queue — so these fields are the whole of
 /// the engine's state at that moment and restoring them is a complete rewind.
+#[derive(Clone)]
 #[cfg_attr(feature = "verification", derive(serde::Serialize))]
 struct Checkpoint {
     who: PlayerId,
@@ -541,7 +547,15 @@ impl Engine {
         if let Some((cid, land)) = self.entering_choice
             && cid == id
         {
-            if !matches!(answer, Answer::Bool(_) | Answer::Modes(_)) {
+            // "Reveal a Mountain or Plains card" asks for cards: some of those offered.
+            let shaped = match (&choice.kind, &answer) {
+                (ChoiceKind::ChooseObjects { from, min, max }, Answer::Objects(chosen)) => {
+                    (*min as usize..=*max as usize).contains(&chosen.len())
+                        && chosen.iter().all(|o| from.contains(o))
+                }
+                (_, answer) => matches!(answer, Answer::Bool(_) | Answer::Modes(_)),
+            };
+            if !shaped {
                 self.pending = Some(choice);
                 return Err(Illegal::WrongAnswerKind);
             }
@@ -749,6 +763,13 @@ impl Engine {
                     return Err(Illegal::WrongAnswerKind);
                 }
                 a.x = Some(*n);
+                // Targets come after X (CR 601.2b-c): "untap X target lands" reads it.
+                let object = a.object;
+                if *n != 0
+                    && let Some(o) = self.state.objects.get_mut(&object)
+                {
+                    o.cast_context.get_or_insert_with(Default::default).x = *n;
+                }
                 self.announcement_choice = None;
                 return Ok(());
             }
@@ -1774,6 +1795,21 @@ impl Engine {
             // A delayed trigger that has fired is used up (CR 603.7c).
             if let Some((id, _)) = &t.delayed {
                 self.state.delayed.retain(|d| d.id != *id);
+            }
+            // Torpor Orb: "creatures entering don't cause abilities to trigger".
+            if t.delayed.is_none()
+                && crate::detect::suppressed(&self.state, cards, &t.cause.event, t.source)
+            {
+                continue;
+            }
+            // "That ability triggers an additional time" (Delney), once per such effect.
+            let extra = if t.delayed.is_none() {
+                crate::detect::extra_triggers(&self.state, cards, t.source, &t.cause.event)
+            } else {
+                0
+            };
+            for _ in 0..extra {
+                self.state.pending_triggers.push(t.clone());
             }
             self.state.pending_triggers.push(t);
         }
@@ -2841,6 +2877,13 @@ impl Engine {
                         || o.cast_later.as_ref().is_some_and(|(p, after, _, sorcery)| {
                             *p == who && turn > *after && (!*sorcery || sorcery_time)
                         })
+                        // "You may cast this card from exile." (Squee, the Immortal)
+                        || (o.owner == who
+                            && !o.face_down
+                            && cards
+                                .face(o.card, 0)
+                                .and_then(|f| crate::cost::cast_from(f, Zone::Exile))
+                                .is_some())
                 }),
         );
         for id in castable_from {
@@ -3517,7 +3560,7 @@ impl Engine {
         color: Option<mtg_core::Color>,
         split: &[mtg_core::Color],
     ) {
-        let Some((cost, effect)) = crate::abilities::find(&self.state, cards, object, ability)
+        let Some((mut cost, effect)) = crate::abilities::find(&self.state, cards, object, ability)
             .and_then(|a| match &a.kind {
                 mtg_ir::AbilityKind::Activated { cost, effect, .. } => {
                     Some((cost.clone(), effect.clone()))
@@ -3527,6 +3570,10 @@ impl Engine {
         else {
             return;
         };
+        // What it costs now: "activated abilities … cost {2} less" applies to mana abilities.
+        if let Some(now) = crate::cost::ability_cost(&self.state, cards, object, ability) {
+            cost.mana = now.mana;
+        }
 
         if !cost.mana.symbols.is_empty() {
             let mut payment_state = self.state.clone();
@@ -3865,7 +3912,18 @@ impl Engine {
         cost.map(|c| c.additional)
             .unwrap_or_default()
             .into_iter()
-            .filter(|p| crate::cost::cost_candidates(&self.state, cards, source, who, p).is_some())
+            .filter(|p| {
+                // "Sacrifice X …" is a choice too, once X is known (`drive_announcement`).
+                let mut listed = p.clone();
+                if let mtg_ir::AdditionalCost::Sacrifice {
+                    count: count @ mtg_ir::Value::X,
+                    ..
+                } = &mut listed
+                {
+                    *count = mtg_ir::Value::Fixed(0);
+                }
+                crate::cost::cost_candidates(&self.state, cards, source, who, &listed).is_some()
+            })
             .collect()
     }
 
@@ -4071,6 +4129,34 @@ impl Engine {
                 .count() as u32;
             available.saturating_sub(fixed_discards) / discard_x
         });
+        // "Sacrifice X Squirrels": no more than there are to sacrifice.
+        let sacrifice_source = ability.map_or(object, |(source, _)| source);
+        let sacrifice_bound = extra
+            .iter()
+            .flat_map(|cost| &cost.additional)
+            .filter(|part| {
+                matches!(
+                    part,
+                    mtg_ir::AdditionalCost::Sacrifice {
+                        count: mtg_ir::Value::X,
+                        ..
+                    }
+                )
+            })
+            .filter_map(|part| {
+                // Listed with a count of 0: what matters is how many there are.
+                let mut listed = part.clone();
+                if let mtg_ir::AdditionalCost::Sacrifice { count, .. } = &mut listed {
+                    *count = mtg_ir::Value::Fixed(0);
+                }
+                crate::cost::cost_candidates(&self.state, cards, sacrifice_source, who, &listed)
+                    .map(|(from, _)| from.len() as u32)
+            })
+            .min();
+        let hand_bound = match (hand_bound, sacrifice_bound) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         // "Remove X storage counters from this land": no more than it has.
         let mut counters = None;
         if let Some((source, ability)) = obj
@@ -4295,6 +4381,11 @@ impl Engine {
                 a.skip_slot();
                 continue;
             }
+            // A slot whose count comes to nothing ("X target lands" beyond X) stays empty.
+            if crate::targeting::maximum(&spec, &self.state, cards, a.object, a.controller) == 0 {
+                a.skip_slot();
+                continue;
+            }
             // A share of "X damage divided …" beyond X stays empty.
             if let Some(i) = crate::targeting::x_shares(&self.state, cards, a.object)
                 .iter()
@@ -4413,6 +4504,10 @@ impl Engine {
         if a.cost_chosen.len() < a.cost_parts.len() {
             let mut part = a.cost_parts[a.cost_chosen.len()].clone();
             if let mtg_ir::AdditionalCost::Discard {
+                count: value @ mtg_ir::Value::X,
+                ..
+            }
+            | mtg_ir::AdditionalCost::Sacrifice {
                 count: value @ mtg_ir::Value::X,
                 ..
             } = &mut part
@@ -4958,6 +5053,24 @@ impl Engine {
                 );
             }
             crate::resolve::count_noncreature_spell(&mut self.state, cards, object, controller);
+            // "The next instant or sorcery spell you cast this turn …": this one uses it up.
+            for (effect, grant) in
+                crate::cost::next_spell_effects(&self.state, cards, object, controller)
+            {
+                if grant == mtg_ir::effect::NextSpellGrant::CantBeCountered
+                    && let Some(o) = self.state.objects.get_mut(&object)
+                {
+                    o.cast_context
+                        .get_or_insert_with(Default::default)
+                        .uncounterable = true;
+                }
+                apply::apply(
+                    &mut self.state,
+                    Cause::PlayerAction(controller),
+                    Event::ContinuousEffectEnded { effect },
+                    &mut self.log,
+                );
+            }
             apply::apply(
                 &mut self.state,
                 Cause::PlayerAction(controller),
@@ -5460,6 +5573,8 @@ impl Engine {
                     mtg_ir::AbilityKind::SpellEffect(e) => Some(e.clone()),
                     mtg_ir::AbilityKind::Triggered { trigger, effect } => {
                         Some(match &trigger.intervening_if {
+                            // Checked when it triggered; not rechecked now.
+                            Some(mtg_ir::trigger::Condition::WhenTriggered(_)) => effect.clone(),
                             Some(cond) => mtg_ir::Effect::If {
                                 cond: cond.clone(),
                                 then: Box::new(effect.clone()),
@@ -6224,24 +6339,60 @@ impl Engine {
         ))
     }
 
+    /// CR 402.2 — this player's maximum hand size, `None` for no maximum: seven, then any
+    /// "is equal to" effects in timestamp order, then increases and reductions.
+    fn maximum_hand_size(&self, cards: &dyn PrintedCards, who: PlayerId) -> Option<usize> {
+        use mtg_ir::effect::HandSize;
+        let mut effects: Vec<_> = crate::layers::effects(&self.state, cards)
+            .into_iter()
+            .filter_map(|e| match e.modification {
+                mtg_ir::effect::Modification::Restriction(
+                    mtg_ir::effect::Restriction::MaximumHandSize { who, size },
+                ) => Some((e.timestamp, e.source, e.controller, who, size)),
+                _ => None,
+            })
+            .collect();
+        effects.sort_by_key(|(timestamp, ..)| *timestamp);
+        let mut base = Self::MAX_HAND_SIZE as i64;
+        let mut plus = 0i64;
+        for (_, source, controller, players, size) in effects {
+            let Some(controller) = crate::layers::controller(&self.state, source).or(controller)
+            else {
+                continue;
+            };
+            let chars = crate::eval::ComputedChars(cards);
+            let ctx = crate::eval::Ctx {
+                state: &self.state,
+                cards,
+                chars: &chars,
+                source,
+                controller,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            if !crate::eval::players(&ctx, &players)
+                .unwrap_or_default()
+                .contains(&who)
+            {
+                continue;
+            }
+            match size {
+                HandSize::Unlimited => return None,
+                HandSize::Plus(n) => plus += n as i64,
+                HandSize::Equals(v) => base = crate::eval::value(&ctx, &v).unwrap_or(0) as i64,
+            }
+        }
+        Some((base + plus).max(0) as usize)
+    }
+
     fn begin_cleanup(&mut self, cards: &dyn PrintedCards) -> Option<Choice> {
         self.cleanup_priority = false;
         let who = self.state.active_player;
         let hand = self.state.objects_in(ZoneRef::of(Zone::Hand, who));
-        // "You have no maximum hand size" from a permanent they control.
-        let unlimited = crate::layers::effects(&self.state, cards).iter().any(|e| {
-            matches!(
-                e.modification,
-                mtg_ir::effect::Modification::Restriction(
-                    mtg_ir::effect::Restriction::NoMaximumHandSize
-                )
-            ) && crate::layers::controller(&self.state, e.source) == Some(who)
-        });
-        let excess = if unlimited {
-            0
-        } else {
-            hand.len().saturating_sub(Self::MAX_HAND_SIZE)
-        };
+        let limit = self.maximum_hand_size(cards, who);
+        let excess = limit.map_or(0, |n| hand.len().saturating_sub(n));
         if excess == 0 {
             self.perform_turn_based_action(cards, turn::TurnBasedAction::Cleanup);
             return None;
@@ -6249,6 +6400,7 @@ impl Engine {
         self.suspended = Some(Suspended::Discarding);
         let default: Vec<ObjectId> = hand.iter().take(excess).copied().collect();
         let plural = if excess == 1 { "card" } else { "cards" };
+        let limit = limit.unwrap_or(0);
         Some(self.new_choice(
             who,
             ChoiceKind::ChooseObjects {
@@ -6256,7 +6408,7 @@ impl Engine {
                 min: excess as u32,
                 max: excess as u32,
             },
-            format!("discard {excess} {plural}: hand size is seven").into(),
+            format!("discard {excess} {plural}: maximum hand size is {limit}").into(),
             Some(Answer::Objects(default)),
         ))
     }

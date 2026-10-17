@@ -69,3 +69,69 @@ fn without_one_mode() {
     let (offered, _) = jeska(false);
     assert_eq!(offered, 1);
 }
+
+#[test]
+fn search_chooses_the_winning_mode_over_the_default_life_gain() {
+    use mtg_core::CardId;
+    use mtg_engine::Progress;
+    use mtg_policy::{
+        bot::Bot,
+        search::{Budget, Searcher},
+    };
+
+    let mut table = Table::default();
+    let spell = table.card(
+        "{0}",
+        "Sorcery",
+        None,
+        "Choose one —\n• You gain 3 life.\n• Target opponent loses 3 life.",
+    );
+    let mut game = Game::new(table);
+    game.engine.state.players.get_mut(&P1).unwrap().life = 3;
+    let spell = game.put(spell, P0, Zone::Hand);
+    game.main();
+    let choice = game.pending.take().unwrap();
+    game.engine
+        .answer(
+            &game.table,
+            choice.id,
+            Answer::Action(Action::Cast { object: spell }),
+        )
+        .unwrap();
+    let searcher = Searcher::new(
+        Bot::new(&game.table, (0..2).map(CardId)),
+        Budget {
+            playouts: 8,
+            horizon_turns: 0,
+            max_choices: 40,
+            ..Default::default()
+        },
+        17,
+    );
+    let mut compared_modes = false;
+    for _ in 0..100 {
+        match game.engine.advance(&game.table) {
+            Progress::Continue => {}
+            Progress::GameOver { .. } => break,
+            Progress::NeedsChoice(choice) => {
+                let answer = if matches!(choice.kind, ChoiceKind::ChooseModes { .. }) {
+                    compared_modes = true;
+                    let answer = searcher.decide(&game.engine, &game.table, &choice);
+                    assert!(
+                        matches!(&answer, Answer::Modes(modes) if modes == &vec![1]),
+                        "{answer:?}"
+                    );
+                    answer
+                } else {
+                    searcher
+                        .bot
+                        .decide(&choice, &game.engine.view_for(choice.who))
+                };
+                game.engine.answer(&game.table, choice.id, answer).unwrap();
+            }
+        }
+    }
+    assert!(compared_modes);
+    assert!(game.engine.state.player(P1).has_lost);
+    assert!(!game.engine.state.player(P0).has_lost);
+}

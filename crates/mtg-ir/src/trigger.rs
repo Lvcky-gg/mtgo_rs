@@ -302,6 +302,9 @@ pub enum DamageRecipient {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Condition {
     Always,
+    /// "Whenever ~ attacks while …": checked only when the ability triggers, not again on
+    /// resolution like an intervening "if" (CR 603.4 applies only to "if").
+    WhenTriggered(Box<Condition>),
     /// The controller has earned the city's blessing, regardless of current count.
     HasCityBlessing,
     /// At least `at_least` objects match.

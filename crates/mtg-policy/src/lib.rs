@@ -36,6 +36,7 @@
 //! also the seam an AI plugs into: a bot is a `Policy` that answers everything.
 
 pub mod bot;
+pub mod search;
 
 use mtg_engine::{
     choice::{Answer, Choice, ChoiceKind},
@@ -157,13 +158,14 @@ impl Policy {
             // this choice at all. Reaching here means it *does* matter.
             ChoiceKind::OrderTriggers { .. } => None,
 
-            ChoiceKind::ChooseTargets { slots, .. } => {
+            ChoiceKind::ChooseTargets { slots, optional } => {
                 if !self.auto_target_when_single {
                     return None;
                 }
                 // Every slot must have exactly one legal option, or the player is
-                // making a real decision.
-                if slots.iter().all(|s| s.len() == 1) {
+                // making a real decision. An "up to one" slot is a decision even then:
+                // the one option may be the player's own creature.
+                if slots.iter().all(|s| s.len() == 1) && !optional.iter().any(|o| *o) {
                     Some(Answer::Targets(slots.iter().map(|s| vec![s[0]]).collect()))
                 } else {
                     None
@@ -245,6 +247,35 @@ mod tests {
             default,
             undo: false,
         }
+    }
+
+    #[test]
+    fn a_single_target_is_chosen_for_you_only_when_the_slot_is_required() {
+        let only = vec![vec![mtg_core::Target::Player(PlayerId(0))]];
+        let required = ask(
+            ChoiceKind::ChooseTargets {
+                slots: only.clone(),
+                optional: vec![false],
+            },
+            None,
+        );
+        assert!(
+            Policy::default()
+                .may_auto_answer(&required, &a_view())
+                .is_some()
+        );
+        let up_to = ask(
+            ChoiceKind::ChooseTargets {
+                slots: only,
+                optional: vec![true],
+            },
+            None,
+        );
+        assert!(
+            Policy::default()
+                .may_auto_answer(&up_to, &a_view())
+                .is_none()
+        );
     }
 
     #[test]

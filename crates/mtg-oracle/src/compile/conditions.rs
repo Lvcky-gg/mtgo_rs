@@ -92,6 +92,135 @@ fn condition_atom<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
         .or_else(|| control_both(s, cx))
         .or_else(|| condition_shapes(s, cx))
         .or_else(|| comparison(s, cx))
+        .or_else(|| player_comparison(s, cx))
+        .or_else(|| it_is_a(s, cx))
+}
+
+/// "if it's an artifact creature, …" (Blacksmith's Skill), "if it's a Knight, …": what
+/// "it" names is checked as the instruction is carried out.
+fn it_is_a<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    let r = s
+        .strip_prefix("it's ")
+        .or_else(|| s.strip_prefix("it is "))?;
+    let r = r.strip_prefix("a ").or_else(|| r.strip_prefix("an "))?;
+    let what = cx.it.clone()?;
+    let (noun, rest) = nouns::noun(r, cx)?;
+    if noun.plural {
+        return None;
+    }
+    Some((
+        Condition::AnyMatches {
+            what,
+            filter: noun.filter,
+        },
+        rest,
+    ))
+}
+
+/// "an opponent controls more lands than you" (Land Tax), "that player controls more lands
+/// than you" (Archaeomancer's Map), "you control fewer creatures than an opponent", "an
+/// opponent has more life / more cards in hand than you".
+fn player_comparison<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Who<'a> {
+        AnOpponent,
+        One(&'a Selector),
+    }
+    let subject = |s: &'s str| -> Option<(Who<'_>, &'s str)> {
+        if let Some(r) = s.strip_prefix("an opponent") {
+            return Some((Who::AnOpponent, r));
+        }
+        if let Some(r) = s.strip_prefix("you") {
+            return Some((Who::One(&Selector::You), r));
+        }
+        let r = s.strip_prefix("that player")?;
+        Some((Who::One(cx.that_player.as_ref()?), r))
+    };
+    let (first, r) = subject(s)?;
+    let (verb, r) = words::first_word(r.strip_prefix(' ')?);
+    let (more, r) = if let Some(r) = r.strip_prefix(" more ") {
+        (true, r)
+    } else {
+        (false, r.strip_prefix(" fewer ")?)
+    };
+    // What is counted, for one player or the most any opponent has.
+    enum Measure {
+        Permanents(ObjectFilter),
+        Life,
+        Hand,
+    }
+    let (measure, r) = match verb {
+        "control" | "controls" => {
+            let (noun, r) = nouns::noun(r, cx)?;
+            if !noun.plural || noun.zone != Zone::Battlefield {
+                return None;
+            }
+            (Measure::Permanents(noun.filter), r)
+        }
+        "has" | "have" => {
+            if let Some(r) = r.strip_prefix("life") {
+                (Measure::Life, r)
+            } else {
+                (Measure::Hand, r.strip_prefix("cards in hand")?)
+            }
+        }
+        _ => return None,
+    };
+    let r = r.strip_prefix(" than ")?;
+    let (second, r) = subject(r)?;
+    // Always read as "big > small"; an opponent can only be the bigger side, since the
+    // least an opponent controls is not something the IR counts.
+    let (big, small) = if more {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let one = |who: &Selector| match &measure {
+        Measure::Permanents(f) => Value::Count(Box::new(Selector::All {
+            zone: Zone::Battlefield,
+            filter: ObjectFilter::And(vec![
+                f.clone(),
+                ObjectFilter::ControlledBy(Box::new(who.clone())),
+            ]),
+        })),
+        Measure::Life => Value::LifeTotal(Box::new(who.clone())),
+        Measure::Hand => Value::Count(Box::new(Selector::All {
+            zone: Zone::Hand,
+            filter: ObjectFilter::OwnedBy(Box::new(who.clone())),
+        })),
+    };
+    let small = match small {
+        Who::One(who) => one(who),
+        Who::AnOpponent => return None,
+    };
+    let big = match big {
+        Who::One(who) => one(who),
+        Who::AnOpponent => match &measure {
+            Measure::Permanents(_) => {
+                let Value::Count(all) = one(&Selector::Opponents) else {
+                    return None;
+                };
+                Value::GreatestControlledCount(all)
+            }
+            Measure::Life => Value::GreatestLifeTotal(Box::new(Selector::Opponents)),
+            Measure::Hand => {
+                let Value::Count(all) = one(&Selector::Opponents) else {
+                    return None;
+                };
+                Value::GreatestOwnedCount(all)
+            }
+        },
+    };
+    if big == small {
+        return None;
+    }
+    Some((
+        Condition::ValueAtLeast {
+            lhs: big,
+            rhs: Value::Sum(vec![small, Value::ONE]),
+        },
+        r,
+    ))
 }
 
 /// A color check on an announced target, rather than a color restriction on targeting.
@@ -942,8 +1071,9 @@ fn controls<'s>(s: &'s str, who: Selector, cx: &Cx) -> Option<(Condition, &'s st
             Some(r) => (true, r),
             None => (false, r),
         };
+        let plains = r.starts_with("plains");
         let (noun, r) = nouns::noun(r, cx)?;
-        if !noun.plural || noun.zone != Zone::Battlefield {
+        if (!noun.plural && !plains) || noun.zone != Zone::Battlefield {
             return None;
         }
         let mut filter = vec![noun.filter, ObjectFilter::ControlledBy(Box::new(who))];
@@ -1001,12 +1131,14 @@ fn controls<'s>(s: &'s str, who: Selector, cx: &Cx) -> Option<(Condition, &'s st
         };
         (Some(n), other, r)
     };
+    // "Plains" is its own plural: "seven or more Plains" (Emeria, the Sky Ruin).
+    let plains = r.starts_with("plains");
     let (noun, r) = nouns::noun(r, cx)?;
     if noun.zone != Zone::Battlefield {
         return None;
     }
     // Singular after "a"/"another", plural after "no"/"N or more".
-    if noun.plural != (count != Some(1)) {
+    if noun.plural != (count != Some(1)) && !plains {
         return None;
     }
     let mut filter = vec![noun.filter, ObjectFilter::ControlledBy(Box::new(who))];

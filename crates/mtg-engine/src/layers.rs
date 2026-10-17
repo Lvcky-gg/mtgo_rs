@@ -59,7 +59,7 @@ pub mod layer {
 }
 
 /// Memoised characteristics, valid only for one `GameState::generation`.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct CharacteristicsCache {
     generation: Timestamp,
     entries: BTreeMap<ObjectId, Characteristics>,
@@ -274,7 +274,9 @@ fn dependency_sort(_effects: &mut [ContinuousEffect]) {}
 /// Not modelled: removal decided by characteristics another effect changed (CR 613.8).
 pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousEffect> {
     let mut out = state.continuous.clone();
-    for id in state.battlefield() {
+    // Scanned once for both passes below: this runs for every characteristics computation.
+    let field = state.battlefield();
+    for id in field.iter().copied() {
         let Some(obj) = state.objects.get(&id).filter(|o| !o.phased_out) else {
             continue;
         };
@@ -320,12 +322,7 @@ pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousE
                 .is_some_and(|o| o.cast_context.as_ref().is_none_or(|c| c.ability.is_none()))
         })
         .map(|id| (id, true));
-    for (id, on_stack) in state
-        .battlefield()
-        .into_iter()
-        .map(|id| (id, false))
-        .chain(spells)
-    {
+    for (id, on_stack) in field.into_iter().map(|id| (id, false)).chain(spells) {
         let Some(obj) = state.objects.get(&id) else {
             continue;
         };
@@ -454,7 +451,7 @@ fn affects(
         AffectedSet::Fixed(ids) => ids.contains(&id),
         AffectedSet::Dynamic(sel) => {
             let ctx = effect_ctx(state, printed, chars, effect);
-            crate::eval::objects(&ctx, sel).is_ok_and(|ids| ids.contains(&id))
+            crate::eval::contains(&ctx, sel, id).unwrap_or(false)
         }
     }
 }
@@ -534,6 +531,39 @@ fn apply_one(
                     .is_some_and(mtg_core::is_creature_type)
             });
             ch.every_creature_type = false;
+            for s in ss {
+                if !ch.subtypes.contains(s) {
+                    ch.subtypes.push(*s);
+                }
+            }
+        }
+        M::SetLandTypes(ss) => {
+            // CR 205.3i — the land types.
+            const LAND_TYPES: &[&str] = &[
+                "Cave",
+                "Cloud",
+                "Desert",
+                "Forest",
+                "Gate",
+                "Island",
+                "Lair",
+                "Locus",
+                "Mine",
+                "Mountain",
+                "Plains",
+                "Planet",
+                "Power-Plant",
+                "Sphere",
+                "Swamp",
+                "Tower",
+                "Town",
+                "Urza's",
+            ];
+            ch.subtypes.retain(|s| {
+                !printed
+                    .subtype_name(*s)
+                    .is_some_and(|name| LAND_TYPES.contains(&name))
+            });
             for s in ss {
                 if !ch.subtypes.contains(s) {
                     ch.subtypes.push(*s);
@@ -690,10 +720,13 @@ fn control(state: &GameState, id: ObjectId) -> Option<(PlayerId, Option<Timestam
     // "You control enchanted creature": an Aura's static ability, which names its object
     // through attachment — a fact, not a characteristic, so it needs no layer pass. The
     // Aura's own stored controller is used, for the same reason as above.
+    // Scanned in place: this runs for every controller lookup, and collecting the
+    // battlefield first allocated on each one.
+    let battlefield = mtg_core::ZoneRef::shared(mtg_core::Zone::Battlefield);
     if let Some(host) = state
-        .battlefield()
-        .into_iter()
-        .filter_map(|a| state.objects.get(&a))
+        .objects
+        .values()
+        .filter(|a| a.zone == battlefield)
         .filter(|a| a.attached_to == Some(id) && !a.phased_out)
         .filter(|a| a.controls_host)
         .max_by_key(|a| a.timestamp)

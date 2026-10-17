@@ -128,18 +128,86 @@ impl FetchProgress {
     }
 }
 
+/// Bounded batches let the network run ahead while the importer parses and writes.
+/// Dropping the reader disconnects the worker, including when an import fails early.
 #[cfg(feature = "fetch")]
-struct CountedReader<R> {
-    reader: R,
-    bytes: std::rc::Rc<std::cell::Cell<u64>>,
+struct DownloadReader {
+    chunks: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    current: std::io::Cursor<Vec<u8>>,
 }
 
 #[cfg(feature = "fetch")]
-impl<R: Read> Read for CountedReader<R> {
+impl DownloadReader {
+    fn start<R: Read + Send + 'static>(
+        mut source: R,
+    ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        };
+        // Four queued 256 KiB batches plus one at either end: <= 1.5 MiB.
+        let (sender, chunks) = mpsc::sync_channel(4);
+        let bytes = Arc::new(AtomicU64::new(0));
+        let received = bytes.clone();
+        std::thread::spawn(move || {
+            loop {
+                let mut chunk = vec![0; 256 * 1024];
+                let mut used = 0;
+                let mut failure = None;
+                while used < chunk.len() {
+                    match source.read(&mut chunk[used..]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            used += n;
+                            received.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                chunk.truncate(used);
+                if used > 0 && sender.send(Ok(chunk)).is_err() {
+                    break;
+                }
+                if let Some(e) = failure {
+                    let _ = sender.send(Err(e));
+                    break;
+                }
+                if used == 0 {
+                    break;
+                }
+            }
+        });
+        (
+            Self {
+                chunks,
+                current: std::io::Cursor::new(Vec::new()),
+            },
+            bytes,
+        )
+    }
+}
+
+#[cfg(feature = "fetch")]
+impl Read for DownloadReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.reader.read(buf)?;
-        self.bytes.set(self.bytes.get() + read as u64);
-        Ok(read)
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let n = self.current.read(buf)?;
+            if n != 0 {
+                return Ok(n);
+            }
+            match self.chunks.recv() {
+                Ok(chunk) => self.current = std::io::Cursor::new(chunk?),
+                Err(_) => return Ok(0),
+            }
+        }
     }
 }
 
@@ -187,7 +255,7 @@ pub fn fetch_and_import_with_progress(
 
     // The file is gzip-compressed JSON Lines now, and was a JSON array before; `import`
     // detects which, so accept either.
-    let mut response = agent
+    let response = agent
         .get(&uri)
         .header("User-Agent", USER_AGENT)
         .header(
@@ -197,18 +265,14 @@ pub fn fetch_and_import_with_progress(
         .call()
         .map_err(|e| FetchError::Http(e.to_string()))?;
 
-    // Streamed straight into the importer, decompressing as it goes: the file never needs to
-    // exist in memory or on disk.
+    // Download on a separate worker while the caller decompresses and imports.
+    // The bounded queue keeps memory use independent of the export size.
     let total = response
         .headers()
         .get("Content-Length")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse().ok());
-    let bytes = std::rc::Rc::new(std::cell::Cell::new(0));
-    let reader = CountedReader {
-        reader: response.body_mut().as_reader(),
-        bytes: bytes.clone(),
-    };
+    let (reader, bytes) = DownloadReader::start(response.into_body().into_reader());
     let report = crate::import::import_with_timestamp(
         store,
         reader,
@@ -219,7 +283,7 @@ pub fn fetch_and_import_with_progress(
                     processed,
                     imported,
                 } => FetchProgress::Importing {
-                    downloaded: bytes.get(),
+                    downloaded: bytes.load(std::sync::atomic::Ordering::Relaxed),
                     total,
                     processed,
                     imported,
@@ -295,6 +359,76 @@ pub fn import_from_with_progress<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn download_batches_preserve_bytes_and_count_network_progress() {
+        let data: Vec<u8> = (0..900_000).map(|i| (i % 251) as u8).collect();
+        let (mut reader, bytes) = DownloadReader::start(std::io::Cursor::new(data.clone()));
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, data);
+        assert_eq!(
+            bytes.load(std::sync::atomic::Ordering::Relaxed),
+            data.len() as u64
+        );
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn download_runs_ahead_and_stops_when_importer_drops() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        struct Source {
+            reads: mpsc::Sender<()>,
+            dropped: mpsc::Sender<()>,
+        }
+        impl Read for Source {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.send(()).unwrap();
+                buf.fill(b'x');
+                Ok(buf.len())
+            }
+        }
+        impl Drop for Source {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(());
+            }
+        }
+        let (reads, rx) = mpsc::channel();
+        let (dropped, done) = mpsc::channel();
+        let (reader, _) = DownloadReader::start(Source { reads, dropped });
+        // No consumer reads: the worker fills four slots and blocks on the fifth.
+        for _ in 0..5 {
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        assert!(rx.try_recv().is_err());
+        drop(reader);
+        done.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn download_errors_reach_importer_after_buffered_bytes() {
+        struct Broken(bool);
+        impl Read for Broken {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::other("connection lost"));
+                }
+                self.0 = true;
+                buf[..3].copy_from_slice(b"abc");
+                Ok(3)
+            }
+        }
+        let (mut reader, _) = DownloadReader::start(Broken(false));
+        let mut actual = Vec::new();
+        let error = reader.read_to_end(&mut actual).unwrap_err();
+        assert_eq!(actual, b"abc");
+        assert_eq!(error.to_string(), "connection lost");
+    }
 
     #[test]
     fn refresh_metadata_distinguishes_missing_values_from_database_errors() {

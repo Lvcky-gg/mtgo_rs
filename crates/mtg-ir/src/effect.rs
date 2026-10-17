@@ -839,6 +839,10 @@ pub enum Modification {
     AddSubtypes(Vec<mtg_core::Subtype>),
     /// Layer 4 — "becomes a Goblin": these creature types replace all its others.
     SetCreatureTypes(Vec<mtg_core::Subtype>),
+    /// Layer 4 — "nonbasic lands are Mountains" (CR 305.7): these land types replace all its
+    /// others. Its abilities are replaced by the new types' mana abilities alongside, as
+    /// layer-6 statics of the same source.
+    SetLandTypes(Vec<mtg_core::Subtype>),
     /// "Becomes the chosen color/creature type": `SetColors` / `SetCreatureTypes` with the
     /// source's choice (an enclosing `Effect::Choose`), fixed as the effect begins.
     BecomesChosen(EntryChoice),
@@ -1046,8 +1050,20 @@ pub enum Restriction {
     AssignAsThoughUnblocked,
     /// "Can't attack unless defending player controls an Island".
     CantAttackUnlessDefenderControls(ObjectFilter),
-    /// CR 402.2 — "You have no maximum hand size": the controller of the source.
-    NoMaximumHandSize,
+    /// CR 402.2 — "You have no maximum hand size", "each opponent's maximum hand size is
+    /// reduced by two", "your maximum hand size is equal to …": these players, from the
+    /// effect's controller.
+    MaximumHandSize {
+        who: crate::selector::Selector,
+        size: HandSize,
+    },
+    /// "The next instant or sorcery spell you cast this turn can't be countered" (Overmaster,
+    /// Mistrise Village): for the effect's controller, used up by the first spell they cast
+    /// that matches `filter`.
+    NextSpell {
+        filter: ObjectFilter,
+        grant: NextSpellGrant,
+    },
     /// "Whenever enchanted land is tapped for mana, its controller adds an additional {G}."
     /// (Wild Growth), "whenever you tap a creature for mana, add an additional {G}": a
     /// permanent this applies to makes this too when tapped for mana (CR 605.1b — a
@@ -1089,6 +1105,103 @@ pub enum Restriction {
         what: ObjectFilter,
         delta: Value,
     },
+    /// "Activated abilities of creatures you control cost {2} less to activate" (Training
+    /// Grounds): the generic part of matching permanents' activated abilities. With
+    /// `min_one`, "this effect can't reduce the mana in that cost to less than one mana".
+    AbilityCostModifier {
+        what: ObjectFilter,
+        delta: Value,
+        min_one: bool,
+    },
+    /// "If one or more tokens would be created under your control, twice that many of those
+    /// tokens are created instead." (Anointed Procession; Ojer Taq's "creature tokens …
+    /// three times"): tokens its controller would get, multiplied (CR 614.1a).
+    TokenMultiplier {
+        factor: u8,
+        creature_only: bool,
+        /// "If one or more tokens would be created, …" (Primal Vigor): everyone's tokens.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        any_controller: bool,
+    },
+    /// "If a triggered ability of a creature you control with power 2 or less triggers,
+    /// that ability triggers an additional time." (Delney): triggered abilities of matching
+    /// permanents trigger once more for each of these (CR 603.2d).
+    ExtraTrigger {
+        sources: ObjectFilter,
+        /// Only triggers caused by a matching object entering: "a permanent entering" (Elesh
+        /// Norn), "a land entering" (Ancient Greenwarden).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entering: Option<ObjectFilter>,
+    },
+    /// "If you would draw a card while your library has no cards in it, you win the game
+    /// instead." (Laboratory Maniac, Jace, Wielder of Mysteries)
+    WinInsteadOfEmptyDraw,
+    /// "You may activate abilities of creatures you control as though those creatures had
+    /// haste." (Thousand-Year Elixir, Shang-Chi): {T} and {Q} costs of matching creatures
+    /// may be paid while they're summoning sick (CR 302.6).
+    ActivateAsThoughHaste {
+        what: ObjectFilter,
+    },
+    /// "If one or more tokens would be created under your control, those tokens plus that many
+    /// 1/1 green Squirrel creature tokens are created instead." (Chatterfang), "… plus an
+    /// additional Treasure token" (Xorn): more tokens alongside the ones created.
+    ExtraTokens {
+        /// Which created tokens count ("Treasure tokens", "artifact tokens"); any if `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only: Option<ObjectFilter>,
+        token: Box<TokenSpec>,
+        /// One extra per token counted ("that many"), or a single one.
+        per_token: bool,
+    },
+    /// "Lands you control enter untapped." (Spelunking, Horizon Explorer): matching permanents
+    /// enter untapped even if something says they'd enter tapped.
+    EntersUntapped {
+        what: ObjectFilter,
+    },
+    /// "Creature cards in graveyards and libraries can't enter the battlefield." (Grafdigger's
+    /// Cage): matching cards in those zones stay where they are.
+    CantEnterFrom {
+        what: ObjectFilter,
+        zones: Vec<mtg_core::Zone>,
+    },
+    /// "Creatures entering don't cause abilities to trigger." (Torpor Orb), "… entering or
+    /// dying …" (Hushbringer): such an event triggers nothing, while this applies.
+    /// "If one or more +1/+1 counters would be put on a creature you control, that many plus
+    /// one … are put on it instead." (Hardened Scales), "… twice that many …" (Branching
+    /// Evolution, Doubling Season): counters put on matching permanents (CR 614.1a).
+    CounterModifier {
+        what: ObjectFilter,
+        /// Only this kind ("+1/+1 counters"); `None` for any counters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<mtg_core::CounterKind>,
+        factor: u8,
+        plus: u8,
+    },
+    /// "If a source you control would deal damage to a permanent or player, it deals triple
+    /// that damage instead." (Fiery Emancipation), "… to an opponent or a permanent an
+    /// opponent controls, it deals that much damage plus 2 instead." (Torbran): damage from
+    /// matching sources its controller controls, changed (CR 614.1a).
+    DamageModifier {
+        sources: ObjectFilter,
+        /// 0: any permanent or player; 1: an opponent or a permanent an opponent controls;
+        /// 2: an opponent only.
+        recipients: u8,
+        noncombat_only: bool,
+        factor: u8,
+        plus: u8,
+        /// "If a source would deal damage …" (Dictate of the Twin Gods): anyone's sources.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        any_controller: bool,
+    },
+    SuppressTriggers {
+        what: ObjectFilter,
+        entering: bool,
+        dying: bool,
+        /// Whose abilities are stopped, when not everyone's: "… don't cause abilities of
+        /// permanents your opponents control to trigger" (Elesh Norn).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sources: Option<ObjectFilter>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1108,6 +1221,25 @@ pub enum Duration {
     ThroughNextUntapStep,
     /// "For as long as ~ remains tapped": ends when the source untaps or leaves.
     WhileSourceTapped,
+}
+
+/// What a [`Restriction::NextSpell`] does for the spell it is used up by.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum NextSpellGrant {
+    CantBeCountered,
+    /// "… can be cast as though it had flash."
+    Flash,
+    /// "… costs {2} less to cast."
+    CostsLess(i32),
+}
+
+/// How an effect changes a player's maximum hand size (CR 402.2). "Equals" sets it (layered
+/// first, by timestamp); increases and reductions then add up; "no maximum" wins over all.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum HandSize {
+    Unlimited,
+    Plus(i32),
+    Equals(Value),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1178,6 +1310,9 @@ pub enum ReplacementKind {
     /// CR 614.12 — "As this land enters, you may pay 2 life. If you don't, it enters
     /// tapped."
     EntersTappedUnlessPaysLife { amount: u32 },
+    /// "As this land enters, you may reveal a Mountain or Plains card from your hand. If you
+    /// don't, this land enters tapped." (the snarls; Lorwyn's reveal lands)
+    EntersTappedUnlessReveals(ObjectFilter),
     /// "As this enters, choose a color / a creature type" (CR 614.12): the choice is the
     /// permanent's own, read later by "the chosen color/type".
     EntersChoosing(EntryChoice),

@@ -9,16 +9,22 @@ fn global_combat_prevention_is_exact_and_composes_with_other_effects() {
         panic!("sequence")
     };
     assert!(matches!(items[0], Effect::PreventAllCombatDamage));
-    for text in [
+    // A source group is a different effect (`group_prevention_…` below), not this one.
+    let by_yours = instant(
         "Prevent all combat damage that would be dealt this turn by creatures you control.",
-        "Prevent all combat damage that would be dealt this turn except by Dragons.",
-    ] {
-        assert!(!instant(text).understood(), "{text}");
-    }
+    );
+    assert!(matches!(
+        by_yours.abilities[0].kind,
+        AbilityKind::SpellEffect(Effect::Continuous { .. })
+    ));
+    assert!(
+        !instant("Prevent all combat damage that would be dealt this turn except by Dragons.")
+            .understood()
+    );
 }
 
 #[test]
-fn targeted_prevention_accepts_recipients_but_rejects_other_scopes() {
+fn targeted_prevention_accepts_recipients_but_rejects_unsupported_scopes() {
     for text in [
         "Prevent all damage that would be dealt to target creature this turn.",
         "Prevent all damage that would be dealt to target player this turn.",
@@ -33,14 +39,75 @@ fn targeted_prevention_accepts_recipients_but_rejects_other_scopes() {
         ));
     }
     for text in [
-        "Prevent all damage that would be dealt to all creatures this turn.",
-        "Prevent all combat damage that would be dealt to you and creatures you control this turn.",
         "Prevent all damage that would be dealt to target creature this turn by red sources.",
         "Prevent all damage that would be dealt to target creature next turn.",
-        "Prevent all damage that would be dealt by creatures this turn.",
     ] {
         assert!(!instant(text).understood(), "{text}");
     }
+}
+
+#[test]
+fn group_prevention_keeps_recipient_source_and_combat_scopes() {
+    for (text, dealt_to, dealt_by) in [
+        (
+            "Prevent all damage that would be dealt to all creatures this turn.",
+            true,
+            false,
+        ),
+        (
+            "Prevent all damage that would be dealt by creatures this turn.",
+            false,
+            true,
+        ),
+    ] {
+        let compiled = instant(text);
+        assert!(compiled.understood(), "{text}");
+        assert!(compiled.abilities[0].targets.is_empty());
+        let AbilityKind::SpellEffect(Effect::Continuous {
+            modification:
+                Modification::Restriction(Restriction::PreventDamage {
+                    dealt_to: actual_to,
+                    dealt_by: actual_by,
+                    combat_only,
+                    ..
+                }),
+            duration: mtg_ir::effect::Duration::UntilEndOfTurn,
+            ..
+        }) = &compiled.abilities[0].kind
+        else {
+            panic!("{text}")
+        };
+        assert_eq!(
+            (*actual_to, *actual_by, *combat_only),
+            (dealt_to, dealt_by, false)
+        );
+    }
+    let compiled = instant(
+        "Prevent all combat damage that would be dealt to you and creatures you control this turn.",
+    );
+    assert!(compiled.understood());
+    let AbilityKind::SpellEffect(Effect::Sequence(effects)) = &compiled.abilities[0].kind else {
+        panic!("player and creature shields")
+    };
+    assert!(matches!(
+        &effects[..],
+        [
+            Effect::PreventDamageShield {
+                to: Some(Selector::You),
+                combat_only: true,
+                ..
+            },
+            Effect::Continuous {
+                modification: Modification::Restriction(Restriction::PreventDamage {
+                    dealt_to: true,
+                    dealt_by: false,
+                    combat_only: true,
+                    ..
+                }),
+                ..
+            }
+        ]
+    ));
 }
 
 #[test]

@@ -1,5 +1,140 @@
 # Current work
 
+Claude (2026-10-16, bot strength round 2: learned evaluation — IN PROGRESS): Phases 0–3 of
+the learning plan in `docs/bot-strength.md`. `deck_pool` example builds a pool of published
+MTGO lists (cached pages, rate-limited); `search/encode.rs` encodes positions from one seat
+(opponent hand = count only); `selfplay` example records shards; `tools/learn/train_value.py`
+trains a value net that `search/value.rs` evaluates (`Searcher.value`, arena `--value`).
+Held-out log loss 0.441 vs 0.573 for a global-feature logistic; arena verdict pending.
+`Budget.max_choices` default 2,000 → 400 (playouts in looping games); the arena now searches at
+most 600 decisions per game. Training env: `~/.local/share/mtgo_rs/venv` (CPU torch).
+
+Codex (2026-10-16, poison-aware removal urgency — COMPLETE): shared
+threat score separates life and poison damage and prioritizes attackers
+contributing to lethal poison over larger survivable attackers. Six compiled
+game scenarios verify actual targets and survival, with nonlethal poison and
+zero-power toxic controls. Policy60, headless bot1, compiled1499 (15 ignored),
+strict policy Clippy and formatting/diff pass. Paired Demo arena unchanged:
+68.8% ±17.9%, +137 Elo [+6,+325], 16 games/8 pairs, no adjudications,
+129.0s, 3096 decisions/39 overrides. No general strength gain established.
+Uses printed keywords and
+potential unblocked damage. See
+[handoff](sessions/2026-10-16-bot-poison-removal-codex.md).
+
+Codex (2026-10-16, toxic combat defense — COMPLETE): printed toxic now
+contributes to poison danger alongside ordinary life damage; infect plus toxic,
+multiple toxic instances and double strike are recognized. Seven compiled game
+cases verify block assignments and actual life/poison totals, including zero
+damage. Policy59, headless bot1, compiled1498 (15 ignored), strict policy Clippy
+and formatting/diff pass. Paired Demo arena unchanged: 68.8% ±17.9%,
++137 Elo [+6,+325], 16 games/8 pairs, no adjudications, 122.8s,
+3096 decisions/39 overrides. No general strength gain established.
+Printed keywords only; double-strike trample poison
+counts remain conservative. See
+[handoff](sessions/2026-10-16-bot-toxic-defense-codex.md).
+
+Codex (2026-10-16, infect combat defense — COMPLETE):
+blocker selection separates infect poison from ordinary life damage, preventing
+poison death at high life and avoiding needless blocks at low life. Four policy
+cases and a three-case compiled game matrix verify target choice and resulting
+life/poison totals. Policy59, headless bot1, compiled1497 (15 ignored), strict
+policy Clippy and formatting/diff pass. Paired Demo arena unchanged: 68.8%
+±17.9%, +137 Elo [+6,+325], 16 games/8 pairs, no adjudications; 107.3s,
+3096 searched decisions, 39 overrides. No strength or speed gain claim.
+Printed infect only; toxic and attack-side
+poison wins remain future work. See
+[handoff](sessions/2026-10-16-bot-infect-defense-codex.md).
+
+Codex (2026-10-16, deathtouch removal responses — COMPLETE): source-aware
+fixed-damage response scoring recognizes lethal deathtouch pings against large
+creature engines; normal pings and indestructible targets retain their guards.
+Recognizes only self-source damage to avoid borrowing another object's keywords.
+Compiled game matrix passes; policy58, headless bot1, compiled1496/15 ignored,
+strict policy Clippy and formatting/diff pass. Demo baseline50%, 16 games,
+no adjudications. Search comparison before the final source-selector guard:
+68.8% ±17.9%, +137 Elo [+6,+325], 132.5s, 3096 decisions/39 overrides,
+unchanged from prior results; no general strength-gain claim. See
+[handoff](sessions/2026-10-16-bot-deathtouch-response-codex.md).
+
+Codex (2026-10-16, indestructible combat assessment — COMPLETE): shared fight estimate
+now respects printed indestructible, including deathtouch and first/double strike.
+Safe blocks and attack avoidance have policy regressions plus a compiled-card
+game checking actual survival. Policy58, headless bot1, compiled1494 (15 ignored),
+strict policy Clippy and formatting/diff pass. Paired Demo arena unchanged:
+68.8% ± 17.9%, +137 Elo [+6,+325], 16 games/8 pairs, no adjudications;
+135.0s, 3096 searched decisions, 39 overrides. No strength-gain claim. See
+[handoff](sessions/2026-10-16-bot-indestructible-codex.md).
+
+Codex (2026-10-16, compiler validation follow-up — COMPLETE): replaced stale
+prevention rejection expectations with assertions for recipient/source group
+restrictions and separate player/combat shields. Retained unsupported source/color
+and next-turn rejection cases. Fixed three compiler Clippy diagnostics without
+changing behavior. Library88 and prevention21 pass; strict oracle library Clippy
+and diff checks pass.
+
+Codex (2026-10-16, Scryfall bulk download pipeline — COMPLETE): download worker
+reads 256 KiB batches into a bounded four-slot queue while the caller decompresses,
+parses and imports. At most 1.5 MiB of batch buffers; byte progress counts network
+reads. Errors propagate and early importer exit disconnects the worker. Keeps one
+HTTP bulk request; this overlaps network and import rather than splitting the
+file into parallel range requests. Fetch9 and import/atomicity45 pass; live speedup
+not measured. Broader library suite has an unrelated existing failure in
+`targeted_prevention_accepts_recipients_but_rejects_other_scopes`.
+
+Codex (2026-10-16, static threats and replacement-win timing — COMPLETE): contextual
+priorities for casting/search locks, fueled escape and empty-library wins; removal
+of Laboratory Maniac in response to the pending draw, with the activated-win source
+removal negative case. Eight new game tests pass; card suite 1,486 pass / 15 ignored,
+policy54, bot1, policy no-deps Clippy, fmt/diff pass. Paired Demo arena unchanged:
+68.8% ± 17.9% searcher vs heuristic, 8 seeds/16 games, no strength-gain claim.
+Claude-owned search core/eval left untouched. See
+[handoff and measurement limits](sessions/2026-10-16-bot-static-threats-codex.md).
+
+Codex (2026-10-16, response reservation/engine urgency — COMPLETE): preserves
+counters through low-impact high-life bait, with guards for life-gain payoffs,
+life-payment engines, alternate wins and combat lethal range. Answers repeatable
+draw/win engines outside combat and uses activated removal to preserve cards.
+Nine new real-game regressions; card suite 1,469 pass / 15 ignored, policy54,
+bot1, policy no-deps Clippy, formatting and diff checks pass. See
+[handoff and limits](sessions/2026-10-16-bot-response-reservation-codex.md).
+
+Codex (2026-10-16, stack threats/responses — COMPLETE): fixed bot reads of the
+bottom of the stack as the top, including counter targeting and wasting a second
+counter above its own response. Added counter/ability type matching, visible
+counter protection, generic-tax affordability and hard/soft response ranking.
+Nine compiled-card regressions pass; broad compiled suite 1,444 pass / 15 ignored,
+policy54, bot1, policy no-deps Clippy, formatting/diff checks pass. See
+[handoff and limits](sessions/2026-10-16-bot-stack-responses-codex.md).
+
+Claude (2026-10-16, bot strength: search + arena + engine speed — COMPLETE (round 1); searcher +81 Elo [+22, +145] vs heuristic, see `docs/bot-strength.md`):
+goal is a solver-grade opponent (and later deck recommendations from simulated
+matchups). **Split with Codex:** Codex owns the heuristic `Bot` (`bot/`) and new
+`search::candidates` generators; Claude owns the search core (`search/mod.rs`
+allocation, `determinize.rs`, `eval.rs` weights/tuning), the arena, and engine speed.
+**Measure every bot change with the arena** — paired seeds, seats swapped:
+`cargo run --release -p mtg-app --example arena -- --seeds 8 [--baseline] [--deck NAME]`
+(prints score ± 95% CI and Elo vs the heuristic bot). **Engine FYI (behavior-preserving,
+engine 298/298):** `Engine` and its internals are now `Clone` (search forks the game);
+`eval::contains` answers selector membership without building the set and
+`layers::affects` uses it; `detect::{state_triggers, candidate_abilities}` compute
+characteristics only for objects that could trigger; `layers::effects` scans the
+battlefield once. One commander game: 38.1G → 6.3G instructions. The next engine-speed
+step (a battlefield index, or per-generation effects memo) needs every direct
+`objects.insert/remove` and `.zone =` site (37 outside the engine) to cooperate — not
+started; ask before doing it. Search now keeps the heuristic's answer unless another beats
+it by a paired 2σ margin, and races candidates out early. Eval is a feature vector
+(`eval::features`) fitted by `cargo run --release -p mtg-app --example tune_eval`.
+Workspace 2,596 passed after the engine changes.
+
+Codex (2026-10-16, bot threats/responses — COMPLETE): added IR-based recurring
+engine and combat threat scores; effective burn/destroy/exile target ranking;
+instant combat responses, preservation of ineffective removal, cheaper counter
+selection, and shared recurring-engine search evaluation. Ten real compiled-card
+regressions pass, including player survival and heuristic/search engine removal.
+Compiled cards 1,430 pass / 15 ignored; policy54, headless bot1, policy no-deps
+Clippy, formatting and diff checks pass. Printed-stat and combo-recognition limits
+remain; see [handoff](sessions/2026-10-16-bot-threat-assessment-codex.md).
+
 Codex (2026-10-13, card coverage round 4 — COMPLETE): 17,567 → 17,592 / 34,914
 (50.4%), 25 additions and zero losses. Added library/graveyard zone choices and
 enchanted/equipped filters, including Finale of Devastation, Greater Auramancy,
@@ -2465,3 +2600,260 @@ Independent policy tests additionally bound confidence/issue metadata to evidenc
 fingerprints. All 13 primitives remain EXPERIMENTAL. Later live card/compiler
 changes are not covered by this evidence. See
 `docs/sessions/2026-10-08-restricted-mana-verification.md`.
+
+2026-10-15 Claude — cEDH staples round COMPLETE (841 → 856 of 1,335 playable; overall
+18,106 of 34,954). Shapes: "add an amount of {B} equal to <value>" and "add X mana in any
+combination of {B} and/or {R}, where X is …" as spell effects (the engine now asks a spell's
+controller to split two-color Combination mana; never inside a mana ability); search filter
+"mana value equal to <value>"; a search's destination as its own sentence (". Put that card
+onto the battlefield"); "with an additional +1/+1 counter on it" after a search; "where X is"
+followed by sentences that don't use X; replace_x substitutes inside selector filters via
+walk::substitute_value; "they <verb>" in a trigger body = "that player" (Sheoldred, Havoc,
+Mai); "a player / an opponent sacrifices" triggers (Mayhem Devil); enters-as-copy uses
+clauses::copy_exceptions (card types, "an", "it has"), which now also splits on " and ".
+A/B against the accepted list: no card lost. Engine: mana::plan_spell excludes the spell's
+own hand mana (Simian Spirit Guide loop); RepeatMay stops when an iteration changes nothing
+(Ad Nauseam). Tests: compiled/{sacrifice_rituals, where_x_continues, they_means_that_player,
+any_player_sacrifices, clone_exceptions, bot_blasts}.rs. Workspace 2,452 passed.
+
+2026-10-15 Claude — cEDH staples round 2 COMPLETE (856 → 866 of 1,335; EDH 1,409 of
+2,571; overall 18,192 of 34,954). Shapes: "{T}: Add N mana in any combination of {R} and/or
+{G}" via mana_line (refused when the cost has more than tapping/sacrificing the source —
+Orcish Lumberjack's "Sacrifice a Forest" would be one color by hand); spell "add x mana of
+any one color" and "Spend this mana only to cast … spells" after a spell's AddMana (SpendOnly);
+words::normalise no longer turns "this creature" into ~ inside double quotes —
+quoted_abilities does it, plus "this token" (+38 cards: Heat Shimmer, Flame Fusillade,
+Rain of Filth …); comma lists in statics ("gets +2/+2, has flying, and attacks each combat if
+able", Dragon's Rage Channeler) split per item, falling through on failure; "choose up to one
+—" (Hullbreaker Horror); "one or two target X" (first slot required); "monocolored"; "power
+or toughness N or less"; "exile all graveyards". A/B on the accepted list after each risky
+change: no card lost. Parked: "the next spell you cast this turn can't be countered"
+(Mistrise Village, Overmaster) needs per-player pending state — a delayed trigger would let
+it be countered in response. Workspace 2,466 passed.
+
+2026-10-15 Claude — cEDH staples round 3 COMPLETE (866 → 871 of 1,335; EDH 1,414;
+overall 18,215). Shapes: clauses::value_targeting ("the number of creatures target player
+controls" creates the player target; used by "create a number of … equal to" and "where X
+is"); "you and target opponent each <draw/discard/lose/gain> …" (Union of You + target);
+"protection from each color" (= all colors) and a keyword list ending "and protection from
+…"; put_counters / tap_untap set cx.group so "those creatures" follows (the It-bound "them"
+still wins); "put up to N / any number of <noun> cards from your hand onto the battlefield";
+enters-as-copy accepts the period inside a closing quote (Phantasmal Image); "<value> plus
+N". A/B on the accepted list: no card lost. Tests: compiled/{modal_bullets,
+clone_exceptions, where_x_continues}.rs. Workspace 2,473 passed.
+
+2026-10-15 Claude — round 4 COMPLETE (cEDH 871 → 876; EDH 1,421; overall 18,228). Three
+new Restriction variants (statics, read via layers::effects; no new GameState fields, so no
+fixture changes): AbilityCostModifier {what, delta, min_one} applied in cost::ability_cost,
+manual mana activation and mana::manual_source (Training Grounds); TokenMultiplier {factor,
+creature_only} multiplies CreateToken / CreateTokenCopy per receiving player (Anointed
+Procession, Mondrak, Ojer Taq …); ExtraTrigger {sources} re-queues a non-delayed trigger in
+Engine::detect_triggers once per matching static (Delney, Annie Joins Up). Known limits:
+ExtraTrigger doesn't see a source that already left play (a small creature's dies trigger
+under Delney fires once); the auto payment planner doesn't apply AbilityCostModifier to paid
+mana abilities it plans itself. Not yet: Elesh Norn (needs the event type), Harmonic
+Prodigy ("a Shaman or another Wizard"). Tests: compiled/{ability_cost_reduction,
+token_doublers, extra_triggers}.rs. Workspace 2,481 passed; A/B no card lost.
+
+2026-10-15 Claude — round 5 COMPLETE (cEDH 882; EDH 1,448; overall 18,301). Shapes: "all/each
+… cards from your graveyard" groups (nouns::object no longer refuses a graveyard zone when
+quantified; bounce accepts "to your hand" for an OwnedBy(You) graveyard group); qualifiers
+"that aren't legendary", "that aren't enchanted", "with no counters on them", "without a
+<counter> counter on it"; "… to the battlefield … with a/N <counter> counter(s) on it" after a
+return (clauses::entering_with_counters); keyword lists ending "and ward {N}"; number words
+eleven–twenty, thirty, forty, fifty; "to their owner's hand" (Aetherize's wording); ExtraTrigger
+for "equipped/enchanted creature" (Wizard's Staff). Engine: Restriction::WinInsteadOfEmptyDraw
+checked in resolve::draw_one (Laboratory Maniac, Jace, Wielder of Mysteries) — the others lose.
+A/B: no card lost. Workspace 2,491 passed.
+
+2026-10-15 Claude — round 6 COMPLETE (cEDH 886; EDH 1,450; overall 18,310). Engine statics
+(no GameState fields): ActivateAsThoughHaste {what} in cost::tap_symbol_allowed (Thousand-Year
+Elixir); ExtraTrigger gained entering_only, checked against the trigger's cause event
+(Virtue of Knowledge, Yarok; Elesh Norn still needs its opponents' half); SuppressTriggers
+{what, entering, dying} drops non-delayed triggers whose cause is a matching object entering
+(ZoneChange onto the battlefield or Created) or dying (Torpor Orb, Hushbringer, Hushwing Gryff,
+Tocatli Honor Guard, Karn, Argent Defender). Tests: compiled/{as_though_haste,
+extra_triggers, suppressed_triggers}.rs. A/B: no card lost. Workspace 2,495 passed.
+
+2026-10-15 Claude — round 7 COMPLETE (overall 18,354). Elesh Norn's opponents half:
+SuppressTriggers gained `sources` (whose abilities stop). Tokens "with prowess/training/
+exalted" (triggered keywords compiled via quoted_abilities); "for each spell you've cast this
+turn"; Value::ManaSpentOn(selector) for "the amount of mana spent to cast that spell" in cast
+triggers; "commander creatures/spells/permanents" adjective (IsCommander; "a commander" stays
+the noun); "N or more Plains" (Plains is its own plural); "that player" in an enters trigger
+on something an opponent controls = its controller (Suture Priest); tokens "that are
+attacking" (untapped); "<it> becomes a <subtype> in addition to its other types [and gains …]
+[until end of turn]"; words::normalise replaces an " of the " short name ("Loran") only before
+self-reference verbs ("Loran enters", "Gimli deals", …) — "Knight of the New Coalition"'s
+"Knight creature token" is left alone. A/B: no card lost (after keeping "a commander" a noun).
+
+2026-10-15 Claude — round 8 COMPLETE (cEDH 893; EDH 1,480; overall 18,406). Engine:
+Restriction::DamageModifier {sources, recipients, noncombat_only, factor, plus} applied at the
+start of prevention::prevent (so spells, abilities and combat alike; doubling before adding,
+the damaged player's order): Fiery Emancipation, City on Fire, Twinflame Tyrant, Solphim,
+Torbran, Angrath's Marauders … Grammar: "an opponent/a player loses|gains life" trigger heads
+(Exquisite Blood); "each other player" = opponents (Grave Pact); "that player" in an
+opponent-creature dies trigger (Massacre Wurm); "except for lands and tokens" (Elspeth Tirel);
+"that aren't of the chosen type" (Kindred Judgment); "that entered this turn"; "destroyed this
+way" kept after "They can't be regenerated" (Decree of Pain). A/B: no card lost. Workspace
+2,513 passed.
+
+2026-10-15 Claude — round 9 COMPLETE (cEDH 894; EDH 1,487; overall 18,422). Engine:
+Restriction::CounterModifier {what, kind, factor, plus} via resolve::boosted_counters at
+AddCounters / AddCounterKinds / EntersWithCounters / Proliferate (Hardened Scales, Branching
+Evolution, Doubling Season's counter half, Ozolith, Winding Constrictor …; adding before
+doubling). DamageModifier gained any_controller (Dictate of the Twin Gods) and "a creature you
+control" / "another red source" sources (Gratuitous Violence, Jaya). Not covered: a planeswalker
+entering with loyalty under Doubling Season, riot's counter. A/B: no card lost.
+
+2026-10-15 Claude — round 10 COMPLETE (cEDH 896; EDH 1,497; overall 18,453). ExtraTrigger's
+entering_only became `entering: Option<ObjectFilter>` (what entered — Ancient Greenwarden's
+"a land entering"); TokenMultiplier gained any_controller (Primal Vigor). Grammar: count_of
+accepts "<noun>s equal to <value>" (Altar of Dementia's mill); "<subject> can't … and has …"
+statics split (Whispersilk Cloak); "you <imperative> …" fallback at the end of clause()
+(Sword of Feast and Famine's "and you untap all lands you control"); "{T}: Add X mana of any one
+color, where X is …" mana abilities (Kami of Whispered Hopes, Sanctum Weaver). A/B: no card
+lost. Workspace 2,525 passed.
+
+2026-10-15 Claude — round 11 COMPLETE (cEDH 897; EDH 1,503; overall 18,471). Grammar: Decimate's
+"target A, target B, target C, and target D" (destroy collects a list of single targets);
+"{u}, {b}, and/or {r}" combination colours (Relic of Sauron); "<number> times X" in amount
+(Debt to the Deathless); a returned group is "they" (Wake the Past); "deals … damage to them" =
+that_player in a trigger (Razorkin Needlehead); statics ending "during your turn"; "has <kw>
+and can't …" split (My Precious); triggered keywords granted by statics/effects ("has
+prowess", "gains exalted"). A/B: no card lost. Workspace 2,530 passed.
+
+2026-10-15 Claude — round 12 COMPLETE (cEDH 903; EDH 1,506; overall 18,630 — +145 from one
+change). words::strip_ability_word now strips any short flavor word before " — " (CR 207.2c:
+no rules meaning) besides its list — but not when a cost follows ("Boast — {1}{R}: …"), not saga
+numerals (case-insensitive "I, II —"), not "max speed"/"boast"/"exhaust"/"forecast"/"level
+up"/"choose one|two". Reviewed every newly accepted prefix (Repartee, Team …, FF/40K/Fallout
+flavor names, saga chapters' inner names): all flavor. Also: "life total becomes N" (gain or
+lose the difference, CR 119.5); "sacrifices two creatures of their choice". A/B: no card lost.
+Workspace 2,533 passed.
+
+2026-10-15 Claude — round 13 COMPLETE (cEDH 904; overall 18,634). Grafdigger's Cage: cant_cast
+"spells from graveyards or libraries" (InZone, checked where the card is) and
+Restriction::CantEnterFrom {what, zones} checked in Effect::MoveZone before moving onto the
+battlefield. Restriction::EntersUntapped {what} via resolve::enters_untapped — dropped
+EnteredTapped in `entered` and at the three MoveZone/put-onto-battlefield sites ("Lands you
+control enter untapped", Spelunking's second line, Horizon Explorer). A/B: no card lost.
+Workspace 2,536 passed.
+
+2026-10-16 Claude — round 14 COMPLETE (cEDH 909; EDH 1,511; overall 18,642). Restriction::
+ExtraTokens {only, token, per_token}: "those tokens plus that many <token>s / an additional
+<token> are created instead" and "instead create those tokens plus …" (Chatterfang, Xorn,
+Grim Hireling, Peregrin Took, Stridehangar). Applied in the CreateToken loop
+(resolve::extra_tokens); CreateTokenCopy does not apply it yet. Earlier this round also
+DamageModifier, CounterModifier, SuppressTriggers, ExtraTrigger, TokenMultiplier. Harness
+SUBTYPES gained "Squirrel". A/B: no card lost. Workspace 2,540 passed.
+
+2026-10-16 Claude — round 15 COMPLETE (overall 18,669, +27). Condition::WhenTriggered(cond):
+"whenever ~ attacks while <cond>, …" checked only as it triggers, not on resolution (unlike an
+intervening if; engine skips the resolution If for it) — Ferocious/Delirium attack triggers,
+Ruby, Kirk, Moon-Boy, "When you cast this spell while …". Chosen graveyard returns "return a
+<card> from your graveyard to the battlefield [tapped]" (Tyvar, Teval, Port of Karfell).
+Engine: an announced X is written to the stack object's cast context as soon as it is chosen,
+and targeting's ctx reads it, so target filters/counts naming X see it (CR 601.2b-c; was 0).
+Tried "X target lands" (Magus of the Candelabra) — parked: one slot of several objects
+doesn't fit Selector::Target{index} (one object per index). A/B: no card lost. Workspace
+2,542 passed.
+
+2026-10-16 Claude — round 16 COMPLETE (cEDH 915; EDH 1,520; overall 18,709, +40). Player
+comparisons (conditions::player_comparison): "an opponent controls more lands/creatures than
+you", "that player controls more … than you", "you control fewer … than an opponent", "an
+opponent has more life / more cards in hand than you" — new Value::GreatestControlledCount and
+Value::GreatestLifeTotal (Land Tax, Knight of the White Orchid, Archaeomancer's Map, Linvala,
+Pulse cycle, Beza). "if it's a/an <noun>" checks what "it" names (conditions::it_is_a, via
+AnyMatches): Blacksmith's Skill, Electrostatic Bolt, Emiel. "Whenever you create one or more
+<kind> tokens / a <kind> token" = tokens entering under your control (CR 111.2). Plain counter
+kinds appended (story, plan, flame, judgment, blaze, …; NOT hone — its rule is only in
+reminder text). A/B: no card lost. Workspace 2,546 passed.
+
+2026-10-16 Claude — round 17 COMPLETE (cEDH 918; EDH 1,527; overall 18,752, +34).
+"N mana in any combination of colors" mana abilities (Combination over all five; the planner
+already splits per unit; sources that cost mana are still activated by hand, as plain filters
+are). Restriction::MaximumHandSize {who, size: HandSize::{Unlimited, Plus, Equals}} replaces
+NoMaximumHandSize; engine.rs maximum_hand_size() (set, then ±, "no maximum" wins) feeds
+cleanup. Statics: "players/each opponent … no maximum hand size", "… is increased/reduced by
+N", "… is equal to <value>"; spells: "… for the rest of the game / until your next turn"
+(clauses::maximum_hand_size_for). Own-cast permissions: "you may cast ~ from your graveyard
+[by paying {M} rather than … | by <costs> in addition to …]" as CastFrom{exile:false}; "from
+exile" / "from your graveyard or from exile" (Squee) — engine offers owned exiled cards with
+CastFrom{Exile}. Workspace 2,576 passed.
+
+2026-10-16 Claude — round 18 COMPLETE (cEDH 932; EDH 1,531; overall 18,782, +30). Reveal
+lands: ReplacementKind::EntersTappedUnlessReveals(filter) — "as ~ enters, you may reveal a
+Mountain or Plains card from your hand. if you don't, ~ enters tapped" (snarls, Lorwyn tribal
+lands, Choked Estuary); asked as ChooseObjects (default reveals one); engine.rs entering_choice
+now accepts Answer::Objects for a ChooseObjects question. Restriction::NextSpell {filter,
+grant: NextSpellGrant::{CantBeCountered, Flash, CostsLess(n)}} from "the next <kind> spell you
+cast this turn …" (clauses::next_spell); cost::next_spell_effects feeds flash_permitted and
+modify; used up at cast (ContinuousEffectEnded) just before SpellCast. Selector::
+DifferentNames(ChosenBy) for "search … for up to N <cards> with different names" (one pick at
+a time among unused names, resolve::objects_asking): Shared Summons, Saheeli −7. Parked:
+Blood Moon / "nonbasic lands are Mountains" — basic-land mana is compiled from printed
+subtypes, so land-type setting needs a layer-4 + intrinsic-mana feature first. A/B vs round
+17 listing: no card lost. Workspace 2,596 passed.
+
+2026-10-16 Claude — round 19 COMPLETE (cEDH 937; EDH 1,535; overall 18,799, +17). Land types:
+Modification::SetLandTypes (layer 4, CR 305.7) — "nonbasic lands are Mountains" compiles to
+SetLandTypes + LoseAllAbilities + GrantAbility({T}: Add {R}); "each land is a Forest in
+addition to its other land types" to AddSubtypes + the grant (Blood Moon, Magus of the Moon,
+Urborg, Yavimaya, Harbinger, Blanket of Night). resolve::entered / enter_question now skip
+printed abilities the permanent has lost (a tapland under Blood Moon enters untapped, CR
+614.12). nouns: adjectives_and_head() split out of noun_with_conjunction so "noncreature
+artifact or noncreature enchantment", "artifact or tapped creature" work (Haywire Mite, Purge,
+Radiant Strike, Consign to Memory). walk::Visitor gained a `selector` callback (no-op added at
+every literal, incl. detect.rs/resolve.rs). CORRECTNESS FIX: "each player draws cards equal to
+the number of cards in their hand", Price of Progress, Typhoon etc. used to evaluate the amount
+once over ALL players; clauses::equal_to now marks "that player/their" for a group and wraps a
+ForEach over the group (It = that player); "your opponents control" still counts all. Group
+half-amounts ("each player loses half their life, rounded up") use the same ForEach. A/B: no
+card lost. Workspace 2,617 passed.
+
+2026-10-16 Claude — round 20 COMPLETE (cEDH 941; EDH 1,538; overall 18,835, +36). Subtypes:
+Cx::subtype prefers a singular reading — Unglued's Elvish Impersonators prints "Elves" as its
+own subtype, so "Elves you control …" meant that type, not Elf (Joraga Treespeaker, Heritage
+Druid, Elvish Warmaster, Lathril; harness SUBTYPES gained "Elves" to cover it). "You may play
+two additional lands on each of your turns" / "… three additional lands this turn": one
+AdditionalLandPlay per land (clauses::additional_lands; Azusa). Land types: "lands you control
+are every basic land type / are Swamps in addition to their other types", "enchanted land is
+every basic land type …" (Dryad of the Ilysian Grove, Prismatic Omen, Nylea's Presence).
+color_addition also sets colors: "target creature becomes blue [until end of turn]" →
+SetColors (Cerulean Wisps, Singe). Repeating modes: "Choose three. You may choose the same mode
+more than once." compiles to one choice among every multiset of the modes, each a Sequence
+with its own target slots (compile::repeating_modal; all Confluences). Limitation: two copies
+of a targeting mode get distinct targets (the engine's slots don't share an object), stricter
+than CR 115.3. A/B vs round 19: no card lost. Workspace 2,635 passed.
+
+2026-10-16 Claude — round 21 COMPLETE (cEDH 945; EDH 1,538; overall 18,889, +54). "X target
+<plural>" / "up to X target …" (nouns.rs, only when the spell or ability has an X): compiled
+as a run of ANY_NUMBER_OF_TARGETS single slots, the i-th with count min(1, max(0, X − i))
+(nouns::x_slot_count) — Selector::Target reads one target position, so one slot of count X
+only reached its first object. ENGINE (engine.rs announcing loop): a slot whose count
+evaluates to 0 is skipped, like an unchosen mode's. "…, where X is …" now substitutes X in
+those slot counts too (clauses::effect). Candelabra of Tawnos, By Force, Mass Manipulation,
+Serra's Liturgy, Rot Hulk, Profane Command, Dregs of Sorrow … (+45). words::normalise rewrites
+"<effect> instead if <cond>." as "if <cond>, <effect> instead." (Galvanic Blast, Unholy Heat,
+Brimstone Volley, +8). cost_static: "each [adj] spell costs {N} more …" and "… except during
+its controller's turn" → Not(ControlledBy(ActivePlayer)) (Defense Grid). A/B vs round 20: no
+card lost. Workspace 2,651 passed (one transient bot_static_threats failure mid-run, from
+the bot session's in-progress edits; passed on rerun).
+
+2026-10-16 Claude — round 22 COMPLETE (cEDH 946; EDH 1,541; overall 18,908, +19). Group
+prevention: clauses::prevent_group_damage — "prevent all [combat] damage that would be dealt
+[this turn] to <group> / by <group> [this turn]" → Continuous Restriction::PreventDamage over
+the group until end of turn; "to you and <group>" adds a PreventDamageShield for you (Safe
+Passage, Endure). Registered before prevent_combat_damage, which used to swallow "… this turn"
+and leave " by …" unparsed. Groups that name a target are refused (re-read later without
+targets). ENGINE: resolve.rs keeps a one-shot PreventDamage over Selector::All dynamic (CR
+611.2c — a creature arriving later is shielded); prevention::source_matches and
+targeting::player_hexproof_from fall back to the effect's stored controller once the spell is
+gone. CORRECTNESS FIX: Un-cards make "You", "Will", "Of", "The", "Control" subtypes; Cx::subtype
+now refuses those words — "You and Humans you control have hexproof" (Sigarda, Heron's Grace)
+and Lazotep Plating had compiled as a "You"-subtype filter. Now: statics split "you[, A,] and B
+have K" per subject (Sigarda, Shalai), and "you and <group> gain hexproof until end of turn"
+→ PlayerHexproof + grant. compile/tests.rs: global_combat_prevention test no longer expects
+"by creatures you control" to be rejected (the group_prevention_… test covers it). A/B vs
+round 21: no card lost. Workspace 2,670 passed.

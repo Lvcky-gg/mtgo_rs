@@ -377,6 +377,15 @@ pub fn state_triggers(state: &GameState, cards: &dyn PrintedCards) -> Vec<Pendin
         let Some(face) = cards.face(obj.card, obj.face) else {
             continue;
         };
+        // Characteristics are only worth computing for a card that has a state trigger:
+        // this runs over every object in the game, libraries included.
+        let has_state_trigger = face.abilities.iter().any(|a| {
+            matches!(&a.kind, AbilityKind::Triggered { trigger, .. }
+                if trigger.timing == TriggerTiming::StateTrigger)
+        });
+        if !has_state_trigger {
+            continue;
+        }
         let granted = crate::layers::compute(state, cards, obj.id).map(|c| c.abilities);
 
         for ability in &face.abilities {
@@ -483,7 +492,17 @@ fn candidate_abilities(
         let Some(face) = cards.face(obj.card, obj.face) else {
             continue;
         };
-        let ch = crate::layers::compute(state, cards, obj.id);
+        // Computed only where it can matter — a card with triggered abilities to filter, or
+        // a permanent that may have been granted some. This runs for every object in the
+        // game on every event, and most of them are library cards with neither.
+        let on_battlefield = obj.zone.zone == Zone::Battlefield;
+        let ch = (on_battlefield
+            || face
+                .abilities
+                .iter()
+                .any(|a| matches!(a.kind, AbilityKind::Triggered { .. })))
+        .then(|| crate::layers::compute(state, cards, obj.id))
+        .flatten();
         let grants_any = ch.as_ref().is_some_and(|c| !c.granted_abilities.is_empty());
         let granted = ch.map(|c| c.abilities);
         for ability in &face.abilities {
@@ -668,6 +687,7 @@ fn build(
         mtg_ir::walk::Visitor {
             filter: &mut |_| {},
             token: &mut |_| {},
+            selector: &mut |_| {},
             value: &mut rewrite,
         }
         .ability(&mut snapshot);
@@ -1651,4 +1671,111 @@ fn disguise_ward() -> mtg_ir::Ability {
         targets: Vec::new(),
         source_text: Some("Ward {2}".into()),
     }
+}
+
+/// How many more times a triggered ability of `source` triggers: one for each "that ability
+/// triggers an additional time" whose description the source matches, as its controller
+/// sees it (CR 603.2d).
+pub fn extra_triggers(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    cause: &Event,
+) -> usize {
+    // What entered the battlefield, if that is the cause: a zone change onto it, or a token.
+    let entered = match cause {
+        Event::ZoneChange { to, new_object, .. } if to.zone == mtg_core::Zone::Battlefield => {
+            Some(*new_object)
+        }
+        Event::Created { object, .. } => Some(*object),
+        _ => None,
+    };
+    use mtg_ir::effect::{Modification, Restriction};
+    let chars = crate::eval::ComputedChars(cards);
+    crate::layers::effects(state, cards)
+        .iter()
+        .filter(|e| {
+            let Modification::Restriction(Restriction::ExtraTrigger { sources, entering }) =
+                &e.modification
+            else {
+                return false;
+            };
+            let Some(controller) = crate::layers::controller(state, e.source) else {
+                return false;
+            };
+            let ctx = crate::eval::Ctx {
+                state,
+                cards,
+                chars: &chars,
+                source: e.source,
+                controller,
+                targets: &[],
+                target_legal: &[],
+                x: 0,
+                bindings: crate::empty_bindings(),
+            };
+            crate::eval::matches(&ctx, sources, source).unwrap_or(false)
+                && entering.as_ref().is_none_or(|what| {
+                    entered.is_some_and(|o| crate::eval::matches(&ctx, what, o).unwrap_or(false))
+                })
+        })
+        .count()
+}
+
+/// Whether "creatures entering don't cause abilities to trigger" (Torpor Orb) or "… entering
+/// or dying …" (Hushbringer) stops this event from triggering anything.
+pub fn suppressed(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    cause: &Event,
+    source: ObjectId,
+) -> bool {
+    use mtg_ir::effect::{Modification, Restriction};
+    let (object, entered, died) = match cause {
+        Event::ZoneChange {
+            new_object,
+            from,
+            to,
+            ..
+        } => (
+            *new_object,
+            to.zone == mtg_core::Zone::Battlefield,
+            from.zone == mtg_core::Zone::Battlefield && to.zone == mtg_core::Zone::Graveyard,
+        ),
+        Event::Created { object, .. } => (*object, true, false),
+        _ => return false,
+    };
+    let chars = crate::eval::ComputedChars(cards);
+    crate::layers::effects(state, cards).iter().any(|e| {
+        let Modification::Restriction(Restriction::SuppressTriggers {
+            what,
+            entering,
+            dying,
+            sources,
+        }) = &e.modification
+        else {
+            return false;
+        };
+        if !((entered && *entering) || (died && *dying)) {
+            return false;
+        }
+        let Some(controller) = crate::layers::controller(state, e.source) else {
+            return false;
+        };
+        let ctx = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        crate::eval::matches(&ctx, what, object).unwrap_or(false)
+            && sources
+                .as_ref()
+                .is_none_or(|f| crate::eval::matches(&ctx, f, source).unwrap_or(false))
+    })
 }

@@ -41,6 +41,7 @@ pub fn prevent(
     if amount == 0 {
         return 0;
     }
+    let amount = amplify(state, cards, source, to, amount, combat);
     // CR 615.12: prevention cannot reduce this damage, but applicable effects
     // still perform their additional actions. Finite damage shields are not spent.
     if state.damage_unpreventable {
@@ -192,7 +193,7 @@ fn static_prevents(
         let by = *dealt_by && crate::layers::applies(state, cards, e, source);
         let to = *dealt_to
             && matches!(to, Target::Object(o) if crate::layers::applies(state, cards, e, o))
-            && source_matches(state, cards, e.source, from, source);
+            && source_matches(state, cards, e, from, source);
         by || to
     })
 }
@@ -202,24 +203,95 @@ fn static_prevents(
 fn source_matches(
     state: &GameState,
     cards: &dyn PrintedCards,
-    ability_source: ObjectId,
+    effect: &crate::state::ContinuousEffect,
     filter: &mtg_ir::ObjectFilter,
     damage_source: ObjectId,
 ) -> bool {
     if matches!(filter, mtg_ir::ObjectFilter::Any) {
         return true;
     }
+    let ability_source = effect.source;
     let chars = crate::eval::ComputedChars(cards);
     let ctx = crate::eval::Ctx {
         state,
         cards,
         chars: &chars,
         source: ability_source,
-        controller: crate::layers::controller(state, ability_source).unwrap_or(state.active_player),
+        // A resolved spell's effect ("… by creatures your opponents control this turn")
+        // remembers who cast it once the spell is gone.
+        controller: crate::layers::controller(state, ability_source)
+            .or(effect.controller)
+            .unwrap_or(state.active_player),
         targets: &[],
         target_legal: &[],
         x: 0,
         bindings: crate::empty_bindings(),
     };
     crate::eval::matches(&ctx, filter, damage_source).unwrap_or(false)
+}
+
+/// "It deals double that damage instead", "… that much damage plus 2 instead": damage a
+/// source would deal, changed by the statics of the player who controls it. Doubling
+/// before adding, the order the damaged player would choose (CR 616.1).
+fn amplify(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    to: Target,
+    amount: u32,
+    combat: bool,
+) -> u32 {
+    use mtg_ir::effect::{Modification, Restriction};
+    let Some(controller) = crate::layers::controller(state, source) else {
+        return amount;
+    };
+    let chars = crate::eval::ComputedChars(cards);
+    let (mut factor, mut plus) = (1u32, 0u32);
+    for e in crate::layers::effects(state, cards).iter() {
+        let Modification::Restriction(Restriction::DamageModifier {
+            sources,
+            recipients,
+            noncombat_only,
+            factor: f,
+            plus: p,
+            any_controller,
+        }) = &e.modification
+        else {
+            continue;
+        };
+        let Some(owner) = crate::layers::controller(state, e.source) else {
+            continue;
+        };
+        if (*noncombat_only && combat) || (!any_controller && owner != controller) {
+            continue;
+        }
+        let hits = match (recipients, to) {
+            (0, _) => true,
+            (1 | 2, Target::Player(p)) => p != owner,
+            (1, Target::Object(o)) => {
+                crate::layers::controller(state, o).is_some_and(|c| c != owner)
+            }
+            _ => false,
+        };
+        if !hits {
+            continue;
+        }
+        let ctx = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller: owner,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        if !crate::eval::matches(&ctx, sources, source).unwrap_or(false) {
+            continue;
+        }
+        factor = factor.saturating_mul(u32::from(*f).max(1));
+        plus = plus.saturating_add(u32::from(*p));
+    }
+    amount.saturating_mul(factor).saturating_add(plus)
 }

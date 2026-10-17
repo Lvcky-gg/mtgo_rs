@@ -30,7 +30,12 @@ pub fn counted_noun<'s>(s: &'s str, cx: &Cx) -> Option<(Noun, &'s str)> {
     noun_with_conjunction(s, cx, true)
 }
 
-fn noun_with_conjunction<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(Noun, &'s str)> {
+/// Adjectives and a head noun: "noncreature artifact", "tapped creature or planeswalker".
+fn adjectives_and_head<'s>(
+    s: &'s str,
+    cx: &Cx,
+    counting: bool,
+) -> Option<(Vec<ObjectFilter>, Zone, bool, &'s str)> {
     let mut parts: Vec<ObjectFilter> = Vec::new();
     let mut rest = s;
 
@@ -81,6 +86,20 @@ fn noun_with_conjunction<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(Nou
         } else if let Some(r) = rest.strip_prefix("multicolored ") {
             parts.push(ObjectFilter::Multicolored);
             rest = r;
+        } else if let Some(r) = rest.strip_prefix("commander ").filter(|r| {
+            // An adjective only before a noun: "a commander you control" is the noun.
+            ["creature", "spell", "permanent"]
+                .iter()
+                .any(|n| r.starts_with(n))
+        }) {
+            // "Commander creatures you control get +2/+2" (Bastion Protector).
+            parts.push(ObjectFilter::IsCommander);
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("monocolored ") {
+            // Exactly one color (CR 105.2a): colored, and not two or more.
+            parts.push(not(ObjectFilter::Colorless));
+            parts.push(not(ObjectFilter::Multicolored));
+            rest = r;
         } else if let Some(r) = rest.strip_prefix("historic ")
             && let Some(saga) = cx.subtype("saga")
         {
@@ -113,7 +132,28 @@ fn noun_with_conjunction<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(Nou
     // The head noun, possibly "X or Y".
     let (head, zone, plural, r) = head(rest, cx, counting)?;
     parts.push(head);
-    rest = r;
+    Some((parts, zone, plural, r))
+}
+
+fn noun_with_conjunction<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(Noun, &'s str)> {
+    let (mut parts, zone, plural, mut rest) = adjectives_and_head(s, cx, counting)?;
+    // "noncreature artifact or noncreature enchantment" (Haywire Mite): alternatives that
+    // each carry their own adjectives; what follows qualifies both.
+    if let Some(r) = rest.strip_prefix(" or ")
+        && let Some((other, other_zone, other_plural, r)) = adjectives_and_head(r, cx, counting)
+        && other_zone == zone
+        && other_plural == plural
+    {
+        let and = |mut p: Vec<ObjectFilter>| {
+            if p.len() == 1 {
+                p.pop().unwrap()
+            } else {
+                ObjectFilter::And(p)
+            }
+        };
+        parts = vec![ObjectFilter::Or(vec![and(parts), and(other)])];
+        rest = r;
+    }
 
     // Qualifiers after the noun.
     loop {
@@ -141,9 +181,41 @@ fn noun_with_conjunction<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(Nou
                 cx.that_player.clone()?,
             )));
             rest = r;
+        } else if let Some(r) = rest.strip_prefix(" except for ")
+            && let Some((excepted, r)) = except_list(r, cx)
+        {
+            // "Destroy all other permanents except for lands and tokens." (Elspeth Tirel)
+            parts.push(not(excepted));
+            rest = r;
+        } else if let Some(r) = rest
+            .strip_prefix(" that aren't legendary")
+            .or_else(|| rest.strip_prefix(" that isn't legendary"))
+        {
+            // "Exile all nonland permanents that aren't legendary." (Urza's Ruinous Blast)
+            parts.push(not(ObjectFilter::HasSupertype(Supertype::Legendary)));
+            rest = r;
+        } else if let Some(r) = rest
+            .strip_prefix(" that aren't enchanted")
+            .or_else(|| rest.strip_prefix(" that isn't enchanted"))
+            && let Some(aura) = cx.subtype("aura")
+        {
+            // "Destroy all creatures that aren't enchanted." (Winds of Rath)
+            parts.push(not(ObjectFilter::HasAttachment(aura)));
+            rest = r;
+        } else if let Some(r) = rest
+            .strip_prefix(" with no counters on them")
+            .or_else(|| rest.strip_prefix(" with no counters on it"))
+        {
+            // "Destroy all creatures with no counters on them." (Damning Verdict)
+            parts.push(not(ObjectFilter::HasAnyCounter));
+            rest = r;
         } else if let Some(r) = rest.strip_prefix(" other than ~") {
             // "target creature other than this creature"
             parts.push(not(ObjectFilter::IsSelf));
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix(" that entered this turn") {
+            // "Destroy all creatures that entered this turn." (Force of Despair)
+            parts.push(ObjectFilter::EnteredThisTurn);
             rest = r;
         } else if let Some(r) = rest.strip_prefix(" that attacked this turn") {
             parts.push(ObjectFilter::AttackedThisTurn);
@@ -175,8 +247,24 @@ fn noun_with_conjunction<'s>(s: &'s str, cx: &Cx, counting: bool) -> Option<(Nou
         } else if let Some(r) = rest.strip_prefix(" of the chosen type") {
             parts.push(ObjectFilter::HasChosenSubtype);
             rest = r;
+        } else if let Some(r) = rest
+            .strip_prefix(" that aren't of the chosen type")
+            .or_else(|| rest.strip_prefix(" not of the chosen type"))
+        {
+            // "Destroy all creatures that aren't of the chosen type." (Kindred Judgment)
+            parts.push(not(ObjectFilter::HasChosenSubtype));
+            rest = r;
         } else if let Some(r) = rest.strip_prefix(" of the chosen color") {
             parts.push(ObjectFilter::HasChosenColor);
+            rest = r;
+        } else if let Some(r) = rest
+            .strip_prefix(" without a ")
+            .or_else(|| rest.strip_prefix(" without an "))
+            && let Some((kind, r)) = words::counter(r)
+            && let Some(r) = r.strip_prefix(" on it")
+        {
+            // "each creature without a +1/+1 counter on it" (Wave Goodbye)
+            parts.push(not(ObjectFilter::HasCounter(kind)));
             rest = r;
         } else if let Some(r) = rest.strip_prefix(" without ")
             && let Some((k, r)) = words::keyword_prefix(r)
@@ -550,8 +638,49 @@ fn card_zone<'s>(
     Some((filter, zone, plural, rest))
 }
 
+/// "lands and tokens", "artifacts, creatures, and enchantments": what "except for" spares.
+fn except_list<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
+    let mut kinds = Vec::new();
+    let mut r = s;
+    loop {
+        if let Some(after) = r.strip_prefix("tokens") {
+            kinds.push(ObjectFilter::Token);
+            r = after;
+        } else {
+            let (w, after) = words::first_word(r);
+            let (n, left) = noun(w, cx)?;
+            if !left.is_empty() || !n.plural {
+                return None;
+            }
+            kinds.push(n.filter);
+            r = after;
+        }
+        match r
+            .strip_prefix(", and ")
+            .or_else(|| r.strip_prefix(" and "))
+            .or_else(|| r.strip_prefix(", "))
+        {
+            Some(after) => r = after,
+            None => break,
+        }
+    }
+    (!kinds.is_empty()).then_some((ObjectFilter::Or(kinds), r))
+}
+
 /// "with flying", "with power 2 or less", "with mana value 3 or greater".
 pub fn with_clause<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
+    // "with power or toughness 1 or less" (Warping Wail): either one.
+    if let Some(tail) = s.strip_prefix("power or toughness ") {
+        let power = format!("power {tail}");
+        let toughness = format!("toughness {tail}");
+        if let Some((p, p_rest)) = with_clause(&power, cx)
+            && let Some((t, t_rest)) = with_clause(&toughness, cx)
+            && p_rest == t_rest
+        {
+            let rest = &tail[tail.len() - p_rest.len()..];
+            return Some((ObjectFilter::Or(vec![p, t]), rest));
+        }
+    }
     if let Some(rest) = s.strip_prefix("a basic land type") {
         let types = ["plains", "island", "swamp", "mountain", "forest"]
             .into_iter()
@@ -676,7 +805,14 @@ pub fn with_clause<'s>(s: &'s str, cx: &Cx) -> Option<(ObjectFilter, &'s str)> {
                 rest,
             ));
         }
-        let (v, r) = super::clauses::amount(r, cx)?;
+        // "with mana value equal to 1 plus the sacrificed creature's mana value" (Neoform):
+        // exactly that value.
+        let (v, r) = match r.strip_prefix("equal to ") {
+            Some(after) if !after.starts_with("its ") && !after.starts_with("their ") => {
+                super::clauses::value_phrase(after, cx)?
+            }
+            _ => super::clauses::amount(r, cx)?,
+        };
         let below = match &v {
             Value::Fixed(n) => Value::Fixed(n - 1),
             _ => Value::Sum(vec![v.clone(), Value::Fixed(-1)]),
@@ -924,7 +1060,13 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
     // object chosen twice (CR 115.3).
     // "each of up to two other target creatures" (support) says the same thing.
     let listed = s.strip_prefix("each of ").unwrap_or(s);
-    for (lead, up_to) in [("up to ", true), ("", false)] {
+    // "one or two target creatures" (Untimely Malfunction): the first required, the second
+    // not.
+    for (lead, up_to, first_required) in [
+        ("up to ", true, false),
+        ("", false, false),
+        ("one or ", true, true),
+    ] {
         if let Some(r) = listed.strip_prefix(lead)
             && let Some((n, r)) = words::number(r)
             && (2..=4).contains(&n)
@@ -961,8 +1103,12 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
                 noun.filter.clone()
             };
             let mut first: Option<Selector> = None;
+            if first_required && n != 2 {
+                return None;
+            }
             let slots = (0..n)
-                .map(|_| {
+                .map(|i| {
+                    let up_to = up_to && !(first_required && i == 0);
                     let filter = match (&first, single) {
                         (Some(first), true) => ObjectFilter::And(vec![
                             filter.clone(),
@@ -990,6 +1136,49 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
             cx.it = Some(sel.clone());
             return Some((sel, true, rest));
         }
+    }
+
+    // "untap X target lands", "destroy up to X target artifacts": one slot that picks X
+    // objects, X being announced before targets (CR 601.2b-c). Only when the spell or
+    // ability has an X to announce; "where X is …" is read elsewhere.
+    if cx.x
+        && let Some((up_to, other, r)) = [
+            ("x target ", false, false),
+            ("x other target ", false, true),
+            ("up to x target ", true, false),
+            ("up to x other target ", true, true),
+        ]
+        .into_iter()
+        .find_map(|(lead, up_to, other)| listed.strip_prefix(lead).map(|r| (up_to, other, r)))
+    {
+        let (noun, rest) = noun(r, cx)?;
+        if !noun.plural {
+            return None;
+        }
+        let filter = if other {
+            ObjectFilter::And(vec![noun.filter.clone(), not(ObjectFilter::IsSelf)])
+        } else {
+            noun.filter.clone()
+        };
+        // A run of single slots, the i-th there only when X > i, as each slot is one
+        // target position.
+        let slots = (0..ANY_NUMBER_OF_TARGETS as i32)
+            .map(|i| {
+                cx.target(TargetSpec {
+                    zone: noun.zone,
+                    filter: filter.clone(),
+                    allows_players: false,
+                    players: None,
+                    mode: None,
+                    count: x_slot_count(Value::X, i),
+                    up_to,
+                    distinct_from_other_targets: true,
+                })
+            })
+            .collect();
+        let sel = Selector::Union(slots);
+        cx.it = Some(sel.clone());
+        return Some((sel, true, rest));
     }
 
     // "any number of target creatures": a run of optional slots, no object twice
@@ -1091,7 +1280,9 @@ fn mass<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, bool, &'s str)> {
     if !quantified && !n.plural {
         return None;
     }
-    if n.zone != Zone::Battlefield {
+    // "all creature cards from your graveyard" (Raise the Past) is a group too.
+    let graveyard = quantified && n.zone == Zone::Graveyard;
+    if n.zone != Zone::Battlefield && !graveyard {
         return None;
     }
     let filter = if other && cx.made_tokens {
@@ -1108,7 +1299,7 @@ fn mass<'s>(s: &'s str, cx: &Cx) -> Option<(Selector, bool, &'s str)> {
     };
     Some((
         Selector::All {
-            zone: Zone::Battlefield,
+            zone: n.zone,
             filter,
         },
         true,
@@ -1124,6 +1315,10 @@ pub fn player<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
         .filter(|r| !r.starts_with(['r', '\'']))
     {
         return Some((Selector::You, true, r));
+    }
+    // "each other player" (Grave Pact): everyone but you — your opponents.
+    if let Some(r) = s.strip_prefix("each other player") {
+        return Some((Selector::Opponents, false, r));
     }
     if let Some(r) = s.strip_prefix("each player") {
         return Some((Selector::EachPlayer, false, r));
@@ -1236,6 +1431,16 @@ pub fn player_target(players: Option<Selector>) -> TargetSpec {
 
 /// What damage can be dealt to: an object, a player, or "any target".
 pub fn recipient<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, &'s str)> {
+    // "this creature deals 1 damage to them" (Razorkin Needlehead): the player the trigger
+    // names, when "them" isn't something just made or moved.
+    if let Some(r) = s
+        .strip_prefix("them")
+        .filter(|r| !r.starts_with(|c: char| c.is_alphanumeric()))
+        && let Some(player) = cx.that_player.clone()
+        && cx.it != Some(Selector::Bound(mtg_ir::selector::Binding::It))
+    {
+        return Some((player, r));
+    }
     let creature_or_walker = ObjectFilter::Or(vec![
         ObjectFilter::HasType(CardType::Creature),
         ObjectFilter::HasType(CardType::Planeswalker),
@@ -1346,6 +1551,17 @@ pub fn recipient<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, &'s str)> {
     }
     let (o, _, r) = object(s, cx)?;
     Some((o, r))
+}
+
+/// The size of the `i`-th slot of "X target …": one while `x` exceeds `i`, else none.
+pub fn x_slot_count(x: Value, i: i32) -> Value {
+    Value::Min(
+        Box::new(Value::ONE),
+        Box::new(Value::Max(
+            Box::new(Value::Fixed(0)),
+            Box::new(Value::Sum(vec![x, Value::Fixed(-i)])),
+        )),
+    )
 }
 
 /// How many slots "any number of target …" is compiled to.

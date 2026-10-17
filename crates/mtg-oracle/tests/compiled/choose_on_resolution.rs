@@ -178,3 +178,54 @@ fn an_excluded_type_is_not_offered() {
     let elf = mtg_ir::PrintedCards::subtype_named(&game.table, "Elf").unwrap();
     assert!(ch.subtypes.contains(&elf));
 }
+
+#[test]
+fn kindred_judgment_spares_only_the_chosen_type() {
+    let mut table = Table::default();
+    let spell = table.card(
+        "{0}",
+        "Sorcery",
+        None,
+        "Choose a creature type. Destroy all creatures that aren't of the chosen type.",
+    );
+    let elf = table.card("{G}", "Creature — Elf", Some((1, 1)), "");
+    let bear = table.bear();
+    let mut game = Game::new(table);
+    let spell = game.put(spell, P0, Zone::Hand);
+    let elf = game.put(elf, P1, Zone::Battlefield);
+    let bear = game.put(bear, P1, Zone::Battlefield);
+    game.main();
+    let elf_type = type_option(&game, "Elf");
+    game.act(
+        mtg_engine::actions::Action::Cast { object: spell },
+        &[],
+        &[Answer::Modes(vec![elf_type])],
+    );
+    assert!(game.engine.state.objects.contains_key(&elf));
+    assert!(!game.engine.state.objects.contains_key(&bear));
+}
+
+#[test]
+fn elspeth_tirels_wipe_spares_lands_and_tokens() {
+    let mut table = Table::default();
+    let spell = table.card(
+        "{0}",
+        "Sorcery",
+        None,
+        "Destroy all permanents except for lands and tokens.",
+    );
+    let bear = table.bear();
+    let mut game = Game::new(table);
+    game.lands(1);
+    let b = game.put(bear, P1, Zone::Battlefield);
+    let spell = game.put(spell, P0, Zone::Hand);
+    game.main();
+    let before = game.engine.state.battlefield().len();
+    game.cast(spell, &[]);
+    assert!(!game.engine.state.objects.contains_key(&b));
+    assert_eq!(
+        game.engine.state.battlefield().len(),
+        before - 1,
+        "the land stays"
+    );
+}

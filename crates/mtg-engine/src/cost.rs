@@ -13,7 +13,7 @@
 //! exploitable.
 
 use mtg_core::{CardId, ManaCost, ManaSymbol, ObjectId, PlayerId};
-use mtg_ir::effect::{Modification, Restriction};
+use mtg_ir::effect::{Modification, NextSpellGrant, Restriction};
 
 use crate::{
     eval::{self, ComputedChars, Ctx},
@@ -215,6 +215,12 @@ pub fn modify(
             d if d > 0 => increase += i64::from(d),
             d if d < 0 => reduction += i64::from(-d),
             _ => {}
+        }
+    }
+    // "The next spell you cast this turn costs {1} less to cast."
+    for (_, grant) in next_spell_effects(state, cards, object, controller) {
+        if let NextSpellGrant::CostsLess(n) = grant {
+            reduction += i64::from(n);
         }
     }
 
@@ -512,6 +518,59 @@ pub fn sorcery_speed_only(state: &GameState, cards: &dyn PrintedCards, player: P
     })
 }
 
+/// Whether a "the next … spell you cast this turn" effect of this player's, not yet used up,
+/// applies to `object` with a grant `wanted` accepts.
+pub(crate) fn next_spell(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    controller: PlayerId,
+    wanted: impl Fn(&NextSpellGrant) -> bool,
+) -> bool {
+    !next_spell_effects(state, cards, object, controller)
+        .into_iter()
+        .filter(|(_, grant)| wanted(grant))
+        .collect::<Vec<_>>()
+        .is_empty()
+}
+
+/// The "next spell" effects of this player's that `object` would use up, with their grants.
+pub(crate) fn next_spell_effects(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    controller: PlayerId,
+) -> Vec<(ObjectId, NextSpellGrant)> {
+    let chars = ComputedChars(cards);
+    state
+        .continuous
+        .iter()
+        .filter_map(|e| match &e.modification {
+            Modification::Restriction(Restriction::NextSpell { filter, grant })
+                if e.controller
+                    .or_else(|| crate::layers::controller(state, e.source))
+                    == Some(controller) =>
+            {
+                let ctx = Ctx {
+                    state,
+                    cards,
+                    chars: &chars,
+                    source: e.source,
+                    controller,
+                    targets: &[],
+                    target_legal: &[],
+                    x: 0,
+                    bindings: crate::empty_bindings(),
+                };
+                eval::matches(&ctx, filter, object)
+                    .unwrap_or(false)
+                    .then(|| (e.id, grant.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// "You may cast creature spells as though they had flash" from a permanent its caster
 /// controls, or the card's own "you may cast this spell as though it had flash if …".
 pub(crate) fn flash_permitted(
@@ -540,7 +599,11 @@ pub(crate) fn flash_permitted(
                 == Some(controller)
                 && eval::matches(&ctx_for(e.source), f, object).unwrap_or(false))
     });
-    if granted {
+    if granted
+        || next_spell(state, cards, object, controller, |g| {
+            *g == NextSpellGrant::Flash
+        })
+    {
         return true;
     }
     let Some(obj) = state.objects.get(&object) else {
@@ -650,10 +713,70 @@ pub fn ability_cost(
                 let reduction = eval::value(&ctx, amount).ok()?.max(0);
                 cost.mana = apply_delta(cost.mana, 0, i64::from(reduction));
             }
+            cost.mana = ability_cost_modifiers(state, cards, source, cost.mana);
             Some(cost)
         }
         _ => None,
     }
+}
+
+/// Statics changing what a permanent's activated abilities cost: "Activated abilities of
+/// creatures you control cost {2} less to activate. This effect can't reduce the mana in
+/// that cost to less than one mana." (Training Grounds). Only the generic part changes.
+fn ability_cost_modifiers(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+    base: ManaCost,
+) -> ManaCost {
+    let chars = ComputedChars(cards);
+    let (mut increase, mut reduction, mut min_one) = (0i64, 0i64, false);
+    for effect in &crate::layers::effects(state, cards) {
+        let Modification::Restriction(Restriction::AbilityCostModifier {
+            what,
+            delta,
+            min_one: floor,
+        }) = &effect.modification
+        else {
+            continue;
+        };
+        let Some(controller) = state.objects.get(&effect.source).map(|o| o.controller) else {
+            continue;
+        };
+        let ctx = Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: effect.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        if !eval::matches(&ctx, what, source).unwrap_or(false) {
+            continue;
+        }
+        match eval::value(&ctx, delta).unwrap_or(0) {
+            d if d > 0 => increase += i64::from(d),
+            d if d < 0 => {
+                reduction += i64::from(-d);
+                min_one |= *floor;
+            }
+            _ => {}
+        }
+    }
+    if increase == 0 && reduction == 0 {
+        return base;
+    }
+    let total = i64::from(base.mana_value()) + increase;
+    // A cost with no mana in it stays free; one with mana keeps at least one.
+    let reduction = if min_one {
+        reduction.min((total - 1).max(0))
+    } else {
+        reduction
+    };
+    apply_delta(base, increase, reduction)
 }
 
 /// CR 302.6: a creature's ability with {T} or {Q} in its cost can't be activated unless
@@ -687,6 +810,39 @@ pub fn tap_symbol_allowed(state: &GameState, cards: &dyn PrintedCards, source: O
     };
     ctx.has_keyword(source, mtg_ir::ability::Keyword::Haste)
         .unwrap_or(false)
+        || activates_as_though_haste(state, cards, source)
+}
+
+/// "You may activate abilities of creatures you control as though those creatures had
+/// haste": whether such an effect covers this creature.
+fn activates_as_though_haste(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    source: ObjectId,
+) -> bool {
+    let chars = ComputedChars(cards);
+    crate::layers::effects(state, cards).iter().any(|e| {
+        let Modification::Restriction(Restriction::ActivateAsThoughHaste { what }) =
+            &e.modification
+        else {
+            return false;
+        };
+        let Some(controller) = crate::layers::controller(state, e.source) else {
+            return false;
+        };
+        let ctx = Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        eval::matches(&ctx, what, source).unwrap_or(false)
+    })
 }
 
 /// Whether the non-mana part of an activated ability's cost can be paid right now.
@@ -753,6 +909,10 @@ pub fn additional_payable(
             what: Selector::SelfSource,
             amount: Value::X,
             ..
+        } => true,
+        // "Sacrifice X Squirrels": X can be 0.
+        A::Sacrifice {
+            count: Value::X, ..
         } => true,
         A::Loyalty { delta } => {
             *delta >= 0

@@ -413,7 +413,10 @@ fn resolve_inner(
         }
 
         Effect::Let { slot, what, body } => {
-            let found = if matches!(what, Selector::ChosenBy { .. }) {
+            let found = if matches!(
+                what,
+                Selector::ChosenBy { .. } | Selector::DifferentNames(_)
+            ) {
                 objects_asking(state, cards, rc, what)?
                     .into_iter()
                     .map(Target::Object)
@@ -445,8 +448,12 @@ fn resolve_inner(
         }
         Effect::RepeatMay { body } => {
             loop {
+                let before = log.len();
                 resolve(state, cards, log, body, rc)?;
-                if !ask_confirm(rc, rc.controller, "repeat this process?")? {
+                // Once a repeat does nothing — Ad Nauseam with the library empty — repeating
+                // again can't either, and isn't offered: an unattended player would accept
+                // forever, each answer replaying every repeat before it.
+                if log.len() == before || !ask_confirm(rc, rc.controller, "repeat this process?")? {
                     break;
                 }
             }
@@ -1029,6 +1036,37 @@ fn resolve_inner(
                                 .filter(|c| colors.contains(c))
                                 .take(n)
                                 .collect();
+                            // A spell (Burnt Offering) has no planner: its controller splits
+                            // the mana between the two colors as it resolves.
+                            // Only on the stack: a mana ability can't ask (it would do nothing).
+                            if made.is_empty()
+                                && rc.mana_choice.is_none()
+                                && state
+                                    .objects
+                                    .get(&rc.source)
+                                    .is_some_and(|o| o.zone.zone == mtg_core::Zone::Stack)
+                                && n > 0
+                                && let [first, second] = colors[..]
+                            {
+                                let picked = match rc.need(
+                                    p,
+                                    ChoiceKind::ChooseX {
+                                        min: 0,
+                                        max: n as u32,
+                                    },
+                                    &format!(
+                                        "how much of the {n} mana is {}? the rest is {}",
+                                        color_word(first),
+                                        color_word(second)
+                                    ),
+                                )? {
+                                    Answer::Number(k) => (k as usize).min(n),
+                                    _ => n,
+                                };
+                                made = std::iter::repeat_n(first, picked)
+                                    .chain(std::iter::repeat_n(second, n - picked))
+                                    .collect();
+                            }
                             if let Some(fill) = rc
                                 .mana_choice
                                 .filter(|c| colors.contains(c))
@@ -1270,6 +1308,7 @@ fn resolve_inner(
             for (kind, amount) in counters {
                 amounts.push((*kind, value_asking(state, cards, rc, amount)?));
             }
+            let view: &GameState = state;
             let events = ids
                 .into_iter()
                 .flat_map(|object| {
@@ -1279,7 +1318,7 @@ fn resolve_inner(
                         .map(move |(kind, delta)| Event::CountersChanged {
                             object,
                             kind: *kind,
-                            delta: *delta,
+                            delta: boosted_counters(view, cards, object, *kind, *delta),
                         })
                 })
                 .collect::<Vec<_>>();
@@ -1293,13 +1332,14 @@ fn resolve_inner(
             let n = value_asking(state, cards, rc, amount)?;
             for id in ids {
                 if n != 0 && state.objects.get(&id).is_some_and(|o| !o.phased_out) {
+                    let delta = boosted_counters(state, cards, id, *kind, n);
                     apply::apply(
                         state,
                         cause,
                         Event::CountersChanged {
                             object: id,
                             kind: *kind,
-                            delta: n,
+                            delta,
                         },
                         log,
                     );
@@ -1433,6 +1473,7 @@ fn resolve_inner(
             mtg_ir::walk::Visitor {
                 filter: &mut |_| {},
                 token: &mut |_| {},
+                selector: &mut |_| {},
                 value: &mut |value| {
                     if failure.is_none() {
                         match with_ctx(state, cards, rc, |ctx| eval::value(ctx, value)) {
@@ -1534,11 +1575,15 @@ fn resolve_inner(
             let mut ids = objects_asking(state, cards, rc, what)?;
             // "Search your library for …" (CR 701.19): searched, found or not — unless
             // Ashiok forbids it; under Opposition Agent, what is found is exiled instead.
+            let searched = match what {
+                Selector::DifferentNames(inner) => inner,
+                other => other,
+            };
             if let Selector::ChosenBy {
                 chooser,
                 zone: Zone::Library,
                 ..
-            } = what
+            } = searched
                 && let Some(player) = with_ctx(state, cards, rc, |ctx| eval::players(ctx, chooser))?
                     .first()
                     .copied()
@@ -1620,6 +1665,10 @@ fn resolve_inner(
                     }
                     _ => None,
                 };
+                // Grafdigger's Cage: a creature card in a graveyard or library can't enter.
+                if *to == Zone::Battlefield && cant_enter(state, cards, id) {
+                    continue;
+                }
                 let Some(new_id) = move_to_at(state, log, id, *to, index, cause) else {
                     continue;
                 };
@@ -1650,7 +1699,14 @@ fn resolve_inner(
                     let pay = enter_choice(state, cards, rc, new_id)?;
                     entered(state, cards, log, new_id, cause, pay);
                     if *tapped {
-                        apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
+                        if !enters_untapped(state, cards, new_id) {
+                            apply::apply(
+                                state,
+                                cause,
+                                Event::EnteredTapped { object: new_id },
+                                log,
+                            );
+                        }
                     }
                 }
                 moved.push(Target::Object(new_id));
@@ -1807,6 +1863,18 @@ fn resolve_inner(
                             ..
                         },
                     ) => AffectedSet::Dynamic(what.clone()),
+                    // "Prevent all damage that would be dealt to creatures this turn" also
+                    // shields a creature that arrives later (CR 611.2c).
+                    (_, Selector::All { .. })
+                        if matches!(
+                            modification,
+                            mtg_ir::effect::Modification::Restriction(
+                                mtg_ir::effect::Restriction::PreventDamage { .. }
+                            )
+                        ) =>
+                    {
+                        AffectedSet::Dynamic(what.clone())
+                    }
                     _ => AffectedSet::Fixed(affected),
                 },
                 modification: modification.clone(),
@@ -2191,7 +2259,14 @@ fn resolve_inner(
                     let pay = enter_choice(state, cards, rc, new_id)?;
                     entered(state, cards, log, new_id, cause, pay);
                     if *tapped {
-                        apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
+                        if !enters_untapped(state, cards, new_id) {
+                            apply::apply(
+                                state,
+                                cause,
+                                Event::EnteredTapped { object: new_id },
+                                log,
+                            );
+                        }
                     }
                 }
             }
@@ -2306,7 +2381,8 @@ fn resolve_inner(
             };
             let mut made = Vec::new();
             for p in players {
-                for _ in 0..n {
+                // Anointed Procession, Ojer Taq: tokens this player would get, multiplied.
+                for _ in 0..n.saturating_mul(token_multiplier(state, cards, p, card)) {
                     let object = state.new_object_id();
                     apply::apply(
                         state,
@@ -2332,6 +2408,32 @@ fn resolve_inner(
                     }
                     entered(state, cards, log, object, cause, None);
                     made.push(Target::Object(object));
+                }
+                // Chatterfang, Xorn: more tokens alongside these. They are part of the same
+                // event, so they don't bring more of their own.
+                let mine: Vec<ObjectId> = made
+                    .iter()
+                    .filter_map(|t| match t {
+                        Target::Object(o) => Some(*o),
+                        _ => None,
+                    })
+                    .filter(|o| state.objects.get(o).is_some_and(|x| x.owner == p))
+                    .collect();
+                for (extra, k) in extra_tokens(state, cards, p, &mine) {
+                    for _ in 0..k {
+                        let object = state.new_object_id();
+                        apply::apply(
+                            state,
+                            cause,
+                            Event::Created {
+                                object,
+                                card: extra,
+                                owner: p,
+                            },
+                            log,
+                        );
+                        entered(state, cards, log, object, cause, None);
+                    }
                 }
             }
             // "Create a token. Put a +1/+1 counter on it."
@@ -2486,7 +2588,9 @@ fn resolve_inner(
                     continue;
                 };
                 entered(state, cards, log, new_id, cause, None);
-                apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
+                if !enters_untapped(state, cards, new_id) {
+                    apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
+                }
                 // Still attacking only if combat is still on.
                 if let Some(defender) = defender
                     && state.step.is_combat()
@@ -3294,7 +3398,8 @@ fn resolve_inner(
             let n = value_asking(state, cards, rc, count)?.max(0);
             let mut made = Vec::new();
             for p in players {
-                for _ in 0..n {
+                // Anointed Procession, Ojer Taq: tokens this player would get, multiplied.
+                for _ in 0..n.saturating_mul(token_multiplier(state, cards, p, card)) {
                     let object = state.new_object_id();
                     apply::apply(
                         state,
@@ -3794,10 +3899,11 @@ fn resolve_inner(
                 if let Some(o) = state.objects.get(&id) {
                     for (kind, count) in &o.counters {
                         if *count > 0 {
+                            // Hardened Scales applies to proliferating, too.
                             events.push(Event::CountersChanged {
                                 object: id,
                                 kind: *kind,
-                                delta: 1,
+                                delta: boosted_counters(state, cards, id, *kind, 1),
                             });
                         }
                     }
@@ -4355,6 +4461,215 @@ fn cant_be_countered(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) 
 }
 
 /// Ask a yes/no question.
+/// The extra tokens a player gets alongside `made`: each "those tokens plus …" they control,
+/// as (token card, how many).
+fn extra_tokens(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    player: PlayerId,
+    made: &[ObjectId],
+) -> Vec<(mtg_core::CardId, usize)> {
+    use mtg_ir::effect::{Modification, Restriction};
+    if made.is_empty() {
+        return Vec::new();
+    }
+    let chars = crate::eval::ComputedChars(cards);
+    let mut out = Vec::new();
+    for e in crate::layers::effects(state, cards).iter() {
+        let Modification::Restriction(Restriction::ExtraTokens {
+            only,
+            token,
+            per_token,
+        }) = &e.modification
+        else {
+            continue;
+        };
+        if crate::layers::controller(state, e.source) != Some(player) {
+            continue;
+        }
+        let Some(card) = token.card else {
+            continue;
+        };
+        let ctx = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller: player,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        let counted = made
+            .iter()
+            .filter(|o| {
+                only.as_ref()
+                    .is_none_or(|f| crate::eval::matches(&ctx, f, **o).unwrap_or(false))
+            })
+            .count();
+        if counted > 0 {
+            out.push((card, if *per_token { counted } else { 1 }));
+        }
+    }
+    out
+}
+
+/// How many times over a player gets the tokens an effect would create: the product of
+/// every "twice that many" / "three times that many" they control (CR 614.1a, 616.1).
+fn token_multiplier(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    player: PlayerId,
+    card: mtg_core::CardId,
+) -> i32 {
+    use mtg_ir::effect::{Modification, Restriction};
+    let creature = cards.face(card, 0).is_some_and(|f| {
+        f.printed_characteristics()
+            .has_type(mtg_core::CardType::Creature)
+    });
+    crate::layers::effects(state, cards)
+        .iter()
+        .filter_map(|e| match &e.modification {
+            Modification::Restriction(Restriction::TokenMultiplier {
+                factor,
+                creature_only,
+                any_controller,
+            }) if (!creature_only || creature)
+                && (*any_controller
+                    || crate::layers::controller(state, e.source) == Some(player)) =>
+            {
+                Some(i32::from(*factor))
+            }
+            _ => None,
+        })
+        .fold(1i32, |acc, f| acc.saturating_mul(f))
+        .min(1 << 16)
+}
+
+/// How many counters are actually put on an object when `n` would be: Hardened Scales'
+/// "that many plus one", Doubling Season's "twice that many" (CR 614.1a). Adding before
+/// doubling — the order the object's controller would choose (CR 616.1).
+pub(crate) fn boosted_counters(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    kind: mtg_core::CounterKind,
+    n: i32,
+) -> i32 {
+    use mtg_ir::effect::{Modification, Restriction};
+    if n <= 0 {
+        return n;
+    }
+    let chars = crate::eval::ComputedChars(cards);
+    let (mut plus, mut factor) = (0i32, 1i32);
+    for e in crate::layers::effects(state, cards).iter() {
+        let Modification::Restriction(Restriction::CounterModifier {
+            what,
+            kind: only,
+            factor: f,
+            plus: p,
+        }) = &e.modification
+        else {
+            continue;
+        };
+        if only.is_some_and(|k| k != kind) {
+            continue;
+        }
+        let Some(controller) = crate::layers::controller(state, e.source) else {
+            continue;
+        };
+        let ctx = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        if crate::eval::matches(&ctx, what, object).unwrap_or(false) {
+            plus += i32::from(*p);
+            factor = factor.saturating_mul(i32::from(*f).max(1));
+        }
+    }
+    n.saturating_add(plus).saturating_mul(factor)
+}
+
+/// "Lands you control enter untapped" (Spelunking): whether an entering permanent ignores
+/// whatever would have it enter tapped.
+pub(crate) fn enters_untapped(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) -> bool {
+    use mtg_ir::effect::{Modification, Restriction};
+    let chars = crate::eval::ComputedChars(cards);
+    crate::layers::effects(state, cards).iter().any(|e| {
+        let Modification::Restriction(Restriction::EntersUntapped { what }) = &e.modification
+        else {
+            return false;
+        };
+        let Some(controller) = crate::layers::controller(state, e.source) else {
+            return false;
+        };
+        let ctx = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        crate::eval::matches(&ctx, what, id).unwrap_or(false)
+    })
+}
+
+/// Whether a static forbids this card entering the battlefield from where it is
+/// (Grafdigger's Cage).
+fn cant_enter(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) -> bool {
+    use mtg_ir::effect::{Modification, Restriction};
+    let Some(zone) = state.objects.get(&id).map(|o| o.zone.zone) else {
+        return false;
+    };
+    let chars = crate::eval::ComputedChars(cards);
+    crate::layers::effects(state, cards).iter().any(|e| {
+        let Modification::Restriction(Restriction::CantEnterFrom { what, zones }) = &e.modification
+        else {
+            return false;
+        };
+        if !zones.contains(&zone) {
+            return false;
+        }
+        let Some(controller) = crate::layers::controller(state, e.source) else {
+            return false;
+        };
+        let ctx = crate::eval::Ctx {
+            state,
+            cards,
+            chars: &chars,
+            source: e.source,
+            controller,
+            targets: &[],
+            target_legal: &[],
+            x: 0,
+            bindings: crate::empty_bindings(),
+        };
+        crate::eval::matches(&ctx, what, id).unwrap_or(false)
+    })
+}
+
+fn color_word(c: mtg_core::Color) -> &'static str {
+    match c {
+        mtg_core::Color::White => "white",
+        mtg_core::Color::Blue => "blue",
+        mtg_core::Color::Black => "black",
+        mtg_core::Color::Red => "red",
+        mtg_core::Color::Green => "green",
+    }
+}
+
 fn ask_confirm(rc: &mut ResolveCtx, who: PlayerId, because: &str) -> Result<bool, ResolveError> {
     match rc.need(who, ChoiceKind::Confirm, because)? {
         Answer::Bool(b) => Ok(b),
@@ -4439,6 +4754,10 @@ fn objects_asking(
     rc: &mut ResolveCtx,
     sel: &Selector,
 ) -> Result<Vec<ObjectId>, ResolveError> {
+    let (sel, different_names) = match sel {
+        Selector::DifferentNames(inner) => (&**inner, true),
+        other => (other, false),
+    };
     let Selector::ChosenBy {
         chooser,
         zone,
@@ -4476,6 +4795,41 @@ fn objects_asking(
             SearchRule::ControlledBy(p) => who = p,
             SearchRule::Normal => {}
         }
+    }
+    // "With different names": one at a time, each among names not yet chosen.
+    if different_names {
+        let names = |id: ObjectId| -> Vec<Box<str>> {
+            let card = state.objects[&id].card;
+            let faces = if cards.layout(card) == mtg_ir::Layout::Split {
+                2
+            } else {
+                1
+            };
+            (0..faces)
+                .filter_map(|face| cards.face(card, face).map(|f| f.name.clone()))
+                .collect()
+        };
+        let mut found: Vec<ObjectId> = Vec::new();
+        while found.len() < n as usize {
+            let taken: Vec<Box<str>> = found.iter().flat_map(|id| names(*id)).collect();
+            let open: Vec<ObjectId> = candidates
+                .iter()
+                .copied()
+                .filter(|id| !names(*id).iter().any(|name| taken.contains(name)))
+                .collect();
+            if open.is_empty() {
+                break;
+            }
+            let min = u32::from(!*up_to);
+            let Some(one) = ask_objects(rc, who, open, min, 1, "choose")?
+                .first()
+                .copied()
+            else {
+                break;
+            };
+            found.push(one);
+        }
+        return Ok(found);
     }
     let max = n.min(candidates.len() as u32);
     if max == 0 {
@@ -4724,6 +5078,7 @@ pub(crate) fn layer_of(m: &mtg_ir::effect::Modification) -> u8 {
         | M::SetTypes(_)
         | M::AddSubtypes(_)
         | M::SetCreatureTypes(_)
+        | M::SetLandTypes(_)
         | M::RemoveSupertype(_) => layer::TYPE,
         M::BecomesChosen(mtg_ir::effect::EntryChoice::CreatureType) => layer::TYPE,
         M::BecomesChosen(mtg_ir::effect::EntryChoice::Color) => layer::COLOR,
@@ -4990,6 +5345,28 @@ fn draw_one(
     }
     let library = ZoneRef::of(Zone::Library, player);
     let Some(top) = state.objects_in(library).first().copied() else {
+        // Laboratory Maniac: that draw is replaced by winning — every other player loses.
+        let wins = crate::layers::effects(state, cards).iter().any(|e| {
+            matches!(
+                e.modification,
+                mtg_ir::effect::Modification::Restriction(
+                    mtg_ir::effect::Restriction::WinInsteadOfEmptyDraw
+                )
+            ) && crate::layers::controller(state, e.source) == Some(player)
+        });
+        if wins {
+            let events: Vec<Event> = state
+                .apnap()
+                .into_iter()
+                .filter(|p| *p != player)
+                .map(|p| Event::Lost {
+                    player: p,
+                    reason: mtg_core::LossReason::Effect,
+                })
+                .collect();
+            apply::apply_simultaneous(state, cause, events, log);
+            return Ok(());
+        }
         // Drawing from an empty library does not lose the game immediately; the
         // attempt is recorded and state-based actions do the rest.
         apply::apply(
@@ -5265,6 +5642,9 @@ pub(crate) fn entered(
                 delta: loyalty,
             });
         }
+        // CR 614.12 — as the permanent it will be: under Blood Moon a nonbasic land has lost
+        // its own "enters tapped".
+        let kept = crate::layers::compute(state, cards, id).map(|ch| ch.abilities);
         for ability in &face.abilities {
             let mtg_ir::AbilityKind::ReplacementEffect(r) = &ability.kind else {
                 continue;
@@ -5274,7 +5654,8 @@ pub(crate) fn entered(
                 mtg_ir::EventPattern::Enters {
                     who: mtg_ir::ObjectFilter::IsSelf
                 }
-            ) {
+            ) || kept.as_ref().is_some_and(|k| !k.contains(&ability.id))
+            {
                 continue;
             }
             match &r.kind {
@@ -5301,6 +5682,18 @@ pub(crate) fn entered(
                         });
                     } else {
                         events.push(Event::EnteredTapped { object: id });
+                    }
+                }
+                // Revealing is optional; without an eligible card revealed it enters tapped.
+                R::EntersTappedUnlessReveals(filter) => {
+                    let eligible = reveal_options(state, cards, id, filter);
+                    match &answer {
+                        Some(Answer::Objects(chosen))
+                            if chosen.len() == 1 && eligible.contains(&chosen[0]) =>
+                        {
+                            events.push(Event::Revealed { object: chosen[0] });
+                        }
+                        _ => events.push(Event::EnteredTapped { object: id }),
                     }
                 }
                 R::Amplify(n) => {
@@ -5400,7 +5793,7 @@ pub(crate) fn entered(
                         events.push(Event::CountersChanged {
                             object: id,
                             kind: *kind,
-                            delta: n,
+                            delta: boosted_counters(state, cards, id, *kind, n),
                         });
                     }
                 }
@@ -5441,6 +5834,10 @@ pub(crate) fn entered(
         if tapped {
             events.push(Event::EnteredTapped { object: id });
         }
+    }
+    // Spelunking: whatever said "enters tapped", this one doesn't.
+    if enters_untapped(state, cards, id) {
+        events.retain(|e| !matches!(e, Event::EnteredTapped { .. }));
     }
     // Riot from another permanent, answered when the permanent's own abilities asked
     // nothing (see `enter_question`).
@@ -5679,6 +6076,35 @@ fn entry_options(
 }
 
 /// Creature cards in the entering permanent's controller's hand that share a type.
+/// The cards in its controller's hand an entering permanent may reveal.
+fn reveal_options(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    id: ObjectId,
+    filter: &mtg_ir::ObjectFilter,
+) -> Vec<ObjectId> {
+    let Some(obj) = state.objects.get(&id) else {
+        return vec![];
+    };
+    let chars = ComputedChars(cards);
+    let ctx = Ctx {
+        state,
+        cards,
+        chars: &chars,
+        source: id,
+        controller: obj.controller,
+        targets: &[],
+        target_legal: &[],
+        x: 0,
+        bindings: crate::empty_bindings(),
+    };
+    state
+        .objects_in(ZoneRef::of(Zone::Hand, obj.controller))
+        .into_iter()
+        .filter(|candidate| eval::matches(&ctx, filter, *candidate).unwrap_or(false))
+        .collect()
+}
+
 fn amplify_options(state: &GameState, cards: &dyn PrintedCards, id: ObjectId) -> Vec<ObjectId> {
     let Some(obj) = state.objects.get(&id) else {
         return vec![];
@@ -5725,16 +6151,28 @@ pub(crate) fn enter_question(
     if obj.face_down {
         return riot();
     }
+    let kept = crate::layers::compute(state, cards, id).map(|ch| ch.abilities);
     let own = cards
         .face(obj.card, obj.face)?
         .abilities
         .iter()
+        .filter(|a| kept.as_ref().is_none_or(|k| k.contains(&a.id)))
         .find_map(|a| match &a.kind {
             mtg_ir::AbilityKind::ReplacementEffect(mtg_ir::effect::Replacement {
                 kind, ..
             }) => match kind {
                 R::EntersTappedUnlessPaysLife { amount } => {
                     confirm(format!("pay {amount} life? If you don't, it enters tapped"))
+                }
+                // Revealing costs nothing, so the default reveals one.
+                R::EntersTappedUnlessReveals(filter) => {
+                    let from = reveal_options(state, cards, id, filter);
+                    let first = *from.first()?;
+                    Some((
+                        ChoiceKind::ChooseObjects { from, min: 0, max: 1 },
+                        "reveal a card? If you don't, it enters tapped".into(),
+                        Answer::Objects(vec![first]),
+                    ))
                 }
                 R::EntersWithCounterIfChosen => confirm(
                     "have it enter with a +1/+1 counter? It can't block while it has one".into(),

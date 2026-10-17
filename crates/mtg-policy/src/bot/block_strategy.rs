@@ -58,7 +58,19 @@ impl Bot {
             .into_iter()
             .filter_map(|id| Some((id, self.stats(view, id)?)))
             .collect();
-        attackers.sort_by_key(|(id, s)| (std::cmp::Reverse(s.power), *id));
+        let destination = |attacker: ObjectId| {
+            view.visible
+                .get(&attacker)
+                .and_then(|o| o.attacking_target)
+                .unwrap_or(Target::Player(view.viewer))
+        };
+        attackers.sort_by_key(|(id, s)| {
+            (
+                destination(*id) != Target::Player(view.viewer),
+                std::cmp::Reverse(s.power),
+                *id,
+            )
+        });
 
         let can_block = |blocker: ObjectId, attacker: ObjectId| {
             eligible
@@ -76,59 +88,89 @@ impl Bot {
             if needed(a) > 1 {
                 continue;
             }
-            let good = eligible.iter().find_map(|(blocker, _)| {
-                if used(&blocks, *blocker) || !can_block(*blocker, *attacker) {
-                    return None;
-                }
-                let b = self.stats(view, *blocker)?;
-                let (blocker_kills, attacker_kills) = super::fight(&b, a);
-                (blocker_kills && !attacker_kills).then_some(*blocker)
-            });
-            if let Some(blocker) = good {
+            let good = eligible
+                .iter()
+                .filter_map(|(blocker, atts)| {
+                    if used(&blocks, *blocker) || !can_block(*blocker, *attacker) {
+                        return None;
+                    }
+                    let b = self.stats(view, *blocker)?;
+                    let (blocker_kills, attacker_kills) = super::fight(&b, a);
+                    // Preserve flexible blockers (for example, our only flyer) for
+                    // attackers that the more restricted blockers cannot handle.
+                    (blocker_kills && !attacker_kills).then_some((atts.len(), *blocker))
+                })
+                .min();
+            if let Some((_, blocker)) = good {
                 blocks.push((blocker, *attacker));
             }
         }
 
-        let destination = |attacker: ObjectId| {
-            view.visible
-                .get(&attacker)
-                .and_then(|o| o.attacking_target)
-                .unwrap_or(Target::Player(view.viewer))
+        let contributes = |stats: &Stats, poison: bool| {
+            if poison {
+                stats.infect || stats.toxic > 0
+            } else {
+                !stats.infect
+            }
         };
-        let incoming = |target: Target, blocks: &[(ObjectId, ObjectId)]| -> i64 {
+        let incoming = |target: Target, poison: bool, blocks: &[(ObjectId, ObjectId)]| -> i64 {
             attackers
                 .iter()
-                .filter(|(a, _)| destination(*a) == target)
+                .filter(|(a, stats)| {
+                    destination(*a) == target
+                        && (!matches!(target, Target::Player(_)) || contributes(stats, poison))
+                })
                 .map(|(id, a)| {
                     let damage = a.combat_damage();
-                    if !blocked(blocks, *id) {
-                        return damage;
+                    let damage = if !blocked(blocks, *id) {
+                        damage
+                    } else if !a.trample {
+                        0
+                    } else {
+                        let absorbed: i64 = blocks
+                            .iter()
+                            .filter(|(_, attacker)| attacker == id)
+                            .filter_map(|(b, _)| self.stats(view, *b))
+                            .map(|b| {
+                                if a.deathtouch {
+                                    1
+                                } else {
+                                    i64::from(b.toughness.max(0))
+                                }
+                            })
+                            .sum();
+                        (damage - absorbed).max(0)
+                    };
+                    if poison {
+                        // Toxic applies only when combat damage reaches the player.
+                        // Infect replaces life damage; toxic adds poison per hit.
+                        if damage == 0 {
+                            return 0;
+                        }
+                        let hits = if a.double_strike { 2 } else { 1 };
+                        (if a.infect { damage } else { 0 }) + i64::from(a.toxic) * hits
+                    } else {
+                        damage
                     }
-                    if !a.trample {
-                        return 0;
-                    }
-                    let absorbed: i64 = blocks
-                        .iter()
-                        .filter(|(_, attacker)| attacker == id)
-                        .filter_map(|(b, _)| self.stats(view, *b))
-                        .map(|b| {
-                            if a.deathtouch {
-                                1
-                            } else {
-                                i64::from(b.toughness.max(0))
-                            }
-                        })
-                        .sum();
-                    (damage - absorbed).max(0)
                 })
                 .sum()
         };
-        // Save the player first, then planeswalkers. Damage aimed at a walker
+        // Save the player from poison, then life loss, then planeswalkers.
+        // Infect damage to players does not reduce life. Damage aimed at a walker
         // never contributes to the estimate of damage to its controller.
-        let mut threatened = vec![(
-            Target::Player(view.viewer),
-            view.players.get(&view.viewer).map_or(0, |p| p.life),
-        )];
+        let player = view.players.get(&view.viewer);
+        let mut threatened = vec![
+            (
+                Target::Player(view.viewer),
+                player.map_or(10, |p| 10u32.saturating_sub(p.poison)) as i64,
+                true,
+            ),
+            (
+                Target::Player(view.viewer),
+                player.map_or(0, |p| i64::from(p.life)),
+                false,
+            ),
+        ];
         let walker_ids: std::collections::BTreeSet<_> = attackers
             .iter()
             .filter_map(|(a, _)| match destination(*a) {
@@ -143,15 +185,18 @@ impl Bot {
                 .filter(|o| o.controller == view.viewer)
                 && let Some(loyalty) = o.counters.get(&CounterKind::Loyalty)
             {
-                threatened.push((Target::Object(id), *loyalty));
+                threatened.push((Target::Object(id), i64::from(*loyalty), false));
             }
         }
-        for (target, health) in threatened {
+        for (target, health, poison) in threatened {
             for (attacker, stats) in &attackers {
-                if incoming(target, &blocks) < i64::from(health) {
+                if incoming(target, poison, &blocks) < health {
                     break;
                 }
-                if destination(*attacker) != target || blocked(&blocks, *attacker) {
+                if destination(*attacker) != target
+                    || blocked(&blocks, *attacker)
+                    || (matches!(target, Target::Player(_)) && !contributes(stats, poison))
+                {
                     continue;
                 }
                 let needed = needed(stats);

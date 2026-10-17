@@ -18,6 +18,8 @@
 //! 2. **Planeswalker pressure** — If lethal is not available, pressure the lowest-loyalty planeswalker.
 //! 3. **Defense** — Block incoming damage to save the player or threatened planeswalkers.
 //! 4. **Resource management** — Save blockers and spells for valuable effects; avoid bad trades.
+//! 5. **Threat assessment** — Prioritize immediate attacks and repeatable value engines;
+//!    match burn, destruction and exile to targets they can answer.
 //!
 //! ### On its own turn:
 //! - Play lands for mana acceleration (highest priority).
@@ -37,6 +39,10 @@
 mod attack_strategy;
 mod block_strategy;
 mod cast_strategy;
+mod stack_strategy;
+mod strategic;
+mod tactics;
+pub(crate) use tactics::recurring_ability_value;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -69,6 +75,9 @@ pub struct Stats {
     pub reach: bool,
     pub first_strike: bool,
     pub deathtouch: bool,
+    pub indestructible: bool,
+    pub infect: bool,
+    pub toxic: u32,
     pub menace: bool,
     pub trample: bool,
     pub double_strike: bool,
@@ -136,6 +145,16 @@ impl Stats {
             reach: has(Keyword::Reach),
             first_strike: has(Keyword::FirstStrike) || has(Keyword::DoubleStrike),
             deathtouch: has(Keyword::Deathtouch),
+            indestructible: has(Keyword::Indestructible),
+            infect: has(Keyword::Infect),
+            toxic: face
+                .abilities
+                .iter()
+                .filter_map(|a| match a.kind {
+                    AbilityKind::Keyword(Keyword::Toxic(n)) => Some(u32::from(n)),
+                    _ => None,
+                })
+                .fold(0, u32::saturating_add),
             menace: has(Keyword::Menace),
             trample: has(Keyword::Trample),
             double_strike: has(Keyword::DoubleStrike),
@@ -147,9 +166,11 @@ impl Stats {
     /// Positive damage is lethal when it reaches the other's remaining toughness,
     /// or when its source has deathtouch.
     ///
-    /// Example: A 2/2 creature with deathtouch kills any creature by damage.
+    /// Indestructible prevents destruction even from deathtouch.
     fn kills_with_damage(&self, other: &Stats, damage: i64) -> bool {
-        damage > 0 && (self.deathtouch || damage >= i64::from(other.toughness))
+        !other.indestructible
+            && damage > 0
+            && (self.deathtouch || damage >= i64::from(other.toughness))
     }
 
     /// Whether `blocker` may block this creature, as far as flying goes. The engine's
@@ -224,6 +245,9 @@ struct LoyaltyAbility {
 /// about attacks, blocks, casting, and targeting. The bot queries this metadata combined with
 /// the current board state to execute its heuristics.
 pub struct Bot {
+    strategic_cards: BTreeMap<(CardId, u8), strategic::StrategicCard>,
+    stack_cards: BTreeMap<(CardId, u8), stack_strategy::StackCard>,
+    tactics: BTreeMap<(CardId, u8), tactics::CardTactics>,
     stats: BTreeMap<(CardId, u8), Stats>,
     layouts: BTreeMap<CardId, mtg_ir::Layout>,
     loyalty: BTreeMap<(CardId, u8, AbilityId), LoyaltyAbility>,
@@ -234,7 +258,7 @@ pub struct Bot {
     color_gated: BTreeMap<(CardId, u8), mtg_core::Color>,
     /// Printed colors, for matching a color-gated spell to its target.
     colors: BTreeMap<(CardId, u8), mtg_core::ColorSet>,
-    /// Spells that can counter a spell, held to answer the opponent's.
+    /// Spells that counter spells or abilities, held for opposing stack objects.
     counterspells: BTreeSet<(CardId, u8)>,
     policy: Policy,
 }
@@ -253,6 +277,9 @@ impl Bot {
         let mut color_gated = BTreeMap::new();
         let mut colors = BTreeMap::new();
         let mut counterspells = BTreeSet::new();
+        let mut tactics = BTreeMap::new();
+        let mut stack_cards = BTreeMap::new();
+        let mut strategic_cards = BTreeMap::new();
         for id in ids {
             layouts.insert(id, cards.layout(id));
             let count = if matches!(
@@ -271,6 +298,9 @@ impl Bot {
                     continue;
                 };
                 colors.insert((id, index), face.printed_characteristics().colors);
+                tactics.insert((id, index), tactics::CardTactics::new(face));
+                stack_cards.insert((id, index), stack_strategy::StackCard::new(face));
+                strategic_cards.insert((id, index), strategic::StrategicCard::new(face));
                 for a in &face.abilities {
                     match &a.kind {
                         AbilityKind::Activated {
@@ -279,7 +309,10 @@ impl Bot {
                             is_loyalty_ability,
                             ..
                         } => {
-                            targeting.insert((id, index, Some(a.id)), target_preference(effect));
+                            targeting.insert(
+                                (id, index, Some(a.id)),
+                                tactics::preference(effect, &a.targets),
+                            );
                             if *is_loyalty_ability {
                                 let delta = cost
                                     .additional
@@ -302,10 +335,14 @@ impl Bot {
                             if counters_a_spell(effect) {
                                 counterspells.insert((id, index));
                             }
-                            targeting.insert((id, index, None), target_preference(effect));
+                            targeting
+                                .insert((id, index, None), tactics::preference(effect, &a.targets));
                         }
                         AbilityKind::Triggered { effect, .. } => {
-                            targeting.insert((id, index, Some(a.id)), target_preference(effect));
+                            targeting.insert(
+                                (id, index, Some(a.id)),
+                                tactics::preference(effect, &a.targets),
+                            );
                         }
                         _ => {}
                     }
@@ -313,6 +350,9 @@ impl Bot {
             }
         }
         Self {
+            strategic_cards,
+            stack_cards,
+            tactics,
             stats,
             layouts,
             loyalty,
@@ -387,6 +427,11 @@ impl Bot {
             ChoiceKind::KeepOrMulligan { mulligans_taken } => {
                 Some(Answer::Bool(self.keeps(view, *mulligans_taken)))
             }
+            // Ad Nauseam: keep going while there is life to spare. "Yes" by default would
+            // pay life until the bot had lost.
+            ChoiceKind::Confirm if choice.because.as_ref() == "repeat this process?" => Some(
+                Answer::Bool(view.players.get(&view.viewer).is_some_and(|p| p.life > 10)),
+            ),
             // Leylines are beneficial opening-hand selections, rather than discards.
             ChoiceKind::ChooseObjects { from, min: 0, max }
                 if choice.because.as_ref() == "begin the game with these on the battlefield" =>
@@ -459,14 +504,24 @@ impl Bot {
     /// 2. Most expensive spells (high mana value = more likely to be unnecessary).
     /// 3. Remaining lands (the hand needs some mana).
     ///
-    /// Example: With hand [Island, Mountain, Swamp, Shock, Fireball, Draw, Counterspell],
-    /// to discard 2 cards: pick Swamp and Mountain (spare 3rd and 4th land), not Shock (cheap removal).
+    /// Only lands beyond the first three are surplus. For multiple discards,
+    /// keep the remaining three before giving up expensive spells.
     fn worst_cards(&self, from: &[ObjectId], n: usize, view: &PlayerView) -> Vec<ObjectId> {
-        let lands = from.iter().filter(|id| self.is_land(view, **id)).count();
+        let mut lands: Vec<_> = from
+            .iter()
+            .copied()
+            .filter(|id| self.is_land(view, *id))
+            .collect();
+        lands.sort_unstable();
+        let spare_lands: BTreeSet<_> = lands
+            .iter()
+            .take(lands.len().saturating_sub(3))
+            .copied()
+            .collect();
         let mut ranked: Vec<ObjectId> = from.to_vec();
         ranked.sort_by_key(|id| {
             let s = self.stats(view, *id).unwrap_or_default();
-            let spare_land = s.land && lands > 3;
+            let spare_land = spare_lands.contains(id);
             // Lower sorts first: spare lands, then spells from most to least expensive, then
             // the lands the hand needs.
             (
@@ -531,13 +586,14 @@ impl Bot {
     ///
     /// Targets are sorted by:
     /// 1. Preference (hostile target? friendly target?).
-    /// 2. Value (mana value for objects, 1 for players).
-    /// 3. ID (for stable, consistent choices).
+    /// 2. Response effectiveness and threat urgency for hostile effects.
+    /// 3. Value (mana value for objects, 1 for players).
+    /// 4. ID (for stable, consistent choices).
     ///
     /// Example: A `Shock` (Deal 2 damage) targets a hostile creature/player.
     /// Example: A `Healing Touch` targets a friendly creature or the controller.
     fn targets(&self, choice: &Choice, slots: &[Vec<Target>], view: &PlayerView) -> Option<Answer> {
-        let stack = view.visible.get(view.stack.last()?)?;
+        let stack = view.visible.get(view.stack.first()?)?;
         let preference = self
             .targeting
             .get(&(stack.card?, stack.face, stack.ability))
@@ -581,6 +637,13 @@ impl Bot {
                                 TargetPreference::Hostile => controller.is_some() && !friendly,
                                 TargetPreference::Unknown => false,
                             }),
+                            std::cmp::Reverse(
+                                if preference == TargetPreference::Hostile && !friendly {
+                                    self.response_value(view, stack.id, stack.ability, *target)
+                                } else {
+                                    0
+                                },
+                            ),
                             std::cmp::Reverse(value),
                             id,
                         )
@@ -721,6 +784,46 @@ mod tests {
     }
 
     #[test]
+    fn lethal_attack_counts_each_blocked_attacker_only_once() {
+        let b = bot(&[creature(10, 1), creature(2, 1), creature(20, 20)]);
+        let mut v = view(
+            ME,
+            Step::DeclareAttackers,
+            &[
+                (1, 0, ME),
+                (2, 1, ME),
+                (3, 1, ME),
+                (4, 2, THEM),
+                (5, 2, THEM),
+            ],
+        );
+        v.players.get_mut(&THEM).unwrap().life = 2;
+        let attackers = [ObjectId(1), ObjectId(2), ObjectId(3)];
+        assert_eq!(b.attackers(&attackers, &v), attackers);
+        // At three life the same attack is no longer guaranteed lethal, and
+        // every attacker can be killed for free by a 20/20.
+        v.players.get_mut(&THEM).unwrap().life = 3;
+        assert!(b.attackers(&attackers, &v).is_empty());
+    }
+
+    #[test]
+    fn ground_blockers_do_not_hide_lethal_flying_damage() {
+        let mut flyer = creature(2, 1);
+        flyer.flying = true;
+        let b = bot(&[flyer, creature(1, 1), creature(20, 20)]);
+        let mut v = view(
+            ME,
+            Step::DeclareAttackers,
+            &[(1, 0, ME), (2, 1, ME), (3, 2, THEM)],
+        );
+        v.players.get_mut(&THEM).unwrap().life = 2;
+        assert_eq!(
+            b.attackers(&[ObjectId(1), ObjectId(2)], &v),
+            vec![ObjectId(1), ObjectId(2)]
+        );
+    }
+
+    #[test]
     fn large_attack_totals_and_blocker_estimates_do_not_overflow() {
         let b = bot(&[creature(i32::MAX, 1), creature(1, i32::MAX)]);
         let v = view(
@@ -846,6 +949,9 @@ mod tests {
     /// A bot whose card N has the given stats.
     fn bot(cards: &[Stats]) -> Bot {
         Bot {
+            strategic_cards: BTreeMap::new(),
+            stack_cards: BTreeMap::new(),
+            tactics: BTreeMap::new(),
             layouts: BTreeMap::new(),
             stats: cards
                 .iter()
@@ -1019,6 +1125,113 @@ mod tests {
     }
 
     #[test]
+    fn multiple_hand_discards_preserve_three_lands_before_cheap_spells() {
+        let land = Stats {
+            land: true,
+            ..Default::default()
+        };
+        let cheap = creature(1, 1);
+        let expensive = Stats {
+            mana_value: 7,
+            ..creature(7, 7)
+        };
+        let b = bot(&[land, cheap, expensive]);
+        for land_count in [4u32, 5] {
+            let mut objects: Vec<_> = (1..=land_count).map(|id| (id, 0, ME)).collect();
+            objects.extend([(10, 1, ME), (11, 2, ME)]);
+            let mut v = view(ME, Step::Untap, &objects);
+            let ids: Vec<_> = objects.iter().map(|(id, _, _)| *id).collect();
+            in_hand(&mut v, &ids);
+            // Reverse the offered order to exercise deterministic land selection.
+            let from: Vec<_> = ids.iter().rev().copied().map(ObjectId).collect();
+            let count = land_count - 2;
+            let choice = Choice {
+                id: 1,
+                who: ME,
+                kind: ChoiceKind::ChooseObjects {
+                    from,
+                    min: count,
+                    max: count,
+                },
+                because: "discard cards".into(),
+                default: None,
+                undo: false,
+            };
+            let Answer::Objects(discarded) = b.decide(&choice, &v) else {
+                panic!("expected selected cards");
+            };
+            let mut expected: Vec<_> = (1..=land_count - 3).map(ObjectId).collect();
+            expected.push(ObjectId(11));
+            assert_eq!(discarded, expected);
+        }
+    }
+
+    #[test]
+    fn search_compares_player_and_creature_targets_without_changing_counts() {
+        let b = bot(&[creature(4, 4)]);
+        let v = view(
+            ME,
+            Step::PrecombatMain,
+            &[(1, 0, THEM), (2, 0, THEM), (3, 0, THEM)],
+        );
+        let a = Target::Object(ObjectId(1));
+        let c = Target::Object(ObjectId(2));
+        let d = Target::Object(ObjectId(3));
+        let player = Target::Player(THEM);
+        let choice = Choice {
+            id: 1,
+            who: ME,
+            kind: ChoiceKind::ChooseTargets {
+                slots: vec![vec![a, c, player], vec![a, c, d], vec![player]],
+                optional: vec![false, false, true],
+            },
+            because: "choose targets".into(),
+            default: None,
+            undo: false,
+        };
+        let heuristic = Answer::Targets(vec![vec![a], vec![a, c], vec![]]);
+        let candidates = crate::search::candidates(&b, &choice, &v, heuristic);
+        assert!(candidates.iter().any(|answer| matches!(answer,
+            Answer::Targets(picks) if picks[0] == vec![player]
+        )));
+        assert!(candidates.iter().any(|answer| matches!(answer,
+            Answer::Targets(picks) if picks[1] == vec![d, c]
+        )));
+        for answer in candidates {
+            let Answer::Targets(picks) = answer else {
+                panic!("target answer")
+            };
+            assert_eq!(
+                picks.iter().map(Vec::len).collect::<Vec<_>>(),
+                vec![1, 2, 0]
+            );
+            assert_ne!(picks[1][0], picks[1][1]);
+        }
+    }
+
+    #[test]
+    fn target_search_has_a_fixed_branching_limit() {
+        let b = bot(&[]);
+        let v = view(ME, Step::PrecombatMain, &[]);
+        let choice = Choice {
+            id: 1,
+            who: ME,
+            kind: ChoiceKind::ChooseTargets {
+                slots: vec![(1..=100).map(|id| Target::Object(ObjectId(id))).collect()],
+                optional: vec![],
+            },
+            because: "choose targets".into(),
+            default: None,
+            undo: false,
+        };
+        let heuristic = Answer::Targets(vec![vec![Target::Object(ObjectId(1))]]);
+        assert_eq!(
+            crate::search::candidates(&b, &choice, &v, heuristic).len(),
+            25
+        );
+    }
+
+    #[test]
     fn a_land_comes_before_a_spell() {
         let b = bot(&[Stats::default(), creature(2, 2)]);
         let v = view(ME, Step::PrecombatMain, &[(1, 0, ME), (2, 1, ME)]);
@@ -1128,6 +1341,107 @@ mod tests {
         let b = bot(&[flyer, creature(5, 5)]);
         let v = view(ME, Step::DeclareAttackers, &[(1, 0, ME), (2, 1, THEM)]);
         assert_eq!(b.attackers(&[ObjectId(1)], &v), vec![ObjectId(1)]);
+    }
+
+    #[test]
+    fn indestructible_survives_normal_first_strike_and_deathtouch_damage() {
+        let immortal = Stats {
+            indestructible: true,
+            ..creature(2, 2)
+        };
+        for attacker in [
+            creature(8, 8),
+            Stats {
+                first_strike: true,
+                ..creature(2, 2)
+            },
+            Stats {
+                double_strike: true,
+                ..creature(2, 2)
+            },
+            Stats {
+                deathtouch: true,
+                ..creature(1, 1)
+            },
+        ] {
+            assert!(!fight(&attacker, &immortal).0, "{attacker:?}");
+            assert!(!fight(&immortal, &attacker).1, "{attacker:?}");
+        }
+        assert_eq!(fight(&immortal, &creature(2, 2)), (true, false));
+    }
+
+    #[test]
+    fn indestructible_defender_takes_a_safe_block_against_deathtouch() {
+        let b = bot(&[
+            Stats {
+                indestructible: true,
+                ..creature(2, 2)
+            },
+            Stats {
+                deathtouch: true,
+                ..creature(2, 2)
+            },
+        ]);
+        let v = view(THEM, Step::DeclareBlockers, &[(1, 0, ME), (2, 1, THEM)]);
+        assert_eq!(
+            b.blocks(&[(ObjectId(1), vec![ObjectId(2)])], &v),
+            vec![(ObjectId(1), ObjectId(2))]
+        );
+    }
+
+    #[test]
+    fn deathtouch_does_not_make_an_attack_into_indestructible_a_trade() {
+        let b = bot(&[
+            Stats {
+                deathtouch: true,
+                ..creature(2, 2)
+            },
+            Stats {
+                indestructible: true,
+                ..creature(2, 2)
+            },
+        ]);
+        let v = view(ME, Step::DeclareAttackers, &[(1, 0, ME), (2, 1, THEM)]);
+        assert!(b.attackers(&[ObjectId(1)], &v).is_empty());
+    }
+
+    #[test]
+    fn infect_blocks_use_poison_instead_of_life_and_preserve_the_right_defender() {
+        for (life, poison, infect, plain, expected) in [
+            (20, 8, 2, 5, Some(2)),
+            (1, 0, 2, 0, None),
+            (2, 0, 8, 2, Some(3)),
+            (20, 7, 2, 5, None),
+        ] {
+            let b = bot(&[
+                creature(1, 1),
+                Stats {
+                    infect: true,
+                    ..creature(infect, infect)
+                },
+                creature(plain, plain),
+            ]);
+            let mut v = view(
+                THEM,
+                Step::DeclareBlockers,
+                &[(1, 0, ME), (2, 1, THEM), (3, 2, THEM)],
+            );
+            v.players.get_mut(&ME).unwrap().life = life;
+            v.players.get_mut(&ME).unwrap().poison = poison;
+            let attacks = if plain == 0 {
+                vec![ObjectId(2)]
+            } else {
+                vec![ObjectId(2), ObjectId(3)]
+            };
+            let blocks = b.blocks(&[(ObjectId(1), attacks)], &v);
+            assert_eq!(
+                blocks,
+                expected
+                    .map(|a| vec![(ObjectId(1), ObjectId(a))])
+                    .unwrap_or_default(),
+                "life={life} poison={poison}"
+            );
+        }
     }
 
     #[test]
@@ -1425,6 +1739,61 @@ mod tests {
         );
         loyalty(&mut v, 3, 5);
         assert!(b.blocks(&[(ObjectId(1), vec![ObjectId(2)])], &v).is_empty());
+    }
+
+    #[test]
+    fn a_safe_walker_block_does_not_take_the_players_only_defender() {
+        let b = bot(&[
+            creature(5, 5),
+            creature(4, 4),
+            creature(3, 3),
+            Stats::default(),
+        ]);
+        let mut v = view(
+            THEM,
+            Step::DeclareBlockers,
+            &[(1, 0, ME), (2, 1, THEM), (3, 2, THEM), (4, 3, ME)],
+        );
+        loyalty(&mut v, 4, 4);
+        attacking(&mut v, 2, Target::Object(ObjectId(4)));
+        attacking(&mut v, 3, Target::Player(ME));
+        v.players.get_mut(&ME).unwrap().life = 3;
+        assert_eq!(
+            b.blocks(&[(ObjectId(1), vec![ObjectId(2), ObjectId(3)])], &v),
+            vec![(ObjectId(1), ObjectId(3))]
+        );
+    }
+
+    #[test]
+    fn safe_ground_block_preserves_the_only_flying_defender() {
+        let mut flying_blocker = creature(5, 5);
+        flying_blocker.flying = true;
+        let mut flying_attacker = creature(3, 3);
+        flying_attacker.flying = true;
+        let b = bot(&[
+            flying_blocker,
+            creature(5, 5),
+            creature(4, 4),
+            flying_attacker,
+        ]);
+        let mut v = view(
+            THEM,
+            Step::DeclareBlockers,
+            &[(1, 0, ME), (2, 1, ME), (3, 2, THEM), (4, 3, THEM)],
+        );
+        attacking(&mut v, 3, Target::Player(ME));
+        attacking(&mut v, 4, Target::Player(ME));
+        v.players.get_mut(&ME).unwrap().life = 3;
+        assert_eq!(
+            b.blocks(
+                &[
+                    (ObjectId(1), vec![ObjectId(3), ObjectId(4)]),
+                    (ObjectId(2), vec![ObjectId(3)]),
+                ],
+                &v
+            ),
+            vec![(ObjectId(2), ObjectId(3)), (ObjectId(1), ObjectId(4))]
+        );
     }
 
     #[test]

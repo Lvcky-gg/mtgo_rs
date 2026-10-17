@@ -553,7 +553,7 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
         }
         C::Exists(s) => selector_read(s, r),
         C::AnyMatches { .. } => Footprint::unanalysable(),
-        C::Not(inner) => condition_footprint(inner, r),
+        C::Not(inner) | C::WhenTriggered(inner) => condition_footprint(inner, r),
         C::And(cs) | C::Or(cs) => cs.iter().fold(Footprint::default(), |acc, c| {
             acc.with(condition_footprint(c, r))
         }),
@@ -585,6 +585,7 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         | Value::OpponentsAttacked => Footprint::default(),
         Value::Count(s)
         | Value::ManaValue(s)
+        | Value::ManaSpentOn(s)
         | Value::CardTypesAmong(s)
         | Value::PartySize(s)
         | Value::BasicLandTypesAmong(s)
@@ -601,8 +602,11 @@ fn value_footprint(v: &Value, r: &dyn SelectorResolver) -> Footprint {
         | Value::GreatestPower(s)
         | Value::GreatestToughness(s)
         | Value::GreatestManaValue(s)
-        | Value::GreatestOwnedCount(s) => objects_read(s, r),
-        Value::LifeTotal(s) | Value::LeastLifeTotal(s) => players_read(s, r, Resource::Life),
+        | Value::GreatestOwnedCount(s)
+        | Value::GreatestControlledCount(s) => objects_read(s, r),
+        Value::LifeTotal(s) | Value::LeastLifeTotal(s) | Value::GreatestLifeTotal(s) => {
+            players_read(s, r, Resource::Life)
+        }
         Value::Counters(s, kind) => {
             let mut f = objects_read(s, r);
             if let Some(ids) = r.resolve_objects(s) {
@@ -727,5 +731,5 @@ fn zones_write(s: &Selector, r: &dyn SelectorResolver, zones: &[Zone]) -> Footpr
 
 /// Selectors that make the player choose during resolution.
 fn selector_prompts(s: &Selector) -> bool {
-    matches!(s, Selector::ChosenBy { .. })
+    matches!(s, Selector::ChosenBy { .. } | Selector::DifferentNames(_))
 }

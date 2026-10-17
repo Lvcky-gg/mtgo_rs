@@ -88,6 +88,10 @@ const SUBTYPES: &[&str] = &[
     "God",
     "Bard",
     "Fish",
+    "Squirrel",
+    "Map",
+    // Unglued's Elvish Impersonators prints "Elves" as a subtype of its own.
+    "Elves",
 ];
 
 #[derive(Default)]

@@ -102,3 +102,20 @@ fn the_repetition_choice_shows_the_new_card_and_updated_life() {
     assert!(seen.get());
     assert_eq!(g.life(P0), 17);
 }
+
+/// Saying yes every time ends with the library: a repeat that reveals nothing isn't offered
+/// again. An unattended player once accepted forever, and each acceptance replayed the rest.
+#[test]
+fn always_repeating_stops_when_the_library_is_empty() {
+    let (mut g, spell) = game();
+    let hand = g.count(Zone::Hand, P0);
+    // Three cards: asked after each of them, and not again once nothing is left to reveal.
+    g.act(
+        Action::Cast { object: spell },
+        &[],
+        &[Answer::Bool(true), Answer::Bool(true), Answer::Bool(true)],
+    );
+    assert_eq!(g.life(P0), 13);
+    assert_eq!(g.count(Zone::Library, P0), 0);
+    assert_eq!(g.count(Zone::Hand, P0), hand + 2);
+}

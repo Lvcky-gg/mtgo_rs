@@ -20,6 +20,9 @@ pub enum Value {
     ColorsSpent,
     /// "The amount of mana spent to cast this creature" (Mockingbird): all of it.
     ManaSpent,
+    /// "The amount of mana spent to cast that spell": all the mana spent on another object,
+    /// the spell a cast trigger names.
+    ManaSpentOn(Box<Selector>),
     /// How many times the source's multikicker or replicate cost was paid (CR 702.33c).
     TimesKicked,
     /// The X the source permanent was cast with (CR 107.3m): ravenous's "if X is 5 or more".
@@ -65,6 +68,11 @@ pub enum Value {
     GreatestManaValue(Box<Selector>),
     /// Largest number of selected objects owned by any one player; zero for none.
     GreatestOwnedCount(Box<Selector>),
+    /// Largest number of selected objects controlled by any one player; zero for none
+    /// ("an opponent controls more lands than you").
+    GreatestControlledCount(Box<Selector>),
+    /// Highest life total among the selected players; i32::MIN for an empty set.
+    GreatestLifeTotal(Box<Selector>),
     /// How many card types there are among the objects a selector picks out (delirium).
     CardTypesAmong(Box<Selector>),
     /// CR 702.40a — how many spells were cast before the source spell this turn (storm).
