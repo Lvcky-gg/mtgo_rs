@@ -52,6 +52,9 @@ fn usage() {
          \x20 stats                what the database currently holds\n\
          \x20 coverage [N]         cards playable as printed, and the N most common lines not\n\
          \x20                      yet understood\n\
+         \x20                      --legendary-creatures scopes to cards with a legendary creature face\n\
+         \x20                      --names prints the scoped card names for check <file>\n\
+         \x20                      --blocked reports blocked records with their oracle identities\n\
          \x20 check <file>         for card names listed one per line (in priority order),\n\
          \x20                      which are playable and what blocks the rest\n\
          \x20 parse <type> <text>  compile one card's rules text and show the result\n\n\
@@ -283,19 +286,34 @@ fn coverage(args: &[String]) -> Result<(), String> {
     // `--blame` prints, for each such line, the first sentence at which it stops
     // compiling — the part to teach.
     let blame = args.iter().any(|a| a == "--blame");
+    let blocked = args.iter().any(|a| a == "--blocked");
     let store = open()?;
     let subtypes = mtg_oracle::compile::SubtypeNames(store.subtypes().map_err(|e| e.to_string())?);
-    let cards = store.all_cards().map_err(|e| e.to_string())?;
+    let mut cards = store.all_cards().map_err(|e| e.to_string())?;
+    if args.iter().any(|a| a == "--legendary-creatures") {
+        cards.retain(|(_, card)| has_legendary_creature_face(card));
+    }
+    if args.iter().any(|a| a == "--names") {
+        let mut names: Vec<_> = cards.iter().map(|(_, card)| &card.name).collect();
+        names.sort();
+        names.dedup();
+        for name in names {
+            println!("{name}");
+        }
+        return Ok(());
+    }
 
     let (mut playable, mut total) = (0usize, 0usize);
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
     // Lines that are the only thing standing between a card and playable: teaching one
     // of these converts cards directly.
     let mut sole: BTreeMap<String, usize> = BTreeMap::new();
+    let mut blocked_rows = Vec::new();
     for (_, card) in &cards {
         total += 1;
         let mut all = true;
         let mut blockers: Vec<String> = Vec::new();
+        let mut raw_blockers = Vec::new();
         for row in &card.faces {
             let types = mtg_oracle::typeline::parse(&row.type_line);
             let compiled = mtg_oracle::compile::compile(
@@ -309,6 +327,13 @@ fn coverage(args: &[String]) -> Result<(), String> {
                 &subtypes,
             );
             for line in &compiled.unparsed {
+                if blocked {
+                    raw_blockers.push(
+                        line.replace(&row.name, "~")
+                            .replace('\n', "\\n")
+                            .replace('\t', "\\t"),
+                    );
+                }
                 if dump && mtg_oracle::compile::layout_understood(card) {
                     println!("{}", line.replace(&row.name, "~"));
                 }
@@ -318,6 +343,12 @@ fn coverage(args: &[String]) -> Result<(), String> {
             all &= compiled.understood()
                 && (card.layout != "split"
                     || mtg_oracle::compile::split_abilities_understood(&compiled));
+            if blocked
+                && card.layout == "split"
+                && !mtg_oracle::compile::split_abilities_understood(&compiled)
+            {
+                raw_blockers.push("(split card abilities)".into());
+            }
         }
         blockers.dedup();
         if mtg_oracle::compile::layout_understood(card) && blockers.len() == 1 && sole_dump {
@@ -374,10 +405,22 @@ fn coverage(args: &[String]) -> Result<(), String> {
             }
         }
         if mtg_oracle::compile::layout_understood(card) && blockers.len() == 1 {
-            *sole.entry(blockers.remove(0)).or_default() += 1;
+            *sole.entry(blockers[0].clone()).or_default() += 1;
         }
         // Faces the engine cannot cast are not playable however well they compile.
         let ok = all && mtg_oracle::compile::layout_understood(card);
+        if blocked && !ok {
+            if !mtg_oracle::compile::layout_understood(card) {
+                raw_blockers.push(format!("(layout {})", card.layout));
+            }
+            // Preserve distinct oracle records even if two cards share a name.
+            blocked_rows.push(format!(
+                "BLOCKED\t{}\t{}\t{}",
+                card.name,
+                card.oracle_uuid,
+                raw_blockers.join(" | ")
+            ));
+        }
         playable += usize::from(ok);
         if ok && list {
             for row in &card.faces {
@@ -392,6 +435,13 @@ fn coverage(args: &[String]) -> Result<(), String> {
         "{playable} of {total} cards playable as printed ({:.1}%)",
         100.0 * playable as f64 / total.max(1) as f64
     );
+    if blocked {
+        blocked_rows.sort();
+        for row in blocked_rows {
+            println!("{row}");
+        }
+        return Ok(());
+    }
     let mut ranked: Vec<(String, usize)> = missing.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     println!("\nmost common lines not understood:");
@@ -405,6 +455,14 @@ fn coverage(args: &[String]) -> Result<(), String> {
         println!("{n:6}  {line}");
     }
     Ok(())
+}
+
+fn has_legendary_creature_face(card: &mtg_store::StoredCard) -> bool {
+    card.faces.iter().any(|face| {
+        let types = mtg_oracle::typeline::parse(&face.type_line);
+        types.supertypes.contains(&mtg_core::Supertype::Legendary)
+            && types.card_types.contains(&mtg_core::CardType::Creature)
+    })
 }
 
 /// Report on a list of card names: how many are playable as printed, and for each one
@@ -540,6 +598,28 @@ fn parse(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod deck_tests {
     use super::*;
+
+    #[test]
+    fn legendary_creature_scope_requires_both_types_on_the_same_face() {
+        let mut card = mtg_store::StoredCard {
+            oracle_uuid: "scope-fixture".into(),
+            name: "Scope Fixture".into(),
+            layout: "transform".into(),
+            faces: ["Legendary Artifact", "Creature — Wizard"]
+                .map(|type_line| mtg_store::FaceRow {
+                    type_line: type_line.into(),
+                    ..Default::default()
+                })
+                .to_vec(),
+        };
+        assert!(!has_legendary_creature_face(&card));
+        card.faces[1].type_line = "Legendary Creature — Wizard".into();
+        assert!(has_legendary_creature_face(&card));
+        card.faces[1].type_line = "Legendary Artifact Creature — Wizard".into();
+        assert!(has_legendary_creature_face(&card));
+        card.faces[1].type_line = "Creature — Legendary".into();
+        assert!(!has_legendary_creature_face(&card));
+    }
 
     #[test]
     fn unsupported_command_sections_preserve_the_existing_deck() {

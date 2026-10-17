@@ -272,7 +272,7 @@ impl Visitor<'_> {
         match m {
             Modification::CopyOf(s) | Modification::Control(s) => self.selector(s),
             Modification::GrantAbility(a) => self.ability(a),
-            Modification::SetBasePower(v) => self.value(v),
+            Modification::SetBasePower(v) | Modification::SetBaseToughness(v) => self.value(v),
             Modification::SetBasePowerToughness { power, toughness }
             | Modification::ModifyPowerToughness { power, toughness } => {
                 self.value(power);
@@ -312,10 +312,17 @@ impl Visitor<'_> {
                     self.filter(what);
                     self.value(delta);
                 }
-                Restriction::ExtraTrigger { sources, entering } => {
+                Restriction::ExtraTrigger {
+                    sources,
+                    entering,
+                    dying,
+                } => {
                     self.filter(sources);
                     if let Some(entering) = entering {
                         self.filter(entering);
+                    }
+                    if let Some(dying) = dying {
+                        self.filter(dying);
                     }
                 }
                 Restriction::ActivateAsThoughHaste { what: sources } => self.filter(sources),
@@ -611,7 +618,7 @@ impl Visitor<'_> {
             Effect::ShuffleInAndRevealSelfName
             | Effect::SearchExileMayCast { .. }
             | Effect::SacrificeReanimated => {}
-            Effect::PersistMana { effect } => self.effect(effect),
+            Effect::PersistMana { effect, .. } => self.effect(effect),
             Effect::BounceChain { what } => self.selector(what),
             Effect::ReanimateAttach { what } => {
                 if let Some(what) = what {
@@ -693,10 +700,14 @@ impl Visitor<'_> {
                 of,
                 count,
                 controller,
+                except,
             } => {
                 self.selector(of);
                 self.value(count);
                 self.selector(controller);
+                for modification in except {
+                    self.modification(modification);
+                }
             }
             Effect::ExchangeControl { a, b } => {
                 self.selector(a);
@@ -830,6 +841,7 @@ impl Visitor<'_> {
             | ObjectFilter::HasChosenColor
             | ObjectFilter::Targetable
             | ObjectFilter::IsSpell
+            | ObjectFilter::WasCast
             | ObjectFilter::CastFromZone(_)
             | ObjectFilter::Kicked
             | ObjectFilter::HasXInCost
@@ -931,6 +943,7 @@ impl Visitor<'_> {
             | Condition::Monstrous
             | Condition::ClassLevelAtLeast(_)
             | Condition::WasCast(_)
+            | Condition::DiscardedThisTurn
             | Condition::CreatureDiedThisTurn
             | Condition::YouAreMonarch
             | Condition::MaxSpeed

@@ -514,6 +514,35 @@ fn perform(state: &mut GameState, event: &Event) {
             amount,
         } => {
             let slot = color.map_or(mtg_core::ManaPool::COLORLESS_SLOT, |c| c as usize);
+            // Spend ordinary units first, then combat-retained units, then units
+            // retained for the turn. Spent retained mana must not tag later mana
+            // of the same color as retained.
+            let pool = state
+                .players
+                .get(player)
+                .map_or(0, |p| p.mana.amounts[slot]);
+            let turn = state.persistent_mana.get(player).map_or(0, |k| k[slot]);
+            let combat = state.combat_mana.get(player).map_or(0, |k| k[slot]);
+            // Payment plans already remove restricted units they selected. Units
+            // still in those buckets cannot stand in for retained mana the plan
+            // needed to spend on an ineligible spell.
+            let remaining_restricted = state
+                .restricted_mana
+                .iter()
+                .filter(|bucket| bucket.player == *player)
+                .fold(0u16, |sum, bucket| sum.saturating_add(bucket.amounts[slot]));
+            let ordinary = pool
+                .saturating_sub(turn.saturating_add(combat))
+                .saturating_sub(remaining_restricted);
+            let mut retained_spent = amount.saturating_sub(ordinary);
+            for map in [&mut state.combat_mana, &mut state.persistent_mana] {
+                if let Some(kept) = map.get_mut(player) {
+                    let used = retained_spent.min(kept[slot]);
+                    kept[slot] -= used;
+                    retained_spent -= used;
+                }
+                map.retain(|_, kept| kept.iter().any(|n| *n > 0));
+            }
             if let Some(p) = state.players.get_mut(player) {
                 // Planned payments already remove their authorized provenance.
                 // Direct event application consumes unrestricted units first too.
@@ -795,17 +824,20 @@ fn perform(state: &mut GameState, event: &Event) {
             if *step == mtg_core::Step::Cleanup {
                 state.persistent_mana.clear();
             }
+            if matches!(step, mtg_core::Step::EndCombat | mtg_core::Step::Cleanup) {
+                state.combat_mana.clear();
+            }
             for (id, p) in state.players.iter_mut() {
-                let kept = state.persistent_mana.get_mut(id);
-                match kept {
-                    Some(kept) => {
+                let mut retained = [0; 6];
+                for map in [&mut state.persistent_mana, &mut state.combat_mana] {
+                    if let Some(kept) = map.get_mut(id) {
                         for (slot, n) in kept.iter_mut().enumerate() {
-                            *n = (*n).min(p.mana.amounts[slot]);
+                            *n = (*n).min(p.mana.amounts[slot].saturating_sub(retained[slot]));
+                            retained[slot] += *n;
                         }
-                        p.mana.amounts = *kept;
                     }
-                    None => p.mana.clear(),
                 }
+                p.mana.amounts = retained;
             }
         }
 
@@ -1186,6 +1218,11 @@ fn zone_change(
         obj.face = face;
     }
     obj.token_size = None;
+    obj.copy_until_end_of_turn = false;
+    obj.copy_modifications.clear();
+    if !(from.zone == Zone::Graveyard && to.zone == Zone::Stack) {
+        obj.discarded_turn = None;
+    }
     obj.damage = 0;
     obj.dealt_deathtouch_damage = false;
     obj.counters.clear();

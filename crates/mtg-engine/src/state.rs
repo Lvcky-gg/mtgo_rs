@@ -119,6 +119,8 @@ pub struct GameState {
     pub turns_taken: BTreeMap<PlayerId, u32>,
     /// Mana each player keeps as steps and phases end this turn (Birgi), by pool slot.
     pub persistent_mana: BTreeMap<PlayerId, [u16; 6]>,
+    /// Firebending mana, kept until the current combat ends.
+    pub combat_mana: BTreeMap<PlayerId, [u16; 6]>,
     /// Cards each player drew this turn ("your second card each turn").
     pub draws_this_turn: BTreeMap<PlayerId, u32>,
     /// Permanents put into a graveyard from the battlefield this turn, by the id they had
@@ -318,6 +320,12 @@ pub struct GameObject {
     pub cast_later: Option<(PlayerId, u32, Option<mtg_core::ManaCost>, bool)>,
     /// "If it would die this turn, exile it instead": the turn it holds for.
     pub exile_if_dies: Option<u32>,
+    /// The current graveyard incarnation's mayhem permission, recorded on discard.
+    #[cfg_attr(
+        feature = "verification",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub discarded_turn: Option<u32>,
     /// An Aura attached to a player rather than an object.
     pub attached_player: Option<PlayerId>,
     /// While this permanent is a copy of something else (CR 707.2), `card` and `face` are
@@ -328,6 +336,18 @@ pub struct GameObject {
     /// characteristics and abilities — the layer system, triggers, costs — sees the copy
     /// without knowing copies exist.
     pub original: Option<(CardId, u8)>,
+    /// A temporary entry copy such as Cursed Mirror reverts during cleanup.
+    #[cfg_attr(
+        feature = "verification",
+        serde(default, skip_serializing_if = "std::ops::Not::not")
+    )]
+    pub copy_until_end_of_turn: bool,
+    /// Layer-1 exceptions, retained in last-known information for later copies.
+    #[cfg_attr(
+        feature = "verification",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pub copy_modifications: Vec<mtg_ir::effect::Modification>,
     #[cfg_attr(
         feature = "verification",
         serde(skip_serializing_if = "Option::is_none")
@@ -405,6 +425,7 @@ impl GameObject {
             cast_context: None,
             attached_player: None,
             exile_if_dies: None,
+            discarded_turn: None,
             mana_spent: Vec::new(),
             cast_later: None,
             may_play: None,
@@ -412,6 +433,8 @@ impl GameObject {
             may_play_any_mana: false,
             adventure_player: None,
             original: None,
+            copy_until_end_of_turn: false,
+            copy_modifications: Vec::new(),
             token_size: None,
             exile_if_leaves: false,
             is_spell_copy: false,
@@ -826,6 +849,7 @@ impl GameState {
             spell_colors_by_player: BTreeMap::new(),
             turns_taken: BTreeMap::new(),
             persistent_mana: BTreeMap::new(),
+            combat_mana: BTreeMap::new(),
             draws_this_turn: BTreeMap::new(),
             died_this_turn: Vec::new(),
             monarch: None,
@@ -985,6 +1009,7 @@ impl serde::Serialize for DiagnosticState<'_> {
             spell_colors_by_player: _,
             turns_taken: _,
             persistent_mana: _,
+            combat_mana: _,
             draws_this_turn: _,
             died_this_turn: _,
             monarch: _,
@@ -1091,6 +1116,11 @@ impl serde::Serialize for DiagnosticState<'_> {
             out.skip_field("persistent_mana")?;
         } else {
             out.serialize_field("persistent_mana", &self.0.persistent_mana)?;
+        }
+        if self.0.combat_mana.is_empty() {
+            out.skip_field("combat_mana")?;
+        } else {
+            out.serialize_field("combat_mana", &self.0.combat_mana)?;
         }
         if self.0.turns_taken.is_empty() {
             out.skip_field("turns_taken")?;

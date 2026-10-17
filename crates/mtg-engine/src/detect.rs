@@ -1593,6 +1593,13 @@ fn eval_filter(
             .is_some_and(|c| chars.colors.contains(c)),
         // Targeting legality is not a question a trigger condition asks.
         ObjectFilter::Targetable => true,
+        ObjectFilter::WasCast => {
+            obj.cast_from.is_some()
+                || obj
+                    .cast_context
+                    .as_ref()
+                    .is_some_and(|c| c.cast_from.is_some())
+        }
         ObjectFilter::CastFromZone(zone) => {
             obj.cast_from
                 .or_else(|| obj.cast_context.as_ref().and_then(|c| c.cast_from))
@@ -1680,10 +1687,45 @@ pub fn extra_triggers(
     state: &GameState,
     cards: &dyn PrintedCards,
     source: ObjectId,
-    cause: &Event,
+    cause: &StampedEvent,
+    log: &[StampedEvent],
 ) -> usize {
+    let died = match &cause.event {
+        Event::ZoneChange {
+            object, from, to, ..
+        } if from.zone == Zone::Battlefield && to.zone == Zone::Graveyard => Some(*object),
+        _ => None,
+    };
+    let source = match &cause.event {
+        Event::ZoneChange {
+            object, new_object, ..
+        } if died.is_some() && *new_object == source => *object,
+        _ => source,
+    };
+    // Death-trigger modifiers use the state just before the death. Restore
+    // permanents that left in the same batch or later in this resolution, and
+    // exclude permanents that entered afterwards. Earlier departed doublers stay gone.
+    let mut before;
+    let state = if died.is_some() {
+        before = state.clone();
+        before
+            .objects
+            .retain(|_, o| o.zone.zone != Zone::Battlefield || o.timestamp <= cause.at);
+        for event in log.iter().rev().take_while(|e| e.at >= cause.at) {
+            if let Event::ZoneChange { object, from, .. } = &event.event
+                && from.zone == Zone::Battlefield
+                && let Some(last) = state.last_known.get(object)
+                && last.timestamp <= cause.at
+            {
+                before.objects.insert(*object, last.clone());
+            }
+        }
+        &before
+    } else {
+        state
+    };
     // What entered the battlefield, if that is the cause: a zone change onto it, or a token.
-    let entered = match cause {
+    let entered = match &cause.event {
         Event::ZoneChange { to, new_object, .. } if to.zone == mtg_core::Zone::Battlefield => {
             Some(*new_object)
         }
@@ -1695,12 +1737,26 @@ pub fn extra_triggers(
     crate::layers::effects(state, cards)
         .iter()
         .filter(|e| {
-            let Modification::Restriction(Restriction::ExtraTrigger { sources, entering }) =
-                &e.modification
+            let Modification::Restriction(Restriction::ExtraTrigger {
+                sources,
+                entering,
+                dying,
+            }) = &e.modification
             else {
                 return false;
             };
-            let Some(controller) = crate::layers::controller(state, e.source) else {
+            if e.ability.is_some()
+                && !state
+                    .objects
+                    .get(&e.source)
+                    .is_some_and(|o| o.zone.zone == Zone::Battlefield)
+            {
+                return false;
+            }
+            let Some(controller) = e
+                .controller
+                .or_else(|| crate::layers::controller(state, e.source))
+            else {
                 return false;
             };
             let ctx = crate::eval::Ctx {
@@ -1717,6 +1773,9 @@ pub fn extra_triggers(
             crate::eval::matches(&ctx, sources, source).unwrap_or(false)
                 && entering.as_ref().is_none_or(|what| {
                     entered.is_some_and(|o| crate::eval::matches(&ctx, what, o).unwrap_or(false))
+                })
+                && dying.as_ref().is_none_or(|what| {
+                    died.is_some_and(|o| crate::eval::matches(&ctx, what, o).unwrap_or(false))
                 })
         })
         .count()

@@ -915,7 +915,12 @@ pub fn object<'s>(s: &'s str, cx: &mut Cx) -> Option<(Selector, bool, &'s str)> 
     if let Some(r) = s.strip_prefix('~') {
         return Some((Selector::SelfSource, false, r));
     }
-    if let Some(r) = s.strip_prefix("it").filter(|r| !r.starts_with(['s', '\''])) {
+    // Gendered card pronouns follow the same contextual referent as "it".
+    // Require a word boundary so "her" never consumes "herald" or a possessive.
+    if let Some(r) = ["it", "he", "she", "him", "her"].iter().find_map(|p| {
+        s.strip_prefix(p)
+            .filter(|r| !r.starts_with(|c: char| c.is_alphanumeric() || c == '\''))
+    }) {
         return Some((cx.it.clone()?, false, r));
     }
     // "When enchanted creature dies, return that card to …": the card the triggering

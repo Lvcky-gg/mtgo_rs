@@ -56,6 +56,32 @@ fn condition_and<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
 }
 
 fn condition_atom<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
+    if let Some(rest) = s.strip_prefix("it wasn't cast") {
+        return Some((
+            Condition::AnyMatches {
+                what: cx.it.clone()?,
+                filter: ObjectFilter::Not(Box::new(ObjectFilter::WasCast)),
+            },
+            rest,
+        ));
+    }
+    // Immediately after a return instruction, "it" holds only the objects
+    // actually moved. Check their destination and controller before any triggers
+    // caused by the return are put onto the stack.
+    if cx.moved
+        && let Some(rest) = s.strip_prefix("it entered under your control")
+    {
+        return Some((
+            Condition::AnyMatches {
+                what: Selector::Bound(mtg_ir::selector::Binding::It),
+                filter: ObjectFilter::And(vec![
+                    ObjectFilter::InZone(Zone::Battlefield),
+                    ObjectFilter::ControlledBy(Box::new(Selector::You)),
+                ]),
+            },
+            rest,
+        ));
+    }
     // "you discarded an instant or sorcery card this way" (Vohar): what the discard
     // instruction just discarded.
     if let Some(r) = s
@@ -307,6 +333,8 @@ fn condition_shapes<'s>(s: &'s str, cx: &Cx) -> Option<(Condition, &'s str)> {
     if let Some(rest) = s
         .strip_prefix("there is a ")
         .or_else(|| s.strip_prefix("there is an "))
+        .or_else(|| s.strip_prefix("there's a "))
+        .or_else(|| s.strip_prefix("there's an "))
         && let Some((noun, rest)) = nouns::noun(rest, cx)
         && noun.zone == Zone::Graveyard
         && !noun.plural

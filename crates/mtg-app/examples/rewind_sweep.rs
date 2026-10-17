@@ -118,7 +118,7 @@ fn main() {
                     Progress::Continue => {
                         quiet += 1;
                         // Thousands of steps and nobody asked anything: a loop of triggers.
-                        if quiet % 5_000 == 0 {
+                        if quiet.is_multiple_of(5_000) {
                             let stack: Vec<String> = engine
                                 .view_for(PlayerId(0))
                                 .stack

@@ -1804,7 +1804,7 @@ impl Engine {
             }
             // "That ability triggers an additional time" (Delney), once per such effect.
             let extra = if t.delayed.is_none() {
-                crate::detect::extra_triggers(&self.state, cards, t.source, &t.cause.event)
+                crate::detect::extra_triggers(&self.state, cards, t.source, &t.cause, &self.log)
             } else {
                 0
             };
@@ -3391,8 +3391,11 @@ impl Engine {
                 ) {
                     continue;
                 }
-                if *timing == mtg_ir::ability::ActivationTiming::Exhaust
-                    && self.state.activated_ever.contains(&(id, ability.id))
+                if matches!(
+                    timing,
+                    mtg_ir::ability::ActivationTiming::Exhaust
+                        | mtg_ir::ability::ActivationTiming::PowerUp
+                ) && self.state.activated_ever.contains(&(id, ability.id))
                 {
                     continue;
                 }
@@ -5681,6 +5684,7 @@ impl Engine {
                     card: o.card,
                     face: o.face,
                     token_size: o.token_size,
+                    modifications: resolve::copy_modifications(&self.state, o.id),
                 }),
                 Target::Player(_) => None,
             });
@@ -5893,6 +5897,7 @@ impl Engine {
                 card,
                 face,
                 token_size,
+                mut modifications,
             }) = copy
         {
             apply::apply(
@@ -5905,33 +5910,40 @@ impl Engine {
                 },
                 &mut self.log,
             );
-            // "… except it's a Bird in addition to its other types and it has flying."
-            let except = cards
+            let (except, temporary) = cards
                 .face(obj.card, obj.face)
                 .and_then(|f| {
                     f.abilities.iter().find_map(|a| match &a.kind {
                         mtg_ir::AbilityKind::ReplacementEffect(mtg_ir::effect::Replacement {
-                            kind: mtg_ir::effect::ReplacementKind::EntersAsCopy { except, .. },
+                            kind:
+                                mtg_ir::effect::ReplacementKind::EntersAsCopy {
+                                    except,
+                                    until_end_of_turn,
+                                    ..
+                                },
                             ..
-                        }) => Some(except.clone()),
+                        }) => Some((except.clone(), *until_end_of_turn)),
                         _ => None,
                     })
                 })
                 .unwrap_or_default();
-            for modification in except {
-                let id = self.state.new_object_id();
-                let timestamp = self.state.bump();
-                self.state.continuous.push(crate::state::ContinuousEffect {
-                    id,
-                    source: new_object,
-                    affected: crate::state::AffectedSet::Fixed(vec![new_object]),
-                    layer: crate::resolve::layer_of(&modification),
-                    modification,
-                    duration: mtg_ir::effect::Duration::Permanent,
-                    timestamp,
-                    ability: None,
-                    controller: Some(obj.controller),
-                });
+            modifications.extend(except);
+            let duration = if temporary {
+                mtg_ir::effect::Duration::UntilEndOfTurn
+            } else {
+                mtg_ir::effect::Duration::Permanent
+            };
+            resolve::add_copy_modifications(
+                &mut self.state,
+                &mut self.log,
+                new_object,
+                obj.controller,
+                &modifications,
+                duration,
+                Cause::Resolution(top),
+            );
+            if let Some(object) = self.state.objects.get_mut(&new_object) {
+                object.copy_until_end_of_turn = temporary;
             }
             if let Some((power, toughness)) = token_size {
                 apply::apply(
@@ -7224,6 +7236,15 @@ impl Engine {
                 // CR 514.2 — damage wears off and until-end-of-turn effects end,
                 // simultaneously and with no priority.
                 for o in self.state.objects.values_mut() {
+                    if o.copy_until_end_of_turn {
+                        if let Some((card, face)) = o.original.take() {
+                            o.card = card;
+                            o.face = face;
+                        }
+                        o.token_size = None;
+                        o.copy_until_end_of_turn = false;
+                        o.copy_modifications.clear();
+                    }
                     o.damage = 0;
                     o.dealt_deathtouch_damage = false;
                     // Regeneration shields last for the turn (CR 701.15a).
@@ -8147,6 +8168,7 @@ struct CopyEntry {
     card: mtg_core::CardId,
     face: u8,
     token_size: Option<(i32, i32)>,
+    modifications: Vec<mtg_ir::effect::Modification>,
 }
 
 /// Where the choice of what a permanent enters as a copy of is bound while it resolves.

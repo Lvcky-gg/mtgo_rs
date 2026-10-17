@@ -454,11 +454,15 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
             of,
             count,
             controller,
+            except,
         } => {
             let mut f = Footprint::writing(Resource::SharedZone(Zone::Battlefield));
             f.merge(selector_read(of, r));
             f.merge(value_footprint(count, r));
             f.merge(selector_read(controller, r));
+            if !except.is_empty() {
+                f.merge(Footprint::unanalysable());
+            }
             f
         }
 
@@ -502,7 +506,7 @@ pub fn analyse(effect: &Effect, r: &dyn SelectorResolver) -> Footprint {
 fn modification_footprint(m: &Modification, r: &dyn SelectorResolver) -> Footprint {
     match m {
         Modification::CopyOf(s) | Modification::Control(s) => selector_read(s, r),
-        Modification::SetBasePower(v) => value_footprint(v, r),
+        Modification::SetBasePower(v) | Modification::SetBaseToughness(v) => value_footprint(v, r),
         Modification::SetBasePowerToughness { power, toughness }
         | Modification::ModifyPowerToughness { power, toughness } => {
             value_footprint(power, r).with(value_footprint(toughness, r))
@@ -536,7 +540,7 @@ fn condition_footprint(c: &crate::trigger::Condition, r: &dyn SelectorResolver) 
         | C::Saddled
         | C::NoSpellsLastTurn
         | C::PlayerCastTwoLastTurn => Footprint::default(),
-        C::HasCityBlessing => Footprint::reading(Resource::TurnState),
+        C::HasCityBlessing | C::DiscardedThisTurn => Footprint::reading(Resource::TurnState),
         C::CastColorThisTurn { .. } | C::YourEarlyTurn(_) => {
             Footprint::reading(Resource::TurnState)
         }

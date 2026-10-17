@@ -19,6 +19,28 @@ pub fn effect(text: &str, cx: &mut Cx) -> Option<Effect> {
     let text = words::strip_ability_word(text);
     cx.until_eot = false;
     cx.discarded = false;
+    if text
+        == "counter target activated or triggered ability. if a permanent's ability is countered this way, activated abilities of that permanent can't be activated this turn"
+    {
+        let (counter, "") = counter_spell("counter target activated or triggered ability", cx)?
+        else {
+            return None;
+        };
+        return Some(Effect::Sequence(vec![
+            counter,
+            Effect::If {
+                cond: mtg_ir::trigger::Condition::Exists(Selector::Bound(
+                    mtg_ir::selector::Binding::COUNTERED_SOURCES,
+                )),
+                then: Box::new(Effect::Continuous {
+                    what: Selector::Bound(mtg_ir::selector::Binding::COUNTERED_SOURCES),
+                    modification: Modification::Restriction(Restriction::CantActivateAbilities),
+                    duration: Duration::UntilEndOfTurn,
+                }),
+                otherwise: Box::new(Effect::Nothing),
+            },
+        ]));
+    }
     if matches!(text, "recruit" | "you recruit") {
         return Some(Effect::Sequence(vec![
             Effect::Draw {
@@ -4046,6 +4068,7 @@ fn adapt_populate<'s>(s: &'s str, _: &mut Cx) -> Option<(Effect, &'s str)> {
                     of: Selector::Bound(mtg_ir::selector::Binding::It),
                     count: Value::ONE,
                     controller: Selector::You,
+                    except: Vec::new(),
                 }),
             },
             r,
@@ -5753,10 +5776,30 @@ fn quoted_grant<'s>(s: &'s str, cx: &Cx) -> Option<(Vec<Modification>, &'s str)>
     Some((mods, &body[end + 1..]))
 }
 
+fn numbered_firebending<'s>(s: &'s str, cx: &Cx) -> Option<(Vec<Ability>, &'s str)> {
+    let (n, rest) = words::number(s.strip_prefix("firebending ")?)?;
+    if n < 0 {
+        return None;
+    }
+    Some((
+        super::quoted_abilities(&format!("firebending {n}"), cx)?,
+        rest,
+    ))
+}
+
 /// What "gains …" / "has …" gives: keywords, or protection from a quality ("protection
 /// from red", "protection from the color of your choice" — not for a static ability,
 /// which has no moment to choose).
 fn granted<'s>(s: &'s str, is_static: bool, cx: &Cx) -> Option<(Vec<Modification>, &'s str)> {
+    if let Some((abilities, rest)) = numbered_firebending(s, cx) {
+        return Some((
+            abilities
+                .into_iter()
+                .map(|a| Modification::GrantAbility(Box::new(a)))
+                .collect(),
+            rest,
+        ));
+    }
     // "has ward {1}": the ward trigger itself (CR 702.21), granted.
     if let Some(r) = s.strip_prefix("ward ")
         && let Some((mana, rest)) = super::mana_cost(r)
@@ -6248,26 +6291,20 @@ fn create_token<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
             if of_plural {
                 return None;
             }
-            let create = Effect::CreateTokenCopy {
-                of,
-                count: Value::Fixed(n),
-                controller: Selector::You,
+            let (except, rest) = match rest.strip_prefix(", except ") {
+                Some(r) => copy_exceptions(r, cx)?,
+                None => (Vec::new(), rest),
             };
-            // "…, except it's a 4/4 black Zombie with no mana cost" (CR 707.9b): the
-            // exceptions hold for as long as the token exists.
-            if let Some(r) = rest.strip_prefix(", except ") {
-                let (mods, rest) = copy_exceptions(r, cx)?;
-                let made = Selector::Bound(mtg_ir::selector::Binding::It);
-                let mut steps = vec![create];
-                steps.extend(mods.into_iter().map(|modification| Effect::Continuous {
-                    what: made.clone(),
-                    modification,
-                    duration: Duration::Permanent,
-                }));
-                cx.it = Some(made);
-                return Some((Effect::Sequence(steps), rest));
-            }
-            return Some((create, rest));
+            cx.it = Some(Selector::Bound(mtg_ir::selector::Binding::It));
+            return Some((
+                Effect::CreateTokenCopy {
+                    of,
+                    count: Value::Fixed(n),
+                    controller: Selector::You,
+                    except,
+                },
+                rest,
+            ));
         }
     }
     // "an X/X green Ooze creature token": made 0/0, then given X/X as its base power and
@@ -6309,6 +6346,10 @@ fn create_token<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let mut abilities = Vec::new();
     if let Some(r) = rest.strip_prefix(" with ") {
         let mut r = r;
+        if let Some((fire, after)) = numbered_firebending(r, cx) {
+            abilities.extend(fire);
+            r = after.strip_prefix(" and ").unwrap_or(after);
+        }
         // A keyword that is a triggered ability: "with prowess" (Monastery Mentor), "with
         // training" — compiled as its own printed line would be.
         if let Some((word, after)) = ["prowess", "training", "exalted"]
@@ -6328,6 +6369,13 @@ fn create_token<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
                 source_text: None,
             }));
             r = after;
+            if let Some((fire, after)) = r
+                .strip_prefix(" and ")
+                .and_then(|r| numbered_firebending(r, cx))
+            {
+                abilities.extend(fire);
+                r = after;
+            }
             if let Some(after) = r.strip_prefix(" and ").filter(|a| a.starts_with('"')) {
                 r = after;
             }
@@ -6431,6 +6479,26 @@ fn becomes_creature<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let r = r
         .strip_prefix(" becomes a ")
         .or_else(|| r.strip_prefix(" becomes an "))?;
+    // Karn and Sydri use the target's mana value, fixed when the ability resolves.
+    if let Some(rest) = r.strip_prefix(
+        "artifact creature with power and toughness each equal to its mana value until end of turn",
+    ) {
+        let size = Value::ManaValue(Box::new(what.clone()));
+        return Some((
+            continuous(
+                what,
+                vec![
+                    Modification::SetTypes(vec![CardType::Artifact, CardType::Creature]),
+                    Modification::SetBasePowerToughness {
+                        power: size.clone(),
+                        toughness: size,
+                    },
+                ],
+                Duration::UntilEndOfTurn,
+            ),
+            rest,
+        ));
+    }
     let ((p, t), r) = words::pt(r)?;
     let r = r.strip_prefix(' ')?;
     let (colors, r) = match token_colors(r) {
@@ -6592,16 +6660,22 @@ pub(crate) fn copy_exceptions<'s>(s: &'s str, cx: &Cx) -> Option<(Vec<Modificati
                 }
             }
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
-            let rest = rest
-                .strip_prefix("in addition to its other types")
-                .unwrap_or(rest);
+            let additional = rest.strip_prefix("in addition to its other types");
             if !types.is_empty() {
-                mods.push(Modification::AddTypes(types));
+                mods.push(if additional.is_some() {
+                    Modification::AddTypes(types)
+                } else {
+                    Modification::SetTypes(types)
+                });
             }
             if !subtypes.is_empty() {
-                mods.push(Modification::AddSubtypes(subtypes));
+                mods.push(if additional.is_some() {
+                    Modification::AddSubtypes(subtypes)
+                } else {
+                    Modification::SetCreatureTypes(subtypes)
+                });
             }
-            r = rest;
+            r = additional.unwrap_or(rest);
         }
         if let Some(rest) = r.trim_start().strip_prefix("with no mana cost") {
             mods.push(Modification::NoManaCost);
@@ -7054,6 +7128,36 @@ pub fn value_targeting<'s>(s: &'s str, cx: &mut Cx) -> Option<(Value, &'s str)> 
 }
 
 pub fn value_phrase<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
+    // Sum independently described quantities, not just a quantity and a fixed
+    // number (Abomination of Llanowar).
+    if let Some((left, right)) = s.split_once(" plus ")
+        && let Some((left, "")) = value_phrase(left, cx)
+            .or_else(|| words::number(left).map(|(n, r)| (Value::Fixed(n), r)))
+        && let Some((right, rest)) = value_phrase(right, cx)
+            .or_else(|| words::number(right).map(|(n, r)| (Value::Fixed(n), r)))
+    {
+        return Some((Value::Sum(vec![left, right]), rest));
+    }
+    if let Some(rest) = s
+        .strip_prefix("the number of cards in the hand of the opponent with the most cards in hand")
+    {
+        return Some((
+            Value::GreatestOwnedCount(Box::new(Selector::All {
+                zone: Zone::Hand,
+                filter: mtg_ir::ObjectFilter::OwnedBy(Box::new(Selector::Opponents)),
+            })),
+            rest,
+        ));
+    }
+    if let Some(rest) = s.strip_prefix("the total number of cards in all players' hands") {
+        return Some((
+            Value::Count(Box::new(Selector::All {
+                zone: Zone::Hand,
+                filter: mtg_ir::ObjectFilter::Any,
+            })),
+            rest,
+        ));
+    }
     // "the amount of mana spent to cast that spell": a cast trigger's spell.
     if let Some(r) = s.strip_prefix("the amount of mana spent to cast that spell")
         && let Some(it) = cx.it.clone().filter(|it| *it != Selector::SelfSource)
@@ -7878,6 +7982,11 @@ fn per_effect<'s>(s: &'s str, cx: &mut Cx) -> Option<(Value, &'s str)> {
 }
 
 pub fn per<'s>(s: &'s str, cx: &Cx) -> Option<(Value, &'s str)> {
+    if let Some(r) = s.strip_prefix("different power among ")
+        && let Some((what, rest)) = super::conditions::counted(r, cx)
+    {
+        return Some((Value::DistinctPowers(Box::new(what)), rest));
+    }
     // "for each spell you've cast this turn" (storm-like counts).
     if let Some(r) = s
         .strip_prefix("spell you've cast this turn")
@@ -8224,6 +8333,11 @@ fn delayed_clause<'s>(s: &'s str, cx: &mut Cx) -> Option<(Effect, &'s str)> {
     let r = s.strip_prefix("at ")?;
     let (on, r) = delayed_when(r)?;
     let r = r.strip_prefix(", ")?;
+    // A return followed by "If it entered …" is one delayed instruction. Keep
+    // the follow-up inside the trigger rather than running it when it is created.
+    if r.starts_with("return ") && r.contains(". if it entered under your control, ") {
+        return Some((delayed(on, effect(r, cx)?)?, ""));
+    }
     // "… pay {3}{U}{U}. If you don't, you lose the game." (the Pacts): two sentences,
     // the rest of the text.
     if r.starts_with("pay ") && r.contains(". if you don't, ") {

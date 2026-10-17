@@ -233,7 +233,13 @@ impl Searcher {
         horizon: u32,
     ) -> f64 {
         let mut asked = 0;
+        // Steps without a question count too: a loop of mandatory triggers asks no one.
+        let mut steps = 0u64;
         loop {
+            steps += 1;
+            if steps > u64::from(self.budget.max_choices) * 64 {
+                break;
+            }
             match engine.advance(cards) {
                 Progress::Continue => {}
                 Progress::GameOver { .. } => {

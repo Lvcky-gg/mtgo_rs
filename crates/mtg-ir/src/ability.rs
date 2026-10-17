@@ -382,6 +382,9 @@ pub enum ActivationTiming {
     AnyPlayerSorcery,
     /// CR 702.177 — exhaust: each such ability of an object may be activated only once.
     Exhaust,
+    /// CR 702.193: once per object; reduce the cost by this permanent's mana
+    /// cost on the turn it entered the battlefield.
+    PowerUp,
     /// CR 702.142 — boast: once each turn (twice on your turn under Birgi), and only if
     /// the creature attacked this turn (a cost condition beside it).
     Boast,
@@ -469,6 +472,7 @@ pub fn encore(mana: ManaCost) -> AbilityKind {
                 of: Selector::SelfSource,
                 count: Value::Count(Box::new(Selector::Opponents)),
                 controller: Selector::You,
+                except: Vec::new(),
             },
             Effect::Continuous {
                 what: made(),

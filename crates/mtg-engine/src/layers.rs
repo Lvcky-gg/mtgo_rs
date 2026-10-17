@@ -135,6 +135,16 @@ pub fn compute(
         ch.power = Some(power);
         ch.toughness = Some(toughness);
     }
+    if !obj.face_down
+        && let Some(face) = printed.face(obj.card, obj.face)
+    {
+        ch.abilities.retain(|id| {
+            !face
+                .abilities
+                .iter()
+                .any(|a| a.id == *id && copy_suppresses(obj, a))
+        });
+    }
     // CR 702.103b — a bestowed Aura is an Aura enchantment, and no creature.
     if obj.bestowed() {
         ch.card_types.retain(|t| *t != mtg_core::CardType::Creature);
@@ -334,6 +344,9 @@ pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousE
             continue;
         };
         for ability in &face.abilities {
+            if copy_suppresses(obj, ability) {
+                continue;
+            }
             let mtg_ir::AbilityKind::Static {
                 what,
                 modification,
@@ -402,6 +415,25 @@ pub fn effects(state: &GameState, printed: &dyn PrintedCards) -> Vec<ContinuousE
     }
     out.extend(statics);
     out
+}
+
+/// CR 707.9d: when a copy specifies a value, it does not copy the ability
+/// defining that value. In particular Preston's 0/1 overrides a copied */* CDA.
+fn copy_suppresses(obj: &crate::state::GameObject, ability: &mtg_ir::Ability) -> bool {
+    use mtg_ir::{AbilityKind, effect::Modification as M};
+    matches!(
+        &ability.kind,
+        AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: M::SetBasePowerToughness { .. }
+                | M::SetBasePower(_)
+                | M::SetBaseToughness(_),
+            condition: None,
+        }
+    ) && obj
+        .copy_modifications
+        .iter()
+        .any(|m| matches!(m, M::SetBasePowerToughness { .. }))
 }
 
 /// Whether a restriction matching `want` applies to an object.
@@ -513,7 +545,17 @@ fn apply_one(
                 }
             }
         }
-        M::RemoveTypes(ts) => ch.card_types.retain(|t| !ts.contains(t)),
+        M::RemoveTypes(ts) => {
+            ch.card_types.retain(|t| !ts.contains(t));
+            if ts.contains(&mtg_core::CardType::Creature) {
+                ch.subtypes.retain(|s| {
+                    !printed
+                        .subtype_name(*s)
+                        .is_some_and(mtg_core::is_creature_type)
+                });
+                ch.every_creature_type = false;
+            }
+        }
         M::RemoveSupertype(s) => ch.supertypes.retain(|x| x != s),
         M::NoManaCost => ch.mana_cost = mtg_core::ManaCost::default(),
         M::AddSubtypes(ss) => {
@@ -621,6 +663,7 @@ fn apply_one(
 
         // Layer 7a/7b — set base values, replacing whatever was there.
         M::SetBasePower(power) => ch.power = Some(eval_value(power)),
+        M::SetBaseToughness(toughness) => ch.toughness = Some(eval_value(toughness)),
         M::SetBasePowerToughness { power, toughness } => {
             ch.power = Some(eval_value(power));
             ch.toughness = Some(eval_value(toughness));

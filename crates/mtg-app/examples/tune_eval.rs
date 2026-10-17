@@ -234,11 +234,12 @@ fn solve(mut a: [[f64; N]; N], mut b: [f64; N]) -> [f64; N] {
         if d.abs() < 1e-12 {
             continue;
         }
-        for row in 0..N {
+        let pivot_row = a[col];
+        for (row, values) in a.iter_mut().enumerate() {
             if row != col {
-                let f = a[row][col] / d;
-                for k in col..N {
-                    a[row][k] -= f * a[col][k];
+                let f = values[col] / d;
+                for (value, pivot) in values.iter_mut().zip(&pivot_row).skip(col) {
+                    *value -= f * *pivot;
                 }
                 b[row] -= f * b[col];
             }

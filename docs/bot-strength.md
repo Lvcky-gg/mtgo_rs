@@ -32,7 +32,7 @@ Elo. A change that does not move the interval has not been shown to help.
 | Deck pool (`deck_pool` example) | 120 published MTGO lists ≥90% playable (103 Pauper); arena `--pool pauper` samples pairings |
 | State encoder (`search/encode.rs`) | schema v1: 39 global features + per-object tokens (112 features from characteristics and hashed IR words, slot, name hash); opponent hand is a count |
 | Self-play recorder (`selfplay` example) | shards under `~/.local/share/mtgo_rs/selfplay/v1/`; first run: 28,283 Pauper games, 323k positions |
-| Value network (`search/value.rs`, `tools/learn/train_value.py`) | held-out log loss **0.441** (78.8%) vs 0.573 (68.5%) for logistic on global features; Rust matches PyTorch to 1e-7; 123 µs per evaluation; arena `--value PATH` — arena verdict pending |
+| Value network (`search/value.rs`, `tools/learn/train_value.py`) | held-out log loss **0.441** (78.8%) vs 0.573 (68.5%) for logistic on global features; Rust matches PyTorch to 1e-7; 123 µs per evaluation; arena `--value PATH`: same strength as the linear eval, 33% cheaper per decision (see below) |
 
 **First measurement (2026-10-16):** searcher (64 playouts, horizon 1 turn, racing, keeps the
 heuristic's answer unless beaten by a paired 2σ margin) vs heuristic bot on Demo/Weirds,
@@ -40,6 +40,15 @@ heuristic's answer unless beaten by a paired 2σ margin) vs heuristic bot on Dem
 10,385 searched decisions, ~120 ms per decision. Fitted evaluation weights: 63.5% ± 8.3% —
 not distinguishable yet, so the defaults stand. At 16 playouts the margin rule never fires
 (too noisy) and the searcher equals the heuristic.
+
+**Pauper pool (2026-10-16):** 32 sampled pairings × both seats, 64 playouts, horizon 1,
+turn limit 60, 30-minute game limit. Searcher with the linear eval: **73.4% ± 8.8%, +177 Elo
+[+105, +266]**, 960 ms per decision, 3,600 overrides in 20,758 decisions. With the value net:
+**71.9% ± 8.7%, +163 Elo [+94, +247]**, 648 ms per decision, 2,587 overrides. Paired by seed,
+net − linear = −1.6% ± 9.1%: no strength difference yet, but the net makes search a third
+cheaper (racing settles sooner on less noisy leaves). A 5-minute game limit adjudicated most
+games — searching every decision of a 20-turn Pauper game takes minutes — so search cost,
+not loops, is the arena's bottleneck.
 
 Lessons: without the margin rule, flat MC overrides between equivalent moves at random
 (land before or after a spell, or skipping the land) — pure noise. A game that loops within

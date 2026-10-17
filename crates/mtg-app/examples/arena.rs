@@ -13,7 +13,7 @@
 //! ```text
 //! cargo run --release -p mtg-app --example arena -- [--seeds N] [--playouts P]
 //!     [--horizon T] [--margin M] [--turns T] [--pool FORMAT]
-//!     [--value PATH/value.bin] [--threads N] [--deck NAME] [--baseline]
+//!     [--value PATH/value.bin] [--game-seconds S] [--threads N] [--deck NAME] [--baseline]
 //! ```
 //! `--baseline` plays the heuristic bot against itself: the score should be 50% and the
 //! time per game shows how many playouts a decision can afford.
@@ -39,6 +39,8 @@ struct Args {
     budget: Budget,
     turns: u32,
     threads: usize,
+    /// Wall-clock limit per game; past it the game is adjudicated and counted as a timeout.
+    game_seconds: u64,
     deck: Option<String>,
     /// A learned value network (`value.bin`) for the searcher's playout leaves.
     value: Option<std::sync::Arc<mtg_policy::search::value::ValueNet>>,
@@ -54,6 +56,7 @@ fn parse() -> Args {
         seeds: 8,
         budget: Budget::default(),
         turns: 25,
+        game_seconds: 300,
         threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
         deck: None,
         pool: None,
@@ -70,6 +73,7 @@ fn parse() -> Args {
             "--horizon" => a.budget.horizon_turns = num(),
             "--margin" => a.budget.margin = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             "--turns" => a.turns = num(),
+            "--game-seconds" => a.game_seconds = u64::from(num().max(1)),
             "--threads" => a.threads = num().max(1) as usize,
             "--deck" => a.deck = it.next().map(|s| s.to_lowercase()),
             "--value" => {
@@ -113,6 +117,8 @@ fn parse() -> Args {
 struct Played {
     score: f64,
     adjudicated: bool,
+    /// Adjudicated because the game ran past `--game-seconds`.
+    timed_out: bool,
     turns: u32,
     decisions: u64,
 }
@@ -133,7 +139,16 @@ fn play(
     let mut engine = Engine::new(new_game(format, cards, decks, seed, game, PlayerId(0)));
     let mut decisions = 0;
     let mut asked = 0u32;
+    // Wall-clock guard, checked on every step and not only at questions: a state that has
+    // blown up, or a loop the engine plays without asking anyone, would otherwise hold its
+    // thread forever.
+    let deadline = Instant::now() + std::time::Duration::from_secs(args.game_seconds);
+    let mut steps = 0u64;
     loop {
+        steps += 1;
+        if steps.is_multiple_of(64) && Instant::now() > deadline {
+            return adjudicate(&engine, cards, search_seat, decisions, true);
+        }
         match engine.advance(cards) {
             Progress::Continue => {}
             Progress::GameOver { winners } => {
@@ -145,6 +160,7 @@ fn play(
                 return Played {
                     score,
                     adjudicated: false,
+                    timed_out: false,
                     turns: engine.state.turn,
                     decisions,
                 };
@@ -152,24 +168,7 @@ fn play(
             Progress::NeedsChoice(c) => {
                 asked += 1;
                 if engine.state.turn > args.turns || asked > 5_000 {
-                    let p = eval::evaluate(
-                        &engine.state,
-                        cards,
-                        search_seat,
-                        &eval::Weights::default(),
-                    );
-                    return Played {
-                        score: if p > 0.6 {
-                            1.0
-                        } else if p < 0.4 {
-                            0.0
-                        } else {
-                            0.5
-                        },
-                        adjudicated: true,
-                        turns: engine.state.turn,
-                        decisions,
-                    };
+                    return adjudicate(&engine, cards, search_seat, decisions, false);
                 }
                 // A looping game would otherwise search every one of thousands of decisions;
                 // past this many the searcher plays the rest heuristically.
@@ -197,6 +196,7 @@ fn play(
                         return Played {
                             score: 0.5,
                             adjudicated: true,
+                            timed_out: false,
                             turns: engine.state.turn,
                             decisions,
                         };
@@ -205,12 +205,37 @@ fn play(
                     return Played {
                         score: 0.5,
                         adjudicated: true,
+                        timed_out: false,
                         turns: engine.state.turn,
                         decisions,
                     };
                 }
             }
         }
+    }
+}
+
+/// Score a game that did not finish by the fixed reference evaluation.
+fn adjudicate(
+    engine: &Engine,
+    cards: &GameCards,
+    search_seat: PlayerId,
+    decisions: u64,
+    timed_out: bool,
+) -> Played {
+    let p = eval::evaluate(&engine.state, cards, search_seat, &eval::Weights::default());
+    Played {
+        score: if p > 0.6 {
+            1.0
+        } else if p < 0.4 {
+            0.0
+        } else {
+            0.5
+        },
+        adjudicated: true,
+        timed_out,
+        turns: engine.state.turn,
+        decisions,
     }
 }
 
@@ -252,7 +277,8 @@ fn main() {
     };
     // Saved decks: every pair of the same format, and each deck against itself, on every seed.
     // The pool: one sampled pairing of distinct decks per seed, so the field is covered.
-    let (decks, pairings): (Vec<_>, Vec<(usize, usize, Vec<u32>)>) = match &args.pool {
+    type Pairing = (usize, usize, Vec<u32>);
+    let (decks, pairings): (Vec<_>, Vec<Pairing>) = match &args.pool {
         Some(format) => {
             let decks = pool::load(format);
             println!("pool {format:?}: {} decks", decks.len());
@@ -338,6 +364,15 @@ fn main() {
                             )
                         })
                         .collect();
+                    let timeouts = pair.iter().filter(|p| p.timed_out).count();
+                    eprintln!(
+                        "pair seed {s}: {} vs {}: searcher {} / {}{}",
+                        decks[*i].0,
+                        decks[*j].0,
+                        pair[0].score,
+                        pair[1].score,
+                        if timeouts > 0 { "  TIMEOUT" } else { "" }
+                    );
                     let mut done = finished.lock().unwrap();
                     done.push((t, pair));
                     if done.len() % 8 == 0 {
@@ -355,12 +390,14 @@ fn main() {
     let finished = finished.into_inner().unwrap();
     let mut all: Vec<f64> = Vec::new();
     let (mut adjudicated, mut games, mut decisions, mut turns) = (0, 0, 0u64, 0u64);
+    let mut timeouts = 0;
     for (t, (i, j, ..)) in tables.iter().enumerate() {
         let mut means = Vec::new();
         for (_, pair) in finished.iter().filter(|(u, _)| *u == t) {
             for p in pair {
                 games += 1;
                 adjudicated += u32::from(p.adjudicated);
+                timeouts += u32::from(p.timed_out);
                 decisions += p.decisions;
                 turns += u64::from(p.turns);
             }
@@ -405,7 +442,7 @@ fn main() {
         elo(mean + half)
     );
     println!(
-        "adjudicated {adjudicated}/{games}, mean length {:.1} turns",
+        "adjudicated {adjudicated}/{games} ({timeouts} timed out), mean length {:.1} turns",
         turns as f64 / games.max(1) as f64
     );
     let secs = started.elapsed().as_secs_f64();

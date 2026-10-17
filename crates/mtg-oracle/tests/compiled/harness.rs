@@ -92,6 +92,8 @@ const SUBTYPES: &[&str] = &[
     "Map",
     // Unglued's Elvish Impersonators prints "Elves" as a subtype of its own.
     "Elves",
+    "Lesson",
+    "Reflection",
 ];
 
 #[derive(Default)]

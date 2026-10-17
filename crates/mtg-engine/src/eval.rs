@@ -860,6 +860,11 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
                     .or_else(|| o.cast_context.as_ref().and_then(|c| c.cast_from))
             })
             .is_some_and(|z| from.is_none_or(|f| f == z)),
+        Condition::DiscardedThisTurn => ctx
+            .state
+            .objects
+            .get(&ctx.source)
+            .is_some_and(|o| o.discarded_turn == Some(ctx.state.turn)),
         Condition::ClassLevelAtLeast(n) => ctx
             .state
             .objects
@@ -965,7 +970,22 @@ pub fn condition(ctx: &Ctx, c: &Condition) -> Eval<bool> {
         Condition::AnyMatches { what, filter } => {
             let mut matched = false;
             for object in objects(ctx, what)? {
-                matched |= matches(ctx, filter, object)?;
+                if ctx.state.objects.contains_key(&object) {
+                    matched |= matches(ctx, filter, object)?;
+                } else if let Some(last) = ctx.state.last_known.get(&object) {
+                    // Instructions about a previously selected object use its
+                    // last-known properties if it has since left the battlefield.
+                    let mut before = ctx.state.clone();
+                    before.objects.insert(object, last.clone());
+                    matched |= matches(
+                        &Ctx {
+                            state: &before,
+                            ..*ctx
+                        },
+                        filter,
+                        object,
+                    )?;
+                }
             }
             matched
         }
@@ -1193,6 +1213,13 @@ pub fn matches(ctx: &Ctx, filter: &ObjectFilter, id: ObjectId) -> Eval<bool> {
             obj.cast_from
                 .or_else(|| obj.cast_context.as_ref().and_then(|c| c.cast_from))
                 == Some(*zone)
+        }
+        ObjectFilter::WasCast => {
+            obj.cast_from.is_some()
+                || obj
+                    .cast_context
+                    .as_ref()
+                    .is_some_and(|c| c.cast_from.is_some())
         }
         ObjectFilter::Kicked => obj.cast_context.as_ref().is_some_and(|c| c.kicked),
         ObjectFilter::IsCommander => ctx.state.commander.is_commander(obj.owner, obj.card),

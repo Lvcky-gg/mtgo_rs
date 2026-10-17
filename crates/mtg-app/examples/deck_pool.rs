@@ -236,7 +236,7 @@ fn main() {
         println!("{format:<10} {kept:>4} of {lists:>4} lists kept");
     }
     let mut worst: Vec<_> = missing.into_iter().collect();
-    worst.sort_by(|a, b| b.1.cmp(&a.1));
+    worst.sort_by_key(|a| std::cmp::Reverse(a.1));
     println!("most-played unplayable cards (copies across all lists):");
     for (name, n) in worst.iter().take(25) {
         println!("  {n:>5}  {name}");

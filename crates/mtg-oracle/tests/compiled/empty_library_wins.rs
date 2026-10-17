@@ -37,5 +37,5 @@ fn the_maniac_wins_instead_of_drawing() {
 #[test]
 fn without_it_nobody_has_lost_yet() {
     // The draw is only recorded; state-based actions end the game for P0 later.
-    assert_eq!(draw_with_empty_library(false).1, false);
+    assert!(!draw_with_empty_library(false).1);
 }

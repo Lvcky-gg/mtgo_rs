@@ -644,23 +644,29 @@ fn resolve_inner(
             rc.controller = caster;
             result
         }
-        Effect::PersistMana { effect } => {
+        Effect::PersistMana {
+            effect,
+            until_end_of_combat,
+        } => {
             let before: BTreeMap<PlayerId, [u16; 6]> = state
                 .players
                 .iter()
                 .map(|(id, p)| (*id, p.mana.amounts))
                 .collect();
             resolve(state, cards, log, effect, rc)?;
+            let kept_mana = if *until_end_of_combat {
+                &mut state.combat_mana
+            } else {
+                &mut state.persistent_mana
+            };
             for (id, p) in &state.players {
                 let was = before.get(id).copied().unwrap_or_default();
-                let kept = state.persistent_mana.entry(*id).or_default();
+                let kept = kept_mana.entry(*id).or_default();
                 for slot in 0..6 {
                     kept[slot] += p.mana.amounts[slot].saturating_sub(was[slot]);
                 }
             }
-            state
-                .persistent_mana
-                .retain(|_, k| k.iter().any(|n| *n > 0));
+            kept_mana.retain(|_, k| k.iter().any(|n| *n > 0));
             Ok(())
         }
         Effect::ReanimateAttach { what } => {
@@ -730,6 +736,7 @@ fn resolve_inner(
                 },
                 log,
             );
+            prepare_entry_copy(state, cards, log, rc, returned)?;
             let pay = enter_choice(state, cards, rc, returned)?;
             entered(state, cards, log, returned, cause, pay);
             Ok(())
@@ -853,6 +860,7 @@ fn resolve_inner(
                     .is_some_and(|f| f.name == name);
                 if named {
                     if let Some(new_id) = move_to(state, log, top, Zone::Battlefield, cause) {
+                        prepare_entry_copy(state, cards, log, rc, new_id)?;
                         let pay = enter_choice(state, cards, rc, new_id)?;
                         entered(state, cards, log, new_id, cause, pay);
                     }
@@ -1696,17 +1704,11 @@ fn resolve_inner(
                             log,
                         );
                     }
+                    prepare_entry_copy(state, cards, log, rc, new_id)?;
                     let pay = enter_choice(state, cards, rc, new_id)?;
                     entered(state, cards, log, new_id, cause, pay);
-                    if *tapped {
-                        if !enters_untapped(state, cards, new_id) {
-                            apply::apply(
-                                state,
-                                cause,
-                                Event::EnteredTapped { object: new_id },
-                                log,
-                            );
-                        }
+                    if *tapped && !enters_untapped(state, cards, new_id) {
+                        apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
                     }
                 }
                 moved.push(Target::Object(new_id));
@@ -2256,17 +2258,11 @@ fn resolve_inner(
                 if let Some(new_id) = move_to_at(state, log, *id, *take_to, index, cause)
                     && *take_to == Zone::Battlefield
                 {
+                    prepare_entry_copy(state, cards, log, rc, new_id)?;
                     let pay = enter_choice(state, cards, rc, new_id)?;
                     entered(state, cards, log, new_id, cause, pay);
-                    if *tapped {
-                        if !enters_untapped(state, cards, new_id) {
-                            apply::apply(
-                                state,
-                                cause,
-                                Event::EnteredTapped { object: new_id },
-                                log,
-                            );
-                        }
+                    if *tapped && !enters_untapped(state, cards, new_id) {
+                        apply::apply(state, cause, Event::EnteredTapped { object: new_id }, log);
                     }
                 }
             }
@@ -3381,6 +3377,7 @@ fn resolve_inner(
             of,
             count,
             controller,
+            except,
         } => {
             let (originals, players) = with_ctx(state, cards, rc, |ctx| {
                 Ok((eval::objects(ctx, of)?, eval::players(ctx, controller)?))
@@ -3395,6 +3392,8 @@ fn resolve_inner(
             }) else {
                 return Ok(());
             };
+            let mut modifications = copy_modifications(state, originals[0]);
+            modifications.extend(except.iter().cloned());
             let n = value_asking(state, cards, rc, count)?.max(0);
             let mut made = Vec::new();
             for p in players {
@@ -3426,7 +3425,18 @@ fn resolve_inner(
                             log,
                         );
                     }
-                    entered(state, cards, log, object, cause, None);
+                    add_copy_modifications(
+                        state,
+                        log,
+                        object,
+                        p,
+                        &modifications,
+                        Duration::Permanent,
+                        cause,
+                    );
+                    prepare_entry_copy(state, cards, log, rc, object)?;
+                    let answer = enter_choice(state, cards, rc, object)?;
+                    entered(state, cards, log, object, cause, answer);
                     made.push(Target::Object(object));
                 }
             }
@@ -3707,9 +3717,29 @@ fn resolve_inner(
 
         Effect::CounterSpell { what, exile } => {
             let ids = with_ctx(state, cards, rc, |ctx| eval::objects(ctx, what))?;
+            let mut sources = Vec::new();
             for id in ids {
+                let source = state
+                    .objects
+                    .get(&id)
+                    .filter(|o| o.zone.zone == Zone::Stack)
+                    .and_then(|o| o.cast_context.as_ref())
+                    .filter(|c| c.ability.is_some())
+                    .and_then(|c| c.source)
+                    .filter(|source| {
+                        state
+                            .objects
+                            .get(source)
+                            .is_some_and(|o| o.zone.zone == Zone::Battlefield)
+                    });
                 counter_object(state, cards, log, id, *exile, cause);
+                if !state.objects.contains_key(&id)
+                    && let Some(source) = source
+                {
+                    sources.push(Target::Object(source));
+                }
             }
+            rc.bindings.insert(Binding::COUNTERED_SOURCES, sources);
             Ok(())
         }
         Effect::PhaseOut { what } => {
@@ -4383,6 +4413,58 @@ fn resolve_output(out: &ManaOutput, rc: &ResolveCtx) -> (Option<mtg_core::Color>
             };
             (c, n)
         }
+    }
+}
+
+/// Copy exceptions belong to layer 1 and are inherited by later copies. Other
+/// continuous effects (including ordinary pumps and granted abilities) are not.
+pub(crate) fn copy_modifications(
+    state: &GameState,
+    object: ObjectId,
+) -> Vec<mtg_ir::effect::Modification> {
+    state
+        .objects
+        .get(&object)
+        .or_else(|| state.last_known.get(&object))
+        .map(|o| o.copy_modifications.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn add_copy_modifications(
+    state: &mut GameState,
+    log: &mut Vec<StampedEvent>,
+    object: ObjectId,
+    controller: PlayerId,
+    modifications: &[mtg_ir::effect::Modification],
+    duration: Duration,
+    cause: Cause,
+) {
+    if let Some(obj) = state.objects.get_mut(&object) {
+        obj.copy_modifications.extend_from_slice(modifications);
+    }
+    for modification in modifications {
+        let id = state.new_object_id();
+        let timestamp = state.bump();
+        state.continuous.push(ContinuousEffect {
+            id,
+            source: object,
+            affected: AffectedSet::Fixed(vec![object]),
+            modification: modification.clone(),
+            duration,
+            timestamp,
+            layer: crate::layers::layer::COPY,
+            ability: None,
+            controller: Some(controller),
+        });
+        apply::apply(
+            state,
+            cause,
+            Event::ContinuousEffectBegan {
+                effect: id,
+                source: object,
+            },
+            log,
+        );
     }
 }
 
@@ -5085,7 +5167,9 @@ pub(crate) fn layer_of(m: &mtg_ir::effect::Modification) -> u8 {
         M::NoManaCost => layer::COPY,
         M::AddColors(_) | M::SetColors(_) => layer::COLOR,
         M::GrantAbility(_) | M::LoseAllAbilities | M::LoseKeyword(_) => layer::ABILITY,
-        M::SetBasePowerToughness { .. } | M::SetBasePower(_) => layer::PT_SET,
+        M::SetBasePowerToughness { .. } | M::SetBasePower(_) | M::SetBaseToughness(_) => {
+            layer::PT_SET
+        }
         M::ModifyPowerToughness { .. } => layer::PT_MODIFY,
         M::SwitchPowerToughness => layer::PT_SWITCH,
         // Restrictions apply outside the characteristic layers; parked at the
@@ -5982,6 +6066,12 @@ pub(crate) fn discard(
 ) -> Option<ObjectId> {
     let obj = state.objects.get(&id)?;
     let (from, owner) = (obj.zone, obj.owner);
+    let mayhem = cards.face(obj.card, obj.face).is_some_and(|f| {
+        f.abilities.iter().any(|a| {
+            matches!(&a.kind, mtg_ir::AbilityKind::CastFrom { cost, .. }
+            if cost.timing.contains(&mtg_ir::trigger::Condition::DiscardedThisTurn))
+        })
+    });
     let madness = cards.face(obj.card, obj.face).is_some_and(|f| {
         f.abilities.iter().any(|a| {
             matches!(
@@ -6009,6 +6099,13 @@ pub(crate) fn discard(
         },
         log,
     );
+    if mayhem
+        && from.zone == Zone::Hand
+        && let Some(card) = state.objects.get_mut(&new_object)
+        && card.zone.zone == Zone::Graveyard
+    {
+        card.discarded_turn = Some(state.turn);
+    }
     if madness {
         apply::apply(
             state,
@@ -6329,6 +6426,96 @@ pub(crate) fn enters_if_discards(
 }
 
 /// Ask, during a resolution, a permanent's enter question.
+/// Entry copies also apply when a permanent is blinked, reanimated or searched
+/// onto the battlefield. Its controller chooses, even during someone else's spell.
+fn prepare_entry_copy(
+    state: &mut GameState,
+    cards: &dyn PrintedCards,
+    log: &mut Vec<StampedEvent>,
+    rc: &mut ResolveCtx,
+    id: ObjectId,
+) -> Result<(), ResolveError> {
+    use mtg_ir::{AbilityKind, ObjectFilter, effect::ReplacementKind};
+    let Some(obj) = state.objects.get(&id).filter(|o| !o.face_down) else {
+        return Ok(());
+    };
+    let controller = obj.controller;
+    let Some((of, optional, except, temporary)) = cards.face(obj.card, obj.face).and_then(|f| {
+        f.abilities.iter().find_map(|a| match &a.kind {
+            AbilityKind::ReplacementEffect(r) => match &r.kind {
+                ReplacementKind::EntersAsCopy {
+                    of,
+                    optional,
+                    except,
+                    until_end_of_turn,
+                } => Some((of.clone(), *optional, except.clone(), *until_end_of_turn)),
+                _ => None,
+            },
+            _ => None,
+        })
+    }) else {
+        return Ok(());
+    };
+    let saved = (rc.source, rc.controller);
+    rc.source = id;
+    rc.controller = controller;
+    let chosen = objects_asking(
+        state,
+        cards,
+        rc,
+        &Selector::ChosenBy {
+            chooser: Box::new(Selector::You),
+            zone: Zone::Battlefield,
+            filter: ObjectFilter::And(vec![of, ObjectFilter::Not(Box::new(ObjectFilter::IsSelf))]),
+            count: mtg_ir::Value::ONE,
+            up_to: optional,
+        },
+    );
+    (rc.source, rc.controller) = saved;
+    let Some(chosen) = chosen?.first().copied() else {
+        return Ok(());
+    };
+    let Some(original) = state.objects.get(&chosen) else {
+        return Ok(());
+    };
+    let (card, face, size) = (original.card, original.face, original.token_size);
+    let mut modifications = copy_modifications(state, chosen);
+    modifications.extend(except);
+    let cause = Cause::Resolution(rc.source);
+    apply::apply(
+        state,
+        cause,
+        Event::BecameCopy {
+            object: id,
+            card,
+            face,
+        },
+        log,
+    );
+    if let Some((power, toughness)) = size {
+        apply::apply(
+            state,
+            cause,
+            Event::TokenSizeSet {
+                object: id,
+                power,
+                toughness,
+            },
+            log,
+        );
+    }
+    let duration = if temporary {
+        Duration::UntilEndOfTurn
+    } else {
+        Duration::Permanent
+    };
+    add_copy_modifications(state, log, id, controller, &modifications, duration, cause);
+    if let Some(obj) = state.objects.get_mut(&id) {
+        obj.copy_until_end_of_turn = temporary;
+    }
+    Ok(())
+}
+
 pub(crate) fn enter_choice(
     state: &GameState,
     cards: &dyn PrintedCards,

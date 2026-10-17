@@ -107,6 +107,8 @@ impl Binding {
     /// Cards actually discarded by the most recent discard instruction.
     pub const DISCARDED: Self = Binding::Named(u16::MAX - 13);
     pub const LINKED_EXILE: Self = Binding::Named(u16::MAX - 14);
+    /// Battlefield sources whose abilities were actually countered by an instruction.
+    pub const COUNTERED_SOURCES: Self = Binding::Named(u16::MAX - 15);
 }
 
 /// A predicate over objects. Composable so that printed text maps structurally.
@@ -197,6 +199,9 @@ pub enum ObjectFilter {
     IsSpell,
     /// A spell cast from this zone ("a spell from your graveyard").
     CastFromZone(mtg_core::Zone),
+    /// A permanent that entered from a spell that was cast, rather than a copy
+    /// of a permanent spell or a direct move to the battlefield.
+    WasCast,
     /// A kicked spell (CR 702.33d).
     Kicked,
     /// "With {X} in its mana cost".

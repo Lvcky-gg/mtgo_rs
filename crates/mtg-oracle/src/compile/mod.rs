@@ -1335,7 +1335,79 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
         )]))
     };
     let line = words::strip_ability_word(line);
+    if line == "~ enters tapped and doesn't untap during your untap step." {
+        let Line::Abilities(mut first) = compile_line("~ enters tapped.", face, &mut cx.fresh())?
+        else {
+            return None;
+        };
+        let Line::Abilities(second) = compile_line(
+            "~ doesn't untap during your untap step.",
+            face,
+            &mut cx.fresh(),
+        )?
+        else {
+            return None;
+        };
+        first.extend(second);
+        return Some(Line::Abilities(first));
+    }
+    if face.card_types.contains(&CardType::Creature)
+        && let Some(kind) = firebending(line.trim_end_matches('.'))
+    {
+        return one(kind, cx);
+    }
+    // The power definition contains a comma, so keep it with the parameterized keyword.
+    if let Some((keywords, parameter)) = line.trim_end_matches('.').split_once(", firebending ")
+        && let Some(mut list) = keyword_line(keywords, cx)
+        && let Some(fire) = firebending(&format!("firebending {parameter}"))
+    {
+        list.push(fire);
+        return Some(Line::Abilities(
+            list.into_iter().map(|kind| (kind, Vec::new())).collect(),
+        ));
+    }
 
+    if let Some(rest) = line.strip_prefix("power-up — ") {
+        // Hybrid and Phyrexian cost-reduction choices need announcement support.
+        // Keep those cards blocked rather than selecting a payment half silently.
+        let simple = |mana: &mtg_core::ManaCost| {
+            mana.symbols.iter().all(|s| {
+                matches!(
+                    s,
+                    mtg_core::ManaSymbol::Generic(_)
+                        | mtg_core::ManaSymbol::Colored(_)
+                        | mtg_core::ManaSymbol::Colorless
+                        | mtg_core::ManaSymbol::Variable
+                )
+            })
+        };
+        let printed = mtg_core::ManaCost {
+            symbols: Vec::new(),
+        };
+        let printed = if face.mana_cost.is_empty() {
+            printed
+        } else {
+            let (mana, "") = mana_cost(&face.mana_cost.to_lowercase())? else {
+                return None;
+            };
+            mana
+        };
+        if !simple(&printed) {
+            return None;
+        }
+        let mut kind = activated(rest, cx)?;
+        if let AbilityKind::Activated {
+            cost,
+            timing: timing @ ActivationTiming::Instant,
+            ..
+        } = &mut kind
+            && simple(&cost.mana)
+        {
+            *timing = ActivationTiming::PowerUp;
+            return one(kind, cx);
+        }
+        return None;
+    }
     // CR 702.177 — "Exhaust — {2}{R}: …": activated only once. CR 702.142 — "Boast —
     // {1}{R}: …": only if this creature attacked this turn, and only once each turn.
     for (lead, boast) in [("exhaust — ", false), ("boast — ", true)] {
@@ -2120,6 +2192,7 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
         let inner = std::mem::replace(effect, Effect::Nothing);
         *effect = Effect::PersistMana {
             effect: Box::new(inner),
+            until_end_of_combat: false,
         };
         return Some(Line::Abilities(list));
     }
@@ -2436,6 +2509,23 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
             cx,
         );
     }
+    if let Some(r) = line.trim_end_matches('.').strip_prefix("mayhem ")
+        && let Some((mana, "")) = mana_cost(r)
+    {
+        return one(
+            AbilityKind::CastFrom {
+                zone: Zone::Graveyard,
+                cost: Cost {
+                    mana,
+                    timing: vec![mtg_ir::trigger::Condition::DiscardedThisTurn],
+                    ..Cost::free()
+                },
+                exile: false,
+                transformed: false,
+            },
+            cx,
+        );
+    }
     // CR 702.34 — "flashback {2}{R}": cast from the graveyard for that, then exile it.
     if let Some(r) = line
         .strip_prefix("flashback ")
@@ -2624,6 +2714,18 @@ fn compile_line(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Line> {
             },
             targets,
         )]));
+    }
+    // Choosing one color for the entire production uses the same mana-choice
+    // machinery as "mana of any one color", including automatic payment.
+    if let Some((input, output)) = line.split_once(": ")
+        && let Some(per) =
+            output.strip_prefix("choose a color. add one mana of that color for each ")
+    {
+        return compile_line(
+            &format!("{input}: add one mana of any color for each {per}"),
+            face,
+            cx,
+        );
     }
     if let Some(outputs) = mana_line(line) {
         return Some(Line::Abilities(vec![mana_ability(outputs)]));
@@ -3300,6 +3402,44 @@ fn capitalise(w: &str) -> String {
 
 // ---- keywords and mana -----------------------------------------------------
 
+/// Firebending's attack trigger, including its fixed combat-long mana duration.
+fn firebending(line: &str) -> Option<AbilityKind> {
+    let r = line.strip_prefix("firebending ")?;
+    let amount = if r == "x, where x is ~'s power" {
+        Value::Power(Box::new(Selector::SelfSource))
+    } else {
+        let (n, "") = words::number(r)? else {
+            return None;
+        };
+        if n < 0 {
+            return None;
+        }
+        Value::Fixed(n)
+    };
+    Some(AbilityKind::Triggered {
+        trigger: Trigger {
+            on: EventPattern::Attacks {
+                who: ObjectFilter::IsSelf,
+            },
+            functions_from: Zone::Battlefield,
+            intervening_if: None,
+            optional: false,
+            limit: None,
+            timing: TriggerTiming::Normal,
+        },
+        effect: Effect::PersistMana {
+            effect: Box::new(Effect::AddMana {
+                who: Selector::You,
+                produces: vec![mtg_ir::effect::ManaOutput::Repeated {
+                    output: Box::new(mtg_ir::effect::ManaOutput::Colored(mtg_core::Color::Red)),
+                    amount,
+                }],
+            }),
+            until_end_of_combat: true,
+        },
+    })
+}
+
 /// A line that is only keywords: "flying, vigilance", "protection from red".
 fn keyword_line(line: &str, cx: &Cx) -> Option<Vec<AbilityKind>> {
     let line = line.trim_end_matches('.');
@@ -3309,6 +3449,25 @@ fn keyword_line(line: &str, cx: &Cx) -> Option<Vec<AbilityKind>> {
             words::keyword(w)
                 .map(AbilityKind::Keyword)
                 .or_else(|| protection(w, cx))
+                .or_else(|| {
+                    w.strip_prefix("hexproof from ").and_then(|quality| {
+                        Some(AbilityKind::Static {
+                            what: Selector::SelfSource,
+                            modification: Modification::Restriction(Restriction::HexproofFrom(
+                                protection_quality(quality, cx)?,
+                            )),
+                            condition: None,
+                        })
+                    })
+                })
+                .or_else(|| {
+                    if w == "prowess" {
+                        keyword_trigger(w)
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| firebending(w))
                 .or_else(|| ward(w))
                 .or_else(|| toxic(w))
         })
@@ -3393,6 +3552,11 @@ pub(crate) fn protection_quality(q: &str, cx: &Cx) -> Option<ObjectFilter> {
         ObjectFilter::HasColor(c)
     } else if let Some((a, b)) = q.split_once(" and from ") {
         ObjectFilter::Or(vec![protection_quality(a, cx)?, protection_quality(b, cx)?])
+    } else if let Some((a, b)) = q.split_once(" and ")
+        && let Some(a) = protection_quality(a, cx)
+        && let Some(b) = protection_quality(b, cx)
+    {
+        ObjectFilter::Or(vec![a, b])
     } else {
         let (noun, rest) = nouns::noun(q, cx)?;
         if !rest.is_empty() || !noun.plural {
@@ -3850,13 +4014,14 @@ fn equip(line: &str) -> Option<(AbilityKind, Vec<TargetSpec>)> {
 
 /// "~ enters tapped.", "~ enters with two +1/+1 counters on it."
 /// "You may have this creature enter as a copy of any creature on the battlefield." (CR
-/// 707.9) A copy with exceptions ("except it's a Rogue …") is refused: the exceptions
-/// would need an overlay on the copied values.
+/// 707.9), including copiable exceptions and temporary entry copies.
 fn enters_as_copy(line: &str, face: &FaceText, cx: &Cx) -> Option<AbilityKind> {
     if !face.card_types.iter().any(|t| t.is_permanent()) {
         return None;
     }
-    let r = line.strip_prefix("you may have ~ enter as a copy of ")?;
+    let r = line
+        .strip_prefix("you may have ~ enter as a copy of ")
+        .or_else(|| line.strip_prefix("as ~ enters, you may have it become a copy of "))?;
     let r = r
         .strip_prefix("any ")
         .or_else(|| r.strip_prefix("an "))
@@ -3875,6 +4040,10 @@ fn enters_as_copy(line: &str, face: &FaceText, cx: &Cx) -> Option<AbilityKind> {
     // it's an artifact in addition to its other types" (Phyrexian Metamorph), "except it
     // has flying". A type it becomes instead of its own ("it's a Vehicle artifact … and it
     // loses all other card types") is a different shape, refused.
+    let (until_end_of_turn, rest) = match rest.strip_prefix(" until end of turn") {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
     let mut except = Vec::new();
     let rest = match rest.strip_prefix(", except ") {
         Some(r) => {
@@ -3903,6 +4072,7 @@ fn enters_as_copy(line: &str, face: &FaceText, cx: &Cx) -> Option<AbilityKind> {
         kind: ReplacementKind::EntersAsCopy {
             of: filter,
             optional: true,
+            until_end_of_turn,
             except,
         },
     }))
@@ -5950,6 +6120,7 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
     }
     for (phrase, timing) in [
         (" enters or attacks", normal),
+        (" enters or dies", leaves),
         (" enters the battlefield under your control", normal),
         (" enters", normal),
         (" enters the battlefield", normal),
@@ -5991,6 +6162,10 @@ fn trigger_condition<'s>(line: &'s str, cx: &mut Cx) -> Option<Condition<'s>> {
             " enters or attacks" => EventPattern::AnyOf(vec![
                 EventPattern::Enters { who: who.clone() },
                 EventPattern::Attacks { who },
+            ]),
+            " enters or dies" => EventPattern::AnyOf(vec![
+                EventPattern::Enters { who: who.clone() },
+                EventPattern::Dies { who },
             ]),
             " dies" | " is put into a graveyard from the battlefield" => EventPattern::Dies { who },
             " leaves the battlefield" => EventPattern::Leaves { who },
@@ -6970,6 +7145,13 @@ fn statics(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>>
             _ => r,
         };
         (r, Some(cond))
+    } else if let Some((head, tail)) = line.split_once(" if ")
+        && (head.ends_with(" doesn't untap during your untap step")
+            || head.ends_with(" doesn't untap during its controller's untap step"))
+        && !line.contains('"')
+        && let Some((cond, "")) = conditions::condition(tail, cx)
+    {
+        (head, Some(cond))
     } else if let Some((head, tail)) = line.split_once(" as long as ") {
         let (cond, r) = conditions::condition(tail, cx)?;
         if !r.is_empty() {
@@ -7029,6 +7211,38 @@ fn statics(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>>
 }
 
 fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec<AbilityKind>> {
+    if line == "~ isn't a creature" && face.card_types.contains(&CardType::Creature) {
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::RemoveTypes(vec![CardType::Creature]),
+            condition: None,
+        }]);
+    }
+    if line == "~ isn't legendary if it's a token" {
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::RemoveSupertype(mtg_core::Supertype::Legendary),
+            condition: Some(mtg_ir::trigger::Condition::AnyMatches {
+                what: Selector::SelfSource,
+                filter: ObjectFilter::Token,
+            }),
+        }]);
+    }
+    if let Some(noun) = line.strip_suffix(" have melee")
+        && let Some((who, true, "")) = nouns::object(noun, cx)
+        && let Some(abilities) = quoted_abilities("melee", cx)
+    {
+        return Some(
+            abilities
+                .into_iter()
+                .map(|ability| AbilityKind::Static {
+                    what: who.clone(),
+                    modification: Modification::GrantAbility(Box::new(ability)),
+                    condition: None,
+                })
+                .collect(),
+        );
+    }
     // "During your turn, this Vehicle is an artifact creature": its printed power and
     // toughness apply, as when it is crewed.
     if line == "~ is an artifact creature" && face.subtypes.iter().any(|s| s == "Vehicle") {
@@ -7468,6 +7682,7 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
             modification: Modification::Restriction(Restriction::ExtraTrigger {
                 sources: noun.filter,
                 entering: None,
+                dying: None,
             }),
             condition: None,
         }]);
@@ -7482,6 +7697,7 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
             modification: Modification::Restriction(Restriction::ExtraTrigger {
                 sources: ObjectFilter::AttachedToSelf,
                 entering: None,
+                dying: None,
             }),
             condition: None,
         }]);
@@ -7492,7 +7708,13 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
     if let Some(r) = line
         .strip_prefix("if a ")
         .or_else(|| line.strip_prefix("if an "))
-        && let Some((what, r)) = r.split_once(" entering causes a triggered ability of ")
+        && let Some((what, r, dies)) = r
+            .split_once(" entering causes a triggered ability of ")
+            .map(|(what, r)| (what, r, false))
+            .or_else(|| {
+                r.split_once(" dying causes a triggered ability of ")
+                    .map(|(what, r)| (what, r, true))
+            })
         && r == "a permanent you control to trigger, that ability triggers an additional time"
         && let Some((what, "")) = nouns::noun(what, cx)
         && what.zone == Zone::Battlefield
@@ -7502,7 +7724,8 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
             what: Selector::SelfSource,
             modification: Modification::Restriction(Restriction::ExtraTrigger {
                 sources: permanent.filter,
-                entering: Some(what.filter),
+                entering: (!dies).then(|| what.filter.clone()),
+                dying: dies.then_some(what.filter),
             }),
             condition: None,
         }]);
@@ -7573,6 +7796,16 @@ fn statics_unconditional(line: &str, face: &FaceText, cx: &mut Cx) -> Option<Vec
     }
     // Tarmogoyf: "~'s power is equal to the number of card types among cards in all
     // graveyards and its toughness is equal to that number plus 1."
+    if let Some(r) = line.strip_prefix("~'s toughness is equal to ")
+        && face.card_types.contains(&CardType::Creature)
+        && let Some((v, "")) = clauses::value_phrase(r, cx)
+    {
+        return Some(vec![AbilityKind::Static {
+            what: Selector::SelfSource,
+            modification: Modification::SetBaseToughness(v),
+            condition: None,
+        }]);
+    }
     if let Some(r) = line.strip_prefix("~'s power is equal to ")
         && face.card_types.contains(&CardType::Creature)
         && let Some((v, r)) = clauses::value_phrase(r, cx)
@@ -8228,6 +8461,36 @@ fn names_itself_in_quotes(face: &FaceText) -> bool {
 /// "You may cast creature spells as though they had flash." (CR 702.8d), and a spell's
 /// own "You may cast this spell as though it had flash if you control a Human."
 fn flash_permission(line: &str, cx: &Cx) -> Option<AbilityKind> {
+    if line == "creature cards you own that aren't on the battlefield have flash" {
+        return Some(AbilityKind::Static {
+            what: Selector::Union(
+                [
+                    Zone::Library,
+                    Zone::Hand,
+                    Zone::Graveyard,
+                    Zone::Stack,
+                    Zone::Exile,
+                    Zone::Command,
+                ]
+                .into_iter()
+                .map(|zone| Selector::All {
+                    zone,
+                    filter: ObjectFilter::And(vec![
+                        ObjectFilter::HasType(CardType::Creature),
+                        ObjectFilter::OwnedBy(Box::new(Selector::You)),
+                    ]),
+                })
+                .collect(),
+            ),
+            modification: Modification::GrantAbility(Box::new(Ability {
+                id: AbilityId(0),
+                kind: AbilityKind::Keyword(mtg_core::Keyword::Flash),
+                targets: Vec::new(),
+                source_text: None,
+            })),
+            condition: None,
+        });
+    }
     let flash = |f| Modification::Restriction(Restriction::FlashFor(f));
     if let Some(r) = line.strip_prefix("you may cast ~ as though it had flash if ") {
         let (cond, "") = conditions::condition(r, cx)? else {

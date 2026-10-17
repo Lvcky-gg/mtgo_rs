@@ -5,7 +5,9 @@ the learning plan in `docs/bot-strength.md`. `deck_pool` example builds a pool o
 MTGO lists (cached pages, rate-limited); `search/encode.rs` encodes positions from one seat
 (opponent hand = count only); `selfplay` example records shards; `tools/learn/train_value.py`
 trains a value net that `search/value.rs` evaluates (`Searcher.value`, arena `--value`).
-Held-out log loss 0.441 vs 0.573 for a global-feature logistic; arena verdict pending.
+Held-out log loss 0.441 vs 0.573 for a global-feature logistic. Arena (Pauper, 64 games each):
+searcher +177 Elo vs heuristic with the linear eval, +163 with the net (paired −1.6% ± 9.1%,
+no difference), net 33% faster per decision. Arena now has `--game-seconds` and per-pair lines.
 `Budget.max_choices` default 2,000 → 400 (playouts in looping games); the arena now searches at
 most 600 decisions per game. Training env: `~/.local/share/mtgo_rs/venv` (CPU torch).
 

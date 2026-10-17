@@ -695,7 +695,7 @@ pub fn ability_cost(
     ability: mtg_core::AbilityId,
 ) -> Option<mtg_ir::Cost> {
     match &crate::abilities::find(state, cards, source, ability)?.kind {
-        mtg_ir::AbilityKind::Activated { cost, .. } => {
+        mtg_ir::AbilityKind::Activated { cost, timing, .. } => {
             let mut cost = cost.clone();
             if let Some(amount) = &cost.activation_reduction {
                 let chars = ComputedChars(cards);
@@ -714,10 +714,38 @@ pub fn ability_cost(
                 cost.mana = apply_delta(cost.mana, 0, i64::from(reduction));
             }
             cost.mana = ability_cost_modifiers(state, cards, source, cost.mana);
+            if *timing == mtg_ir::ability::ActivationTiming::PowerUp
+                && state.objects.get(&source)?.entered_turn == Some(state.turn)
+            {
+                let discount = crate::layers::compute(state, cards, source)?.mana_cost;
+                cost.mana = power_up_discount(cost.mana, &discount)?;
+            }
             Some(cost)
         }
         _ => None,
     }
+}
+
+/// CR 702.193b: like types cancel first; excess colored/colorless mana reduces
+/// generic mana. X in a permanent's mana cost is zero. Choice-bearing symbols
+/// remain unsupported rather than choosing a half without player input.
+fn power_up_discount(mut cost: ManaCost, discount: &ManaCost) -> Option<ManaCost> {
+    let mut generic = 0i64;
+    for symbol in &discount.symbols {
+        match symbol {
+            ManaSymbol::Generic(n) => generic += i64::from(*n),
+            ManaSymbol::Variable => {}
+            ManaSymbol::Colored(_) | ManaSymbol::Colorless => {
+                if let Some(at) = cost.symbols.iter().position(|s| s == symbol) {
+                    cost.symbols.remove(at);
+                } else {
+                    generic += 1;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(apply_delta(cost, 0, generic))
 }
 
 /// Statics changing what a permanent's activated abilities cost: "Activated abilities of
@@ -1337,9 +1365,40 @@ pub fn graveyard_cast_now(
     face: u8,
 ) -> Option<(ManaCost, bool)> {
     let obj = state.objects.get(&object)?;
-    graveyard_cast(cards, obj.card, face).or_else(|| {
-        granted_escape(state, cards, object, face).map(|(mana, _, exile)| (mana, exile))
-    })
+    graveyard_cast(cards, obj.card, face)
+        .or_else(|| {
+            conditional_graveyard_cost(state, cards, object, face)
+                .map(|(cost, exile)| (cost.mana, exile))
+        })
+        .or_else(|| {
+            granted_escape(state, cards, object, face).map(|(mana, _, exile)| (mana, exile))
+        })
+}
+
+fn conditional_graveyard_cost(
+    state: &GameState,
+    cards: &dyn PrintedCards,
+    object: ObjectId,
+    face: u8,
+) -> Option<(mtg_ir::Cost, bool)> {
+    let obj = state.objects.get(&object)?;
+    cards
+        .face(obj.card, face)?
+        .abilities
+        .iter()
+        .find_map(|a| match &a.kind {
+            mtg_ir::AbilityKind::CastFrom {
+                zone: mtg_core::Zone::Graveyard,
+                cost,
+                exile,
+                transformed: false,
+            } if !cost.timing.is_empty()
+                && conditions_hold(state, cards, object, obj.owner, &cost.timing) =>
+            {
+                Some((cost.clone(), *exile))
+            }
+            _ => None,
+        })
 }
 
 /// [`cast_from_additional`] for a particular object cast from its graveyard: the printed
@@ -1357,6 +1416,9 @@ pub fn graveyard_additional_now(
         && let Some(f) = cards.face(obj.card, face)
     {
         return cast_from_additional(f, mtg_core::Zone::Graveyard);
+    }
+    if let Some((cost, _)) = conditional_graveyard_cost(state, cards, object, face) {
+        return cost;
     }
     granted_escape(state, cards, object, face)
         .map(|(_, extra, _)| extra)

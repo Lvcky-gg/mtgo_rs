@@ -523,7 +523,6 @@ pub fn strip_ability_word(line: &str) -> &str {
     // keyword whose dash introduces a cost ("Boast — {1}{R}: …") or a condition ("Max speed
     // — …"), not a saga chapter ("I, II — …"), and only a few plain words.
     if let Some((word, rest)) = line.split_once(" — ")
-        && !rest.starts_with('{')
         && !word.is_empty()
         && word.split(' ').count() <= 5
         && word
@@ -536,10 +535,12 @@ pub fn strip_ability_word(line: &str) -> &str {
             "max speed",
             "boast",
             "exhaust",
+            "power-up",
             "forecast",
             "level up",
             "choose one",
             "choose two",
+            "ward",
         ]
         .iter()
         .any(|k| word.to_lowercase().starts_with(k))

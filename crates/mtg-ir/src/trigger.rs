@@ -357,6 +357,8 @@ pub enum Condition {
     /// The source permanent was cast — "if you cast it" — from this zone, when given
     /// ("if you cast it from your hand").
     WasCast(Option<mtg_core::Zone>),
+    /// Mayhem: this particular card was discarded during the current turn.
+    DiscardedThisTurn,
     /// The source Class is at least this level (CR 716.2); a Class starts at level 1.
     ClassLevelAtLeast(u8),
     /// The controller attacked with a creature this turn (raid).

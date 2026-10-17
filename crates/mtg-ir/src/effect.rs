@@ -133,6 +133,9 @@ pub enum Effect {
     /// (Birgi): the mana `effect` adds stays in its player's pool until the turn ends.
     PersistMana {
         effect: Box<Effect>,
+        /// Firebending keeps this mana through combat, rather than the whole turn.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        until_end_of_combat: bool,
     },
     /// "Search your library for a card, exile it face down, then shuffle. If this spell was
     /// bargained, you may cast the exiled card without paying its mana cost if that spell's
@@ -599,6 +602,9 @@ pub enum Effect {
         of: Selector,
         count: Value,
         controller: Selector,
+        /// Exceptions are part of the token's copiable values (CR 707.9).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        except: Vec<Modification>,
     },
     /// CR 701.12 — "exchange control of A and B": each goes to the other's controller.
     ExchangeControl {
@@ -864,6 +870,8 @@ pub enum Modification {
     /// Layer 7a/7b — power alone set: "~'s power is equal to the number of creatures you
     /// control" (a characteristic-defining ability; toughness is printed).
     SetBasePower(Value),
+    /// A toughness-only definition, such as Daxos's devotion ability.
+    SetBaseToughness(Value),
     SetBasePowerToughness {
         power: Value,
         toughness: Value,
@@ -1132,6 +1140,9 @@ pub enum Restriction {
         /// Norn), "a land entering" (Ancient Greenwarden).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entering: Option<ObjectFilter>,
+        /// Only triggers caused by a matching permanent dying (Teysa Karlov).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dying: Option<ObjectFilter>,
     },
     /// "If you would draw a card while your library has no cards in it, you win the game
     /// instead." (Laboratory Maniac, Jace, Wielder of Mysteries)
@@ -1303,6 +1314,8 @@ pub enum ReplacementKind {
     EntersAsCopy {
         of: ObjectFilter,
         optional: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        until_end_of_turn: bool,
         /// "… except it's a Bird in addition to its other types and it has flying."
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         except: Vec<Modification>,

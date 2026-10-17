@@ -92,7 +92,7 @@ fn main() {
         dir.display()
     );
 
-    let pairings = pool::pairings(decks.len(), games, 0x5E1F_9A7);
+    let pairings = pool::pairings(decks.len(), games, 0x05E1_F9A7);
     let next = AtomicUsize::new(0);
     let (decided, positions, tokens) = (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
     let started = std::time::Instant::now();
